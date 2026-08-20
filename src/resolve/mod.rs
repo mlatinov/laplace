@@ -85,6 +85,9 @@ pub enum ResolveError {
         expected: String,
         actual: String,
     },
+
+    #[error("`{package}` is not a dependency of this project yet -- run `laplace add {package}` first")]
+    NotADependency { package: String },
 }
 
 /// A local filesystem package registry: `<root>/<name>/<version>/` folders,
@@ -219,7 +222,66 @@ pub fn add(
         }
     };
 
-    let package_dir = registry.package_dir(package, &resolved_version);
+    let locked = fetch_and_lock(lockfile_path, registry, cache_root, package, &resolved_version)?;
+    manifest::write_project_manifest(project_manifest_path, &project_manifest)?;
+
+    Ok(locked)
+}
+
+/// `laplace update <pkg>`: re-resolve `pkg` against its *existing* range in
+/// `laplace.toml`, picking the latest version that still satisfies it, and
+/// refresh its lockfile entry + cache copy. Never creates a new dependency
+/// or changes the range -- `pkg` must already be in `laplace.toml` (use
+/// `add` for that).
+pub fn update(
+    project_manifest_path: &Path,
+    lockfile_path: &Path,
+    registry: &Registry,
+    cache_root: &Path,
+    package: &str,
+) -> Result<LockedPackage, ResolveError> {
+    let project_manifest = manifest::read_project_manifest(project_manifest_path)?;
+    let Some(range) = project_manifest.dependencies.get(package) else {
+        return Err(ResolveError::NotADependency {
+            package: package.to_string(),
+        });
+    };
+
+    let req = VersionReq::parse(range).map_err(|source| ResolveError::InvalidVersionReq {
+        value: range.clone(),
+        source,
+    })?;
+
+    let available = registry.available_versions(package)?;
+    if available.is_empty() {
+        return Err(ResolveError::PackageNotInRegistry {
+            package: package.to_string(),
+            registry_root: registry.root.clone(),
+        });
+    }
+    let latest = available
+        .into_iter()
+        .filter(|v| req.matches(v))
+        .max()
+        .ok_or_else(|| ResolveError::NoMatchingVersion {
+            package: package.to_string(),
+            range: range.clone(),
+        })?;
+
+    fetch_and_lock(lockfile_path, registry, cache_root, package, &latest)
+}
+
+/// Shared tail of `add`/`update`: verify the resolved version's package
+/// manifest actually declares this name, hash its contents, copy it into
+/// the cache, and record it in `laplace.lock`.
+fn fetch_and_lock(
+    lockfile_path: &Path,
+    registry: &Registry,
+    cache_root: &Path,
+    package: &str,
+    version: &Version,
+) -> Result<LockedPackage, ResolveError> {
+    let package_dir = registry.package_dir(package, version);
     let pkg_manifest = manifest::read_package_manifest(&package_dir.join("laplace.toml"))?;
     if pkg_manifest.name != package {
         return Err(ResolveError::PackageNameMismatch {
@@ -232,7 +294,7 @@ pub fn add(
     let checksum = checksum_dir(&package_dir)?;
     let locked = LockedPackage {
         name: package.to_string(),
-        version: resolved_version.to_string(),
+        version: version.to_string(),
         checksum,
     };
 
@@ -242,8 +304,6 @@ pub fn add(
     lock.packages.retain(|p| p.name != locked.name);
     lock.packages.push(locked.clone());
     lockfile::write_lockfile(lockfile_path, &lock)?;
-
-    manifest::write_project_manifest(project_manifest_path, &project_manifest)?;
 
     Ok(locked)
 }
@@ -679,5 +739,84 @@ mod tests {
         let b = checksum_dir(&pkg_dir).unwrap();
         assert_eq!(a, b);
         assert!(a.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn update_picks_latest_version_matching_the_existing_range() {
+        let f = fixture();
+        write_package(&f.registry_root, "gps", "1.0.0", &["rbf_cov"]);
+
+        add(
+            &f.project_manifest_path,
+            &f.lockfile_path,
+            &f.registry,
+            &f.cache_root,
+            "gps",
+            None,
+        )
+        .unwrap();
+
+        // A new compatible version lands in the registry after the initial add.
+        write_package(&f.registry_root, "gps", "1.1.0", &["rbf_cov"]);
+
+        let updated = update(
+            &f.project_manifest_path,
+            &f.lockfile_path,
+            &f.registry,
+            &f.cache_root,
+            "gps",
+        )
+        .unwrap();
+
+        assert_eq!(updated.version, "1.1.0");
+        // The range itself is untouched by update.
+        let manifest = manifest::read_project_manifest(&f.project_manifest_path).unwrap();
+        assert_eq!(manifest.dependencies.get("gps").unwrap(), "^1.0.0");
+
+        let lock = lockfile::read_lockfile(&f.lockfile_path).unwrap();
+        assert_eq!(lock.packages, vec![updated]);
+    }
+
+    #[test]
+    fn update_respects_the_range_and_wont_jump_to_an_incompatible_version() {
+        let f = fixture();
+        write_package(&f.registry_root, "gps", "1.0.0", &["rbf_cov"]);
+        add(
+            &f.project_manifest_path,
+            &f.lockfile_path,
+            &f.registry,
+            &f.cache_root,
+            "gps",
+            None,
+        )
+        .unwrap();
+
+        write_package(&f.registry_root, "gps", "2.0.0", &["rbf_cov"]);
+
+        let updated = update(
+            &f.project_manifest_path,
+            &f.lockfile_path,
+            &f.registry,
+            &f.cache_root,
+            "gps",
+        )
+        .unwrap();
+        assert_eq!(updated.version, "1.0.0");
+    }
+
+    #[test]
+    fn update_on_a_package_that_was_never_added_errors() {
+        let f = fixture();
+        write_package(&f.registry_root, "gps", "1.0.0", &["rbf_cov"]);
+
+        let err = update(
+            &f.project_manifest_path,
+            &f.lockfile_path,
+            &f.registry,
+            &f.cache_root,
+            "gps",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ResolveError::NotADependency { .. }));
     }
 }
