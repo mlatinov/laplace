@@ -6,13 +6,15 @@
 //! block content. It never inspects statements *inside* a function body other
 //! than to find where the body ends.
 
+use serde::{Deserialize, Serialize};
+
 use super::brace_match::CodeMask;
 
 /// One parameter of a function signature: `(param_name, param_type)`.
 pub type Param = (String, String);
 
 /// A top-level function signature, with its doc comment if one was attached.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FunctionSig {
     pub name: String,
     pub params: Vec<Param>,
@@ -21,7 +23,7 @@ pub struct FunctionSig {
 }
 
 /// Structured content of a `// @laplace` doc comment block.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Doc {
     pub brief: Option<String>,
     /// `(param_name, description)`, in the order they appear in the comment.

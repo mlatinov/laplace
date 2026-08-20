@@ -227,3 +227,78 @@ fn build_with_no_library_block_is_a_pure_passthrough() {
     assert_eq!(project.read_project_file("build/model.stan"), source);
     assert!(stdout(&out).contains("0 dependencies"));
 }
+
+#[test]
+fn doc_renders_a_documented_function() {
+    let project = setup();
+    project.write_package(
+        "gps",
+        "1.0.0",
+        &["rbf_cov"],
+        r#"// @laplace
+// @brief Squared exponential covariance matrix.
+// @param x Vector of input locations.
+// @return An N x N covariance matrix.
+// @example rbf_cov(x, 1.0, 0.5)
+matrix rbf_cov(vector x, real alpha, real rho) {
+  return gp_exp_quad_cov(x, alpha, rho);
+}
+"#,
+    );
+    project.run(&["add", "gps"]);
+    project.run(&["install"]);
+
+    let out = project.run(&["doc", "gps::rbf_cov"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("gps::rbf_cov(x: vector, alpha: real, rho: real) -> matrix"));
+    assert!(text.contains("Squared exponential covariance matrix."));
+    assert!(text.contains("Parameters:"));
+    assert!(text.contains("Returns:"));
+    assert!(text.contains("Example:"));
+}
+
+#[test]
+fn doc_on_undocumented_function_notes_no_docs_available() {
+    let project = setup();
+    project.write_package(
+        "gps",
+        "1.0.0",
+        &["jitter"],
+        "real jitter(real epsilon) {\n  return epsilon;\n}\n",
+    );
+    project.run(&["add", "gps"]);
+    project.run(&["install"]);
+
+    let out = project.run(&["doc", "gps::jitter"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("no @laplace documentation available"));
+}
+
+#[test]
+fn doc_on_unknown_function_fails_clearly() {
+    let project = setup();
+    project.write_package("gps", "1.0.0", &["rbf_cov"], GPS_STAN);
+    project.run(&["add", "gps"]);
+    project.run(&["install"]);
+
+    let out = project.run(&["doc", "gps::nonexistent"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("nonexistent"), "{}", stderr(&out));
+}
+
+#[test]
+fn doc_on_package_never_added_fails_clearly() {
+    let project = setup();
+    let out = project.run(&["doc", "gps::rbf_cov"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("laplace.lock"), "{}", stderr(&out));
+}
+
+#[test]
+fn doc_with_malformed_spec_fails_clearly() {
+    let project = setup();
+    let out = project.run(&["doc", "not-a-valid-spec"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("package"), "{}", stderr(&out));
+}

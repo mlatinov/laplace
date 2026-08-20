@@ -46,6 +46,11 @@ enum Command {
     /// Re-resolve a dependency to the latest version matching its existing
     /// range in laplace.toml
     Update { package: String },
+    /// Print a package function's signature and doc comment
+    Doc {
+        /// `<package>::<function>`
+        spec: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -68,6 +73,7 @@ fn run() -> Result<(), CliError> {
         Command::Install => cmd_install(),
         Command::Add { package } => cmd_add(&package),
         Command::Update { package } => cmd_update(&package),
+        Command::Doc { spec } => cmd_doc(&spec),
     }
 }
 
@@ -85,6 +91,8 @@ enum CliError {
     Manifest(#[from] manifest::ManifestError),
     #[error(transparent)]
     Lockfile(#[from] resolve::lockfile::LockfileError),
+    #[error(transparent)]
+    Docs(Box<docs::DocsError>),
     #[error("{0}")]
     Message(String),
     #[error(
@@ -99,6 +107,12 @@ enum CliError {
 impl From<resolve::ResolveError> for CliError {
     fn from(err: resolve::ResolveError) -> Self {
         CliError::Resolve(Box::new(err))
+    }
+}
+
+impl From<docs::DocsError> for CliError {
+    fn from(err: docs::DocsError) -> Self {
+        CliError::Docs(Box::new(err))
     }
 }
 
@@ -164,20 +178,7 @@ fn cmd_build(file: &Path, output: Option<PathBuf>, check: bool) -> Result<(), Cl
 
 fn load_installed_package(package_dir: &Path, name: &str) -> Result<InstalledPackage, CliError> {
     let pkg_manifest = manifest::read_package_manifest(&package_dir.join("laplace.toml"))?;
-
-    let mut stan_files: Vec<PathBuf> = fs::read_dir(package_dir)?
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("stan"))
-        .collect();
-    stan_files.sort();
-
-    let mut source = String::new();
-    for path in &stan_files {
-        source.push_str(&fs::read_to_string(path)?);
-        source.push('\n');
-    }
-
+    let source = manifest::read_package_stan_source(package_dir)?;
     let signatures = parser::signatures::extract_signatures(&source);
     Ok(InstalledPackage {
         name: name.to_string(),
@@ -247,6 +248,21 @@ fn cmd_update(package: &str) -> Result<(), CliError> {
         package,
     )?;
     println!("updated {} to {}", locked.name, locked.version);
+    Ok(())
+}
+
+fn cmd_doc(spec: &str) -> Result<(), CliError> {
+    let Some((package, func)) = spec.split_once("::") else {
+        return Err(CliError::Message(format!(
+            "expected `<package>::<function>`, got `{spec}`"
+        )));
+    };
+
+    let lockfile_path = PathBuf::from("laplace.lock");
+    let cache_root = default_cache_root();
+
+    let sig = docs::lookup(&lockfile_path, &cache_root, package, func)?;
+    print!("{}", docs::render(package, &sig));
     Ok(())
 }
 

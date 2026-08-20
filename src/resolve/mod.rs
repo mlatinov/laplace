@@ -88,6 +88,9 @@ pub enum ResolveError {
 
     #[error("`{package}` is not a dependency of this project yet -- run `laplace add {package}` first")]
     NotADependency { package: String },
+
+    #[error(transparent)]
+    Docs(Box<crate::docs::DocsError>),
 }
 
 /// A local filesystem package registry: `<root>/<name>/<version>/` folders,
@@ -362,9 +365,13 @@ fn install_one(
         })?;
     }
     copy_dir_recursive(package_dir, &dest).map_err(|source| ResolveError::Io {
-        path: dest,
+        path: dest.clone(),
         source,
-    })
+    })?;
+
+    crate::docs::write_sidecar(&dest, &pkg.name, &pkg.version)
+        .map_err(|source| ResolveError::Docs(Box::new(source)))?;
+    Ok(())
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {

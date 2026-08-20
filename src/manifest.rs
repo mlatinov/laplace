@@ -105,6 +105,25 @@ pub fn read_package_manifest(path: &Path) -> Result<PackageManifest, ManifestErr
     })
 }
 
+/// Read and concatenate every `.stan` file directly inside `package_dir`, in
+/// filename order, so codegen and doc extraction always agree on what a
+/// package's source is.
+pub fn read_package_stan_source(package_dir: &Path) -> std::io::Result<String> {
+    let mut stan_files: Vec<PathBuf> = fs::read_dir(package_dir)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("stan"))
+        .collect();
+    stan_files.sort();
+
+    let mut source = String::new();
+    for path in &stan_files {
+        source.push_str(&fs::read_to_string(path)?);
+        source.push('\n');
+    }
+    Ok(source)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
