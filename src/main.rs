@@ -3,6 +3,7 @@ mod docs;
 mod manifest;
 mod parser;
 mod resolve;
+mod validate;
 
 use std::env;
 use std::fs;
@@ -37,6 +38,10 @@ enum Command {
         /// non-zero if they differ.
         #[arg(long)]
         check: bool,
+        /// After writing, type-check the output with `stanc` (must be on
+        /// PATH). Off by default so build never requires stanc installed.
+        #[arg(long)]
+        validate: bool,
     },
     /// Install every package pinned in laplace.lock
     Install,
@@ -69,7 +74,8 @@ fn run() -> Result<(), CliError> {
             file,
             output,
             check,
-        } => cmd_build(&file, output, check),
+            validate,
+        } => cmd_build(&file, output, check, validate),
         Command::Install => cmd_install(),
         Command::Add { package } => cmd_add(&package),
         Command::Update { package } => cmd_update(&package),
@@ -93,6 +99,8 @@ enum CliError {
     Lockfile(#[from] resolve::lockfile::LockfileError),
     #[error(transparent)]
     Docs(Box<docs::DocsError>),
+    #[error(transparent)]
+    Validate(Box<validate::ValidateError>),
     #[error("{0}")]
     Message(String),
     #[error(
@@ -116,7 +124,18 @@ impl From<docs::DocsError> for CliError {
     }
 }
 
-fn cmd_build(file: &Path, output: Option<PathBuf>, check: bool) -> Result<(), CliError> {
+impl From<validate::ValidateError> for CliError {
+    fn from(err: validate::ValidateError) -> Self {
+        CliError::Validate(Box::new(err))
+    }
+}
+
+fn cmd_build(
+    file: &Path,
+    output: Option<PathBuf>,
+    check: bool,
+    validate: bool,
+) -> Result<(), CliError> {
     let source = fs::read_to_string(file)?;
     let library_block = parse_library_block(&source)?;
     let imports: &[ImportStatement] = library_block
@@ -146,12 +165,12 @@ fn cmd_build(file: &Path, output: Option<PathBuf>, check: bool) -> Result<(), Cl
         installed.push(load_installed_package(&package_dir, &locked.name)?);
     }
 
-    let compiled = codegen::generate(&source, library_block.as_ref(), &installed)?;
+    let generated = codegen::generate_with_package_lines(&source, library_block.as_ref(), &installed)?;
     let output_path = output.unwrap_or_else(|| default_output_path(file));
 
     if check {
         let existing = fs::read_to_string(&output_path).unwrap_or_default();
-        if existing != compiled {
+        if existing != generated.source {
             return Err(CliError::CheckFailed(output_path));
         }
         println!("{} is up to date", output_path.display());
@@ -161,9 +180,9 @@ fn cmd_build(file: &Path, output: Option<PathBuf>, check: bool) -> Result<(), Cl
     if let Some(parent) = output_path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&output_path, &compiled)?;
+    fs::write(&output_path, &generated.source)?;
 
-    let lines = compiled.lines().count();
+    let lines = generated.source.lines().count();
     println!(
         "wrote {} ({} {}, {} {})",
         output_path.display(),
@@ -173,7 +192,18 @@ fn cmd_build(file: &Path, output: Option<PathBuf>, check: bool) -> Result<(), Cl
         pluralize(imports.len(), "dependency", "dependencies"),
     );
 
+    if validate {
+        validate::validate(&stanc_command(), &output_path, &generated)?;
+        println!("stanc: OK");
+    }
+
     Ok(())
+}
+
+/// Which `stanc` binary/command to invoke for `--validate`. Overridable via
+/// `LAPLACE_STANC` so tests never depend on a real stanc install.
+fn stanc_command() -> String {
+    env::var("LAPLACE_STANC").unwrap_or_else(|_| "stanc".to_string())
 }
 
 fn load_installed_package(package_dir: &Path, name: &str) -> Result<InstalledPackage, CliError> {

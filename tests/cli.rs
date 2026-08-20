@@ -10,6 +10,7 @@ struct Project {
     _tmp: tempfile::TempDir,
     dir: std::path::PathBuf,
     home: std::path::PathBuf,
+    extra_env: Vec<(String, String)>,
 }
 
 fn setup() -> Project {
@@ -22,6 +23,7 @@ fn setup() -> Project {
         dir,
         home,
         _tmp: tmp,
+        extra_env: Vec::new(),
     }
 }
 
@@ -55,13 +57,28 @@ impl Project {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_laplace"))
-            .args(args)
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_laplace"));
+        cmd.args(args)
             .current_dir(&self.dir)
             .env("HOME", &self.home)
-            .env_remove("LAPLACE_REGISTRY")
-            .output()
-            .expect("failed to run laplace binary")
+            .env_remove("LAPLACE_REGISTRY");
+        for (key, value) in &self.extra_env {
+            cmd.env(key, value);
+        }
+        cmd.output().expect("failed to run laplace binary")
+    }
+
+    /// Write a fake `stanc` shell script that always exits with `exit_code`
+    /// and prints `output` to stderr, and point `LAPLACE_STANC` at it, so
+    /// `--validate` tests never depend on a real stanc install.
+    fn fake_stanc(&mut self, exit_code: i32, output: &str) {
+        let script = self.dir.join("fake_stanc.sh");
+        fs::write(&script, format!("#!/bin/sh\ncat <<'EOF' 1>&2\n{output}\nEOF\nexit {exit_code}\n")).unwrap();
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        fs::set_permissions(&script, perms).unwrap();
+        self.extra_env
+            .push(("LAPLACE_STANC".to_string(), script.to_string_lossy().to_string()));
     }
 }
 
@@ -301,4 +318,77 @@ fn doc_with_malformed_spec_fails_clearly() {
     let out = project.run(&["doc", "not-a-valid-spec"]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("package"), "{}", stderr(&out));
+}
+
+#[test]
+fn build_validate_passes_through_a_successful_stanc_run() {
+    let mut project = setup();
+    project.write_package("gps", "1.0.0", &["rbf_cov"], GPS_STAN);
+    project.run(&["add", "gps"]);
+    project.run(&["install"]);
+    project.write_project_file("model.laplace", MODEL_LAPLACE);
+
+    project.fake_stanc(0, "");
+    let out = project.run(&["build", "model.laplace", "--validate"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("stanc: OK"));
+}
+
+#[test]
+fn build_validate_reports_stanc_errors_annotated_with_the_culprit_package() {
+    let mut project = setup();
+    project.write_package("gps", "1.0.0", &["rbf_cov"], GPS_STAN);
+    project.run(&["add", "gps"]);
+    project.run(&["install"]);
+    project.write_project_file("model.laplace", MODEL_LAPLACE);
+
+    // Build once (without --validate) to find out which output line the
+    // gps-contributed function actually landed on, so the fake stanc error
+    // can point at a real line inside that range.
+    project.run(&["build", "model.laplace"]);
+    let compiled = project.read_project_file("build/model.stan");
+    let gps_line = compiled
+        .lines()
+        .position(|l| l.contains("gps__rbf_cov"))
+        .unwrap()
+        + 1;
+
+    project.fake_stanc(1, &format!("Semantic error at 'model.stan', line {gps_line}, column 1"));
+    let out = project.run(&["build", "model.laplace", "--validate"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("came from package `gps`"), "{err}");
+    assert!(err.contains("Semantic error"), "{err}");
+}
+
+#[test]
+fn build_validate_without_stanc_installed_fails_clearly() {
+    let mut project = setup();
+    let source = "data {\n  int n;\n}\nmodel {\n}\n";
+    project.write_project_file("model.laplace", source);
+    project
+        .extra_env
+        .push(("LAPLACE_STANC".to_string(), "laplace-test-no-such-command".to_string()));
+
+    let out = project.run(&["build", "model.laplace", "--validate"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("not found"), "{}", stderr(&out));
+    // The build itself must still have written its output before validation ran.
+    assert_eq!(project.read_project_file("build/model.stan"), source);
+}
+
+#[test]
+fn build_check_never_invokes_validate() {
+    let mut project = setup();
+    let source = "data {\n  int n;\n}\nmodel {\n}\n";
+    project.write_project_file("model.laplace", source);
+    project.run(&["build", "model.laplace"]);
+
+    // If --validate ran here it would fail (bogus command); --check must
+    // short-circuit before ever reaching it.
+    project
+        .extra_env
+        .push(("LAPLACE_STANC".to_string(), "laplace-test-no-such-command".to_string()));
+    let out = project.run(&["build", "model.laplace", "--check", "--validate"]);
+    assert!(out.status.success(), "{}", stderr(&out));
 }

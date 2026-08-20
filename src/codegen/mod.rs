@@ -59,6 +59,25 @@ pub enum CodegenError {
     },
 }
 
+/// Which imported package (if any) contributed a given range of lines in
+/// the compiled `.stan` output -- a best-effort splice map, used by the
+/// (optional) `stanc` validation pass (Task 7) to guess which package an
+/// error near a given line likely came from. 1-indexed, inclusive on both
+/// ends, matching how `stanc` reports line numbers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageLineRange {
+    pub package: String,
+    pub lines: std::ops::RangeInclusive<usize>,
+}
+
+/// The result of [`generate_with_package_lines`]: the compiled `.stan` text
+/// plus where each imported package's spliced-in code ended up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedStan {
+    pub source: String,
+    pub package_line_ranges: Vec<PackageLineRange>,
+}
+
 /// Compile a `.laplace` source file's text into final `.stan` text.
 ///
 /// `library_block` is the parsed `library { }` block, if the source has one
@@ -76,6 +95,28 @@ pub fn generate(
     library_block: Option<&LibraryBlock>,
     installed: &[InstalledPackage],
 ) -> Result<String, CodegenError> {
+    generate_impl(source, library_block, installed).map(|(text, _)| text)
+}
+
+/// Same as [`generate`], but also reports which output lines came from
+/// which imported package -- for the `--validate` stanc pass (Task 7).
+/// Plain builds don't need this and should keep using [`generate`].
+pub fn generate_with_package_lines(
+    source: &str,
+    library_block: Option<&LibraryBlock>,
+    installed: &[InstalledPackage],
+) -> Result<GeneratedStan, CodegenError> {
+    generate_impl(source, library_block, installed).map(|(text, package_line_ranges)| GeneratedStan {
+        source: text,
+        package_line_ranges,
+    })
+}
+
+fn generate_impl(
+    source: &str,
+    library_block: Option<&LibraryBlock>,
+    installed: &[InstalledPackage],
+) -> Result<(String, Vec<PackageLineRange>), CodegenError> {
     let imports: &[ImportStatement] = library_block.map(|b| b.imports.as_slice()).unwrap_or(&[]);
 
     let mut by_name: BTreeMap<&str, &InstalledPackage> = BTreeMap::new();
@@ -115,7 +156,7 @@ pub fn generate(
         .map(|p| (p.name.as_str(), *p))
         .collect();
 
-    let mut mangled_sources: Vec<String> = Vec::new();
+    let mut mangled_sources: Vec<(String, String)> = Vec::new();
     let mut mangled_owner: BTreeMap<String, String> = BTreeMap::new();
     for pkg in &ordered_installed {
         let mut exported_sorted = pkg.exported.clone();
@@ -136,7 +177,7 @@ pub fn generate(
             mangled_owner.insert(mangled_name.clone(), pkg.name.clone());
             renamed = rename_identifier_calls(&renamed, export, &mangled_name);
         }
-        mangled_sources.push(renamed);
+        mangled_sources.push((pkg.name.clone(), renamed));
     }
 
     let mut edits: Vec<Edit> = Vec::new();
@@ -145,6 +186,7 @@ pub fn generate(
         edits.push(Edit {
             range: block.byte_range.clone(),
             replacement: String::new(),
+            splice_offset: None,
         });
     }
 
@@ -172,39 +214,90 @@ pub fn generate(
         edits.push(Edit {
             range: call.range.clone(),
             replacement: mangle(&call.package, &call.func),
+            splice_offset: None,
         });
     }
 
+    // Relative byte range of each package's renamed source *within the
+    // assembled splice text*, so it can be translated into output line
+    // numbers once we know where that text lands in the final source.
+    let mut package_ranges_in_assembled: Vec<(String, Range<usize>)> = Vec::new();
+    let mut assembled = String::new();
+    for (i, (name, src)) in mangled_sources.iter().enumerate() {
+        if i > 0 {
+            assembled.push('\n');
+        }
+        let start = assembled.len();
+        assembled.push_str(src);
+        package_ranges_in_assembled.push((name.clone(), start..assembled.len()));
+    }
+
     if !mangled_sources.is_empty() {
-        let assembled = mangled_sources.join("\n");
         match find_functions_block(source) {
-            Some(fb) => edits.push(Edit {
-                range: fb.open_brace + 1..fb.open_brace + 1,
-                replacement: format!("\n{assembled}\n"),
-            }),
-            None => edits.push(Edit {
-                range: 0..0,
-                replacement: format!("functions {{\n{assembled}\n}}\n"),
-            }),
+            Some(fb) => {
+                let prefix = "\n";
+                edits.push(Edit {
+                    range: fb.open_brace + 1..fb.open_brace + 1,
+                    replacement: format!("{prefix}{assembled}\n"),
+                    splice_offset: Some(prefix.len()),
+                });
+            }
+            None => {
+                let prefix = "functions {\n";
+                edits.push(Edit {
+                    range: 0..0,
+                    replacement: format!("{prefix}{assembled}\n}}\n"),
+                    splice_offset: Some(prefix.len()),
+                });
+            }
         }
     }
 
-    Ok(apply_edits(source, edits))
+    let (text, splice_start_in_output) = apply_edits(source, edits);
+
+    let package_line_ranges = splice_start_in_output
+        .map(|splice_start| {
+            package_ranges_in_assembled
+                .into_iter()
+                .map(|(package, rel_range)| {
+                    let abs_start = splice_start + rel_range.start;
+                    let abs_end = splice_start + rel_range.end;
+                    PackageLineRange {
+                        package,
+                        lines: line_at(&text, abs_start)..=line_at(&text, abs_end.saturating_sub(1)),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok((text, package_line_ranges))
+}
+
+/// 1-indexed line number containing byte offset `at` in `text`.
+fn line_at(text: &str, at: usize) -> usize {
+    text.as_bytes()[..at].iter().filter(|&&b| b == b'\n').count() + 1
 }
 
 struct Edit {
     range: Range<usize>,
     replacement: String,
+    /// If this edit splices in the assembled imported-function text, the
+    /// byte offset within `replacement` where that text starts.
+    splice_offset: Option<usize>,
 }
 
 /// Apply a set of non-overlapping edits (in original-source byte offsets) in
 /// one linear pass, so offsets computed up front never need adjusting for
-/// earlier edits.
-fn apply_edits(source: &str, mut edits: Vec<Edit>) -> String {
+/// earlier edits. Returns the compiled text and, if one of the edits was
+/// the import-splice insertion, the byte offset in that text where the
+/// spliced package text begins.
+fn apply_edits(source: &str, mut edits: Vec<Edit>) -> (String, Option<usize>) {
     edits.sort_by_key(|e| (e.range.start, e.range.end));
 
     let mut out = String::with_capacity(source.len());
     let mut cursor = 0usize;
+    let mut splice_start_in_output = None;
     for edit in edits {
         if edit.range.start < cursor {
             // Overlapping edits shouldn't occur given how callers build
@@ -212,11 +305,14 @@ fn apply_edits(source: &str, mut edits: Vec<Edit>) -> String {
             continue;
         }
         out.push_str(&source[cursor..edit.range.start]);
+        if let Some(offset) = edit.splice_offset {
+            splice_start_in_output = Some(out.len() + offset);
+        }
         out.push_str(&edit.replacement);
         cursor = edit.range.end;
     }
     out.push_str(&source[cursor..]);
-    out
+    (out, splice_start_in_output)
 }
 
 struct FunctionsBlock {
@@ -375,6 +471,77 @@ model {
             alpha_pos < beta_pos && beta_pos < user_pos,
             "expected alpha before beta before the user's own function, got:\n{output}"
         );
+    }
+
+    #[test]
+    fn package_line_ranges_point_at_each_packages_spliced_lines() {
+        let laplace_source = r#"library {
+  import beta
+  import alpha
+}
+
+functions {
+  real user_fn(real x) {
+    return x;
+  }
+}
+
+model {
+}
+"#;
+
+        let alpha = InstalledPackage {
+            name: "alpha".to_string(),
+            source: "real a_fn(real x) {\n  return x;\n}\n".to_string(),
+            signatures: extract_signatures("real a_fn(real x) {\n  return x;\n}\n"),
+            exported: vec!["a_fn".to_string()],
+        };
+        let beta = InstalledPackage {
+            name: "beta".to_string(),
+            source: "real b_fn(real x) {\n  return x;\n}\n".to_string(),
+            signatures: extract_signatures("real b_fn(real x) {\n  return x;\n}\n"),
+            exported: vec!["b_fn".to_string()],
+        };
+
+        let block = parse_library_block(laplace_source).unwrap();
+        let generated =
+            generate_with_package_lines(laplace_source, block.as_ref(), &[alpha, beta]).unwrap();
+        assert_eq!(generated.package_line_ranges.len(), 2);
+
+        let lines: Vec<&str> = generated.source.lines().collect();
+        let alpha_range = generated
+            .package_line_ranges
+            .iter()
+            .find(|r| r.package == "alpha")
+            .unwrap();
+        let beta_range = generated
+            .package_line_ranges
+            .iter()
+            .find(|r| r.package == "beta")
+            .unwrap();
+
+        // alpha's range is reported first (installed/lockfile order) and
+        // ends strictly before beta's begins.
+        assert!(alpha_range.lines.end() < beta_range.lines.start());
+
+        for line_no in alpha_range.lines.clone() {
+            let line = lines[line_no - 1];
+            assert!(!line.contains("beta__") && !line.contains("user_fn"), "{line}");
+        }
+        for line_no in beta_range.lines.clone() {
+            let line = lines[line_no - 1];
+            assert!(!line.contains("alpha__") && !line.contains("user_fn"), "{line}");
+        }
+        assert!(lines[*alpha_range.lines.start() - 1].contains("alpha__a_fn"));
+        assert!(lines[*beta_range.lines.start() - 1].contains("beta__b_fn"));
+    }
+
+    #[test]
+    fn package_line_ranges_empty_when_nothing_is_imported() {
+        let source = "data {\n  int n;\n}\nmodel {\n}\n";
+        let generated = generate_with_package_lines(source, None, &[]).unwrap();
+        assert_eq!(generated.source, source);
+        assert!(generated.package_line_ranges.is_empty());
     }
 
     #[test]
