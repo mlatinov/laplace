@@ -6,6 +6,8 @@
 //! block content. It never inspects statements *inside* a function body other
 //! than to find where the body ends.
 
+use super::brace_match::CodeMask;
+
 /// One parameter of a function signature: `(param_name, param_type)`.
 pub type Param = (String, String);
 
@@ -53,83 +55,6 @@ pub fn extract_signatures(source: &str) -> Vec<FunctionSig> {
     }
 
     sigs
-}
-
-/// Marks which byte offsets in a source string are "real code" as opposed to
-/// inside a `//` line comment or a `"..."` string literal, so brace-matching
-/// can ignore braces that only appear in comments or strings.
-///
-/// Block comments (`/* ... */`) are not handled — the `// @laplace` doc
-/// comment convention this tool cares about is line-comment-only, and Stan
-/// source in the wild overwhelmingly uses `//` as well.
-struct CodeMask(Vec<bool>);
-
-impl CodeMask {
-    fn new(source: &str) -> Self {
-        let bytes = source.as_bytes();
-        let mut mask = vec![true; bytes.len()];
-        let mut in_line_comment = false;
-        let mut in_string = false;
-        let mut i = 0;
-        while i < bytes.len() {
-            let b = bytes[i];
-            if in_line_comment {
-                mask[i] = false;
-                if b == b'\n' {
-                    in_line_comment = false;
-                }
-                i += 1;
-            } else if in_string {
-                mask[i] = false;
-                if b == b'\\' && i + 1 < bytes.len() {
-                    mask[i + 1] = false;
-                    i += 2;
-                    continue;
-                }
-                if b == b'"' {
-                    in_string = false;
-                }
-                i += 1;
-            } else if b == b'/' && bytes.get(i + 1) == Some(&b'/') {
-                in_line_comment = true;
-                mask[i] = false;
-                i += 1;
-            } else if b == b'"' {
-                in_string = true;
-                mask[i] = false;
-                i += 1;
-            } else {
-                i += 1;
-            }
-        }
-        CodeMask(mask)
-    }
-
-    fn find_real(&self, source: &str, from: usize, target: u8) -> Option<usize> {
-        let bytes = source.as_bytes();
-        (from..bytes.len()).find(|&i| bytes[i] == target && self.0[i])
-    }
-
-    fn match_closing_brace(&self, source: &str, open_brace: usize) -> Option<usize> {
-        let bytes = source.as_bytes();
-        let mut depth = 0i32;
-        for (i, &b) in bytes.iter().enumerate().skip(open_brace) {
-            if !self.0[i] {
-                continue;
-            }
-            match b {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(i);
-                    }
-                }
-                _ => {}
-            }
-        }
-        None
-    }
 }
 
 /// Parse the text preceding a function body's `{` into a `FunctionSig`.
