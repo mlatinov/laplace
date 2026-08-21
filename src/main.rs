@@ -1,5 +1,6 @@
 mod codegen;
 mod docs;
+mod init;
 mod manifest;
 mod parser;
 mod resolve;
@@ -28,6 +29,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Scan the current directory's .stan files and generate a starter
+    /// laplace.toml, guessing `exports` from @laplace-documented functions
+    Init,
     /// Compile a .laplace file to .stan
     Build {
         file: PathBuf,
@@ -80,6 +84,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), CliError> {
     match Cli::parse().command {
+        Command::Init => cmd_init(),
         Command::Build {
             file,
             output,
@@ -102,6 +107,8 @@ fn run() -> Result<(), CliError> {
 enum CliError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Init(#[from] init::InitError),
     #[error(transparent)]
     LibraryBlock(#[from] parser::library_block::LibraryBlockError),
     #[error(transparent)]
@@ -143,6 +150,33 @@ impl From<validate::ValidateError> for CliError {
     fn from(err: validate::ValidateError) -> Self {
         CliError::Validate(Box::new(err))
     }
+}
+
+fn cmd_init() -> Result<(), CliError> {
+    let dir = env::current_dir()?;
+    let summary = init::init(&dir)?;
+
+    println!("wrote laplace.toml for `{}`", summary.name);
+    if summary.included.is_empty() {
+        println!("no @laplace-documented functions found -- exports is empty, add entries by hand");
+    } else {
+        println!(
+            "included {} exported {}: {}",
+            summary.included.len(),
+            pluralize(summary.included.len(), "function", "functions"),
+            summary.included.join(", "),
+        );
+    }
+    if !summary.excluded.is_empty() {
+        println!(
+            "note: {} undocumented {} left out of exports (add manually if this guess is wrong): {}",
+            summary.excluded.len(),
+            pluralize(summary.excluded.len(), "function", "functions"),
+            summary.excluded.join(", "),
+        );
+    }
+
+    Ok(())
 }
 
 fn cmd_build(

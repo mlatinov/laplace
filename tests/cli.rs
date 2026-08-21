@@ -118,6 +118,51 @@ model {
 "#;
 
 #[test]
+fn init_generates_manifest_from_documented_and_undocumented_functions() {
+    let project = setup();
+    project.write_project_file(
+        "gps.stan",
+        r#"// @laplace
+// @brief Squared exponential covariance matrix.
+matrix rbf_cov(vector x, real alpha, real rho) {
+  return gp_exp_quad_cov(x, alpha, rho);
+}
+
+real jitter(real epsilon) {
+  return epsilon;
+}
+"#,
+    );
+
+    let out = project.run(&["init"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("wrote laplace.toml"));
+    assert!(text.contains("rbf_cov"));
+    assert!(text.contains("jitter"));
+
+    let manifest = project.read_project_file("laplace.toml");
+    assert!(manifest.contains("version = \"0.1.0\""));
+    assert!(manifest.contains("rbf_cov"));
+    assert!(!manifest.contains("jitter"));
+}
+
+#[test]
+fn init_does_not_overwrite_an_existing_manifest() {
+    let project = setup();
+    project.write_project_file("laplace.toml", "name = \"gps\"\nversion = \"9.9.9\"\nexports = []\n");
+    project.write_project_file(
+        "gps.stan",
+        "real jitter(real epsilon) {\n  return epsilon;\n}\n",
+    );
+
+    let out = project.run(&["init"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("already exists"), "{}", stderr(&out));
+    assert!(project.read_project_file("laplace.toml").contains("9.9.9"));
+}
+
+#[test]
 fn build_without_installing_first_fails_with_instructions() {
     let project = setup();
     project.write_package("gps", "1.0.0", &["rbf_cov"], GPS_STAN);

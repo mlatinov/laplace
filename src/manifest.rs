@@ -161,6 +161,20 @@ pub fn read_package_manifest(path: &Path) -> Result<PackageManifest, ManifestErr
     })
 }
 
+pub fn write_package_manifest(
+    path: &Path,
+    manifest: &PackageManifest,
+) -> Result<(), ManifestError> {
+    let text = toml::to_string_pretty(manifest).map_err(|source| ManifestError::Serialize {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    fs::write(path, text).map_err(|source| ManifestError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
 /// Read and concatenate every `.stan` file directly inside `package_dir`, in
 /// filename order, so codegen and doc extraction always agree on what a
 /// package's source is.
@@ -299,5 +313,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("laplace.toml");
         assert!(read_package_manifest(&path).is_err());
+    }
+
+    #[test]
+    fn package_manifest_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("laplace.toml");
+        let manifest = PackageManifest {
+            name: "gps".to_string(),
+            version: "0.1.0".to_string(),
+            exports: vec!["rbf_cov".to_string()],
+        };
+
+        write_package_manifest(&path, &manifest).unwrap();
+        assert_eq!(read_package_manifest(&path).unwrap(), manifest);
     }
 }
