@@ -11,6 +11,17 @@ pub struct LockedPackage {
     pub name: String,
     pub version: String,
     pub checksum: String,
+    /// Where this package came from, so `laplace install` knows how to
+    /// refetch it on a fresh machine without re-resolving: `"registry"` for
+    /// the local filesystem registry, or `"git+<url>@<tag-or-rev>"` for a
+    /// git source. Defaults to `"registry"` when reading an older lockfile
+    /// written before this field existed.
+    #[serde(default = "default_source")]
+    pub source: String,
+}
+
+fn default_source() -> String {
+    "registry".to_string()
 }
 
 /// `laplace.lock`: an array of exact package pins. Always written sorted by
@@ -96,11 +107,13 @@ mod tests {
                     name: "zzz".into(),
                     version: "1.0.0".into(),
                     checksum: "sha256:aaa".into(),
+                    source: "registry".into(),
                 },
                 LockedPackage {
                     name: "aaa".into(),
                     version: "2.0.0".into(),
                     checksum: "sha256:bbb".into(),
+                    source: "git+https://github.com/user/repo@0.1.0".into(),
                 },
             ],
         };
@@ -116,6 +129,20 @@ mod tests {
             vec!["aaa", "zzz"]
         );
         assert_eq!(read_back.packages[0].checksum, "sha256:bbb");
+    }
+
+    #[test]
+    fn lockfile_without_source_field_defaults_to_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("laplace.lock");
+        fs::write(
+            &path,
+            "[[package]]\nname = \"gps\"\nversion = \"1.0.0\"\nchecksum = \"sha256:aaa\"\n",
+        )
+        .unwrap();
+
+        let lock = read_lockfile(&path).unwrap();
+        assert_eq!(lock.packages[0].source, "registry");
     }
 
     #[test]

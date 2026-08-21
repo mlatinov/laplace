@@ -263,6 +263,7 @@ real jitter(real epsilon) {
                     name: "gps".to_string(),
                     version: "1.0.0".to_string(),
                     checksum: "sha256:whatever".to_string(),
+                    source: "registry".to_string(),
                 }],
             },
         )
@@ -290,6 +291,7 @@ real jitter(real epsilon) {
                     name: "gps".to_string(),
                     version: "1.0.0".to_string(),
                     checksum: "sha256:whatever".to_string(),
+                    source: "registry".to_string(),
                 }],
             },
         )
@@ -312,6 +314,7 @@ real jitter(real epsilon) {
                     name: "gps".to_string(),
                     version: "1.0.0".to_string(),
                     checksum: "sha256:whatever".to_string(),
+                    source: "registry".to_string(),
                 }],
             },
         )

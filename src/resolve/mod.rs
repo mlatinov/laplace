@@ -2,9 +2,13 @@
 //! `laplace add` (resolve + pin + fetch), and `laplace install` (restore
 //! from `laplace.lock` alone, verified by checksum).
 //!
-//! Real git/http fetching is a later task -- for now the registry is just a
-//! directory of `<name>/<version>/` package folders on disk.
+//! Packages can also come from a git repository (`git = "..."` table form
+//! in `laplace.toml`) -- see `git.rs` for the fetch itself. Either way the
+//! result is a plain package directory (`laplace.toml` + `.stan` files),
+//! and from that point on registry- and git-sourced packages are handled
+//! identically: same checksum, same cache layout, same `install_one`.
 
+mod git;
 pub mod lockfile;
 
 use std::fs;
@@ -15,8 +19,12 @@ use semver::{Version, VersionReq};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::manifest::{self, ManifestError};
+use crate::manifest::{self, Dependency, GitDependency, ManifestError};
 use lockfile::{LockedPackage, LockfileError};
+
+/// The `source` value recorded in `laplace.lock` for packages resolved from
+/// the local filesystem registry.
+const REGISTRY_SOURCE: &str = "registry";
 
 #[derive(Debug, Error)]
 pub enum ResolveError {
@@ -88,6 +96,27 @@ pub enum ResolveError {
 
     #[error("`{package}` is not a dependency of this project yet -- run `laplace add {package}` first")]
     NotADependency { package: String },
+
+    #[error(
+        "`{package}` is a git dependency in laplace.toml -- use `laplace update {package}` to \
+         refresh it, not `laplace add {package}`"
+    )]
+    NotARegistryDependency { package: String },
+
+    #[error("failed to create a temporary directory: {0}")]
+    TempDir(#[source] io::Error),
+
+    #[error(transparent)]
+    Git(#[from] git::GitError),
+
+    #[error(
+        "laplace.lock has an unrecognized source `{pkg_source}` for `{name}@{version}`"
+    )]
+    UnknownSource {
+        name: String,
+        version: String,
+        pkg_source: String,
+    },
 
     #[error(transparent)]
     Docs(Box<crate::docs::DocsError>),
@@ -184,13 +213,22 @@ pub fn add(
                     version: version.to_string(),
                 });
             }
-            project_manifest
-                .dependencies
-                .insert(package.to_string(), format!("^{version}"));
+            project_manifest.dependencies.insert(
+                package.to_string(),
+                Dependency::Range(format!("^{version}")),
+            );
             version
         }
         None => {
-            let existing_range = project_manifest.dependencies.get(package).cloned();
+            let existing_range = match project_manifest.dependencies.get(package) {
+                Some(Dependency::Range(range)) => Some(range.clone()),
+                Some(Dependency::Git(_)) => {
+                    return Err(ResolveError::NotARegistryDependency {
+                        package: package.to_string(),
+                    })
+                }
+                None => None,
+            };
             let req = match &existing_range {
                 Some(range) => VersionReq::parse(range).map_err(|source| {
                     ResolveError::InvalidVersionReq {
@@ -220,7 +258,7 @@ pub fn add(
             project_manifest
                 .dependencies
                 .entry(package.to_string())
-                .or_insert_with(|| format!("^{latest}"));
+                .or_insert_with(|| Dependency::Range(format!("^{latest}")));
             latest
         }
     };
@@ -231,11 +269,13 @@ pub fn add(
     Ok(locked)
 }
 
-/// `laplace update <pkg>`: re-resolve `pkg` against its *existing* range in
-/// `laplace.toml`, picking the latest version that still satisfies it, and
-/// refresh its lockfile entry + cache copy. Never creates a new dependency
-/// or changes the range -- `pkg` must already be in `laplace.toml` (use
-/// `add` for that).
+/// `laplace update <pkg>`: re-resolve `pkg` against its *existing* entry in
+/// `laplace.toml` and refresh its lockfile entry + cache copy. For a
+/// registry range, picks the latest version that still satisfies it. For a
+/// git source, simply refetches the pinned tag/rev (useful if a tag moved,
+/// or just to refresh the cache). Never creates a new dependency or changes
+/// the manifest entry -- `pkg` must already be in `laplace.toml` (use `add`
+/// for that).
 pub fn update(
     project_manifest_path: &Path,
     lockfile_path: &Path,
@@ -244,13 +284,21 @@ pub fn update(
     package: &str,
 ) -> Result<LockedPackage, ResolveError> {
     let project_manifest = manifest::read_project_manifest(project_manifest_path)?;
-    let Some(range) = project_manifest.dependencies.get(package) else {
+    let Some(dep) = project_manifest.dependencies.get(package) else {
         return Err(ResolveError::NotADependency {
             package: package.to_string(),
         });
     };
 
-    let req = VersionReq::parse(range).map_err(|source| ResolveError::InvalidVersionReq {
+    let range = match dep {
+        Dependency::Range(range) => range.clone(),
+        Dependency::Git(git_dep) => {
+            let git_ref = git_dep.git_ref()?;
+            return refresh_git(lockfile_path, cache_root, package, &git_dep.git, git_ref);
+        }
+    };
+
+    let req = VersionReq::parse(&range).map_err(|source| ResolveError::InvalidVersionReq {
         value: range.clone(),
         source,
     })?;
@@ -272,6 +320,76 @@ pub fn update(
         })?;
 
     fetch_and_lock(lockfile_path, registry, cache_root, package, &latest)
+}
+
+/// `laplace add <pkg> --git <url> --tag <tag>` (or `--rev <rev>`): fetch the
+/// package from git, record it in `laplace.lock`, and write the git table
+/// form into `laplace.toml`.
+pub fn add_git(
+    project_manifest_path: &Path,
+    lockfile_path: &Path,
+    cache_root: &Path,
+    package: &str,
+    url: &str,
+    tag: Option<&str>,
+    rev: Option<&str>,
+) -> Result<LockedPackage, ResolveError> {
+    let git_dep = GitDependency {
+        git: url.to_string(),
+        tag: tag.map(str::to_string),
+        rev: rev.map(str::to_string),
+    };
+    let git_ref = git_dep.git_ref()?;
+
+    let locked = refresh_git(lockfile_path, cache_root, package, url, git_ref)?;
+
+    let mut project_manifest = manifest::read_project_manifest(project_manifest_path)?;
+    project_manifest
+        .dependencies
+        .insert(package.to_string(), Dependency::Git(git_dep));
+    manifest::write_project_manifest(project_manifest_path, &project_manifest)?;
+
+    Ok(locked)
+}
+
+/// Fetch `package` from `url` at `git_ref`, verify its declared name, hash
+/// it, copy it into the cache, and record it in `laplace.lock`. Shared by
+/// `add_git` and `update` (for existing git dependencies).
+fn refresh_git(
+    lockfile_path: &Path,
+    cache_root: &Path,
+    package: &str,
+    url: &str,
+    git_ref: &str,
+) -> Result<LockedPackage, ResolveError> {
+    let tmp = tempfile::tempdir().map_err(ResolveError::TempDir)?;
+    git::fetch(url, git_ref, tmp.path())?;
+
+    let pkg_manifest = manifest::read_package_manifest(&tmp.path().join("laplace.toml"))?;
+    if pkg_manifest.name != package {
+        return Err(ResolveError::PackageNameMismatch {
+            path: tmp.path().join("laplace.toml"),
+            expected: package.to_string(),
+            found: pkg_manifest.name,
+        });
+    }
+
+    let checksum = checksum_dir(tmp.path())?;
+    let locked = LockedPackage {
+        name: package.to_string(),
+        version: pkg_manifest.version,
+        checksum,
+        source: git::git_source(url, git_ref),
+    };
+
+    install_one(tmp.path(), cache_root, &locked)?;
+
+    let mut lock = lockfile::read_lockfile(lockfile_path)?;
+    lock.packages.retain(|p| p.name != locked.name);
+    lock.packages.push(locked.clone());
+    lockfile::write_lockfile(lockfile_path, &lock)?;
+
+    Ok(locked)
 }
 
 /// Shared tail of `add`/`update`: verify the resolved version's package
@@ -299,6 +417,7 @@ fn fetch_and_lock(
         name: package.to_string(),
         version: version.to_string(),
         checksum,
+        source: REGISTRY_SOURCE.to_string(),
     };
 
     install_one(&package_dir, cache_root, &locked)?;
@@ -313,7 +432,10 @@ fn fetch_and_lock(
 
 /// `laplace install`: read `laplace.lock` only -- never `laplace.toml` -- and
 /// restore every pinned package into `cache_root/<name>/<version>/`,
-/// verifying each one's checksum against the registry copy first.
+/// verifying each one's checksum first. Registry-sourced packages are
+/// verified against the registry copy on disk; git-sourced packages are
+/// refetched from their recorded `source` (so a fresh machine with no
+/// registry can still restore them) and verified the same way.
 pub fn install(
     lockfile_path: &Path,
     registry: &Registry,
@@ -322,6 +444,19 @@ pub fn install(
     let lock = lockfile::read_lockfile(lockfile_path)?;
 
     for pkg in &lock.packages {
+        if let Some((url, git_ref)) = git::parse_git_source(&pkg.source) {
+            install_git_one(url, git_ref, cache_root, pkg)?;
+            continue;
+        }
+
+        if pkg.source != REGISTRY_SOURCE {
+            return Err(ResolveError::UnknownSource {
+                name: pkg.name.clone(),
+                version: pkg.version.clone(),
+                pkg_source: pkg.source.clone(),
+            });
+        }
+
         let version =
             Version::parse(&pkg.version).map_err(|source| ResolveError::InvalidVersion {
                 value: pkg.version.clone(),
@@ -350,6 +485,30 @@ pub fn install(
     }
 
     Ok(lock.packages)
+}
+
+/// Refetch a git-sourced lock entry into a scratch directory, verify its
+/// checksum against the lock, and install it into the cache.
+fn install_git_one(
+    url: &str,
+    git_ref: &str,
+    cache_root: &Path,
+    pkg: &LockedPackage,
+) -> Result<(), ResolveError> {
+    let tmp = tempfile::tempdir().map_err(ResolveError::TempDir)?;
+    git::fetch(url, git_ref, tmp.path())?;
+
+    let actual = checksum_dir(tmp.path())?;
+    if actual != pkg.checksum {
+        return Err(ResolveError::ChecksumMismatch {
+            name: pkg.name.clone(),
+            version: pkg.version.clone(),
+            expected: pkg.checksum.clone(),
+            actual,
+        });
+    }
+
+    install_one(tmp.path(), cache_root, pkg)
 }
 
 fn install_one(
@@ -514,7 +673,10 @@ mod tests {
         assert_eq!(locked.version, "1.2.0");
 
         let manifest = manifest::read_project_manifest(&f.project_manifest_path).unwrap();
-        assert_eq!(manifest.dependencies.get("gps").unwrap(), "^1.2.0");
+        assert_eq!(
+            manifest.dependencies.get("gps").unwrap().as_range(),
+            Some("^1.2.0")
+        );
 
         let lock = lockfile::read_lockfile(&f.lockfile_path).unwrap();
         assert_eq!(lock.packages, vec![locked.clone()]);
@@ -532,7 +694,7 @@ mod tests {
         let mut manifest = manifest::read_project_manifest(&f.project_manifest_path).unwrap();
         manifest
             .dependencies
-            .insert("gps".to_string(), "^1.0".to_string());
+            .insert("gps".to_string(), Dependency::Range("^1.0".to_string()));
         manifest::write_project_manifest(&f.project_manifest_path, &manifest).unwrap();
 
         let locked = add(
@@ -548,7 +710,10 @@ mod tests {
         // ^1.0 must not pick the incompatible 2.0.0.
         assert_eq!(locked.version, "1.0.0");
         let manifest = manifest::read_project_manifest(&f.project_manifest_path).unwrap();
-        assert_eq!(manifest.dependencies.get("gps").unwrap(), "^1.0");
+        assert_eq!(
+            manifest.dependencies.get("gps").unwrap().as_range(),
+            Some("^1.0")
+        );
     }
 
     #[test]
@@ -569,7 +734,10 @@ mod tests {
 
         assert_eq!(locked.version, "1.0.0");
         let manifest = manifest::read_project_manifest(&f.project_manifest_path).unwrap();
-        assert_eq!(manifest.dependencies.get("gps").unwrap(), "^1.0.0");
+        assert_eq!(
+            manifest.dependencies.get("gps").unwrap().as_range(),
+            Some("^1.0.0")
+        );
     }
 
     #[test]
@@ -644,6 +812,7 @@ mod tests {
                     name: "gps".to_string(),
                     version: "1.0.0".to_string(),
                     checksum,
+                    source: REGISTRY_SOURCE.to_string(),
                 }],
             },
         )
@@ -671,7 +840,7 @@ mod tests {
         let mut manifest = manifest::ProjectManifest::default();
         manifest
             .dependencies
-            .insert("gps".to_string(), "^2.0".to_string());
+            .insert("gps".to_string(), Dependency::Range("^2.0".to_string()));
         manifest::write_project_manifest(&f.project_manifest_path, &manifest).unwrap();
 
         lockfile::write_lockfile(
@@ -681,6 +850,7 @@ mod tests {
                     name: "gps".to_string(),
                     version: "1.0.0".to_string(),
                     checksum,
+                    source: REGISTRY_SOURCE.to_string(),
                 }],
             },
         )
@@ -702,6 +872,7 @@ mod tests {
                     name: "gps".to_string(),
                     version: "1.0.0".to_string(),
                     checksum: "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+                    source: REGISTRY_SOURCE.to_string(),
                 }],
             },
         )
@@ -721,6 +892,7 @@ mod tests {
                     name: "ghost".to_string(),
                     version: "1.0.0".to_string(),
                     checksum: "sha256:doesnotmatter".to_string(),
+                    source: REGISTRY_SOURCE.to_string(),
                 }],
             },
         )
@@ -778,7 +950,10 @@ mod tests {
         assert_eq!(updated.version, "1.1.0");
         // The range itself is untouched by update.
         let manifest = manifest::read_project_manifest(&f.project_manifest_path).unwrap();
-        assert_eq!(manifest.dependencies.get("gps").unwrap(), "^1.0.0");
+        assert_eq!(
+            manifest.dependencies.get("gps").unwrap().as_range(),
+            Some("^1.0.0")
+        );
 
         let lock = lockfile::read_lockfile(&f.lockfile_path).unwrap();
         assert_eq!(lock.packages, vec![updated]);
@@ -825,5 +1000,310 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ResolveError::NotADependency { .. }));
+    }
+
+    // -- git source tests --------------------------------------------------
+    //
+    // These never touch the network: the "remote" is a `git init --bare`
+    // repo in a tempdir, populated by pushing a tagged commit from a throwaway
+    // working clone.
+
+    fn run_git(args: &[&str], cwd: Option<&Path>) {
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(args);
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        let output = cmd.output().expect("failed to spawn git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn run_git_capture(args: &[&str], cwd: Option<&Path>) -> String {
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(args);
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        let output = cmd.output().expect("failed to spawn git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    /// Set up a bare git repo under `tmp_root` containing a single tagged
+    /// commit with a package `laplace.toml` + `.stan` file at its root (the
+    /// repo root *is* the package root, same as a registry package
+    /// directory). Returns `(bare_repo_path, commit_sha)`.
+    fn init_git_package_repo(
+        tmp_root: &Path,
+        name: &str,
+        version: &str,
+        tag: &str,
+        exports: &[&str],
+    ) -> (PathBuf, String) {
+        let bare = tmp_root.join(format!("{name}-bare.git"));
+        let work = tmp_root.join(format!("{name}-work"));
+
+        run_git(&["init", "--quiet", "--bare", bare.to_str().unwrap()], None);
+        run_git(
+            &["init", "--quiet", "-b", "main", work.to_str().unwrap()],
+            None,
+        );
+
+        let exports_toml = exports
+            .iter()
+            .map(|e| format!("\"{e}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        fs::write(
+            work.join("laplace.toml"),
+            format!("name = \"{name}\"\nversion = \"{version}\"\nexports = [{exports_toml}]\n"),
+        )
+        .unwrap();
+        fs::write(
+            work.join(format!("{name}.stan")),
+            format!(
+                "real {}() {{\n  return 1;\n}}\n",
+                exports.first().copied().unwrap_or("noop")
+            ),
+        )
+        .unwrap();
+
+        run_git(
+            &[
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test",
+                "add",
+                ".",
+            ],
+            Some(&work),
+        );
+        run_git(
+            &[
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "--quiet",
+                "-m",
+                "init",
+            ],
+            Some(&work),
+        );
+        run_git(&["tag", tag], Some(&work));
+        run_git(
+            &["remote", "add", "origin", bare.to_str().unwrap()],
+            Some(&work),
+        );
+        run_git(&["push", "--quiet", "origin", "main"], Some(&work));
+        run_git(&["push", "--quiet", "origin", tag], Some(&work));
+
+        let rev = run_git_capture(&["rev-parse", "HEAD"], Some(&work));
+        (bare, rev)
+    }
+
+    #[test]
+    fn add_git_with_tag_records_git_source_and_installs() {
+        let f = fixture();
+        let (bare, _rev) =
+            init_git_package_repo(f.registry_root.parent().unwrap(), "gps", "1.0.0", "0.1.0", &["rbf_cov"]);
+        let url = bare.to_str().unwrap();
+
+        let locked = add_git(
+            &f.project_manifest_path,
+            &f.lockfile_path,
+            &f.cache_root,
+            "gps",
+            url,
+            Some("0.1.0"),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(locked.name, "gps");
+        assert_eq!(locked.version, "1.0.0");
+        assert_eq!(locked.source, format!("git+{url}@0.1.0"));
+
+        let manifest = manifest::read_project_manifest(&f.project_manifest_path).unwrap();
+        assert_eq!(
+            manifest.dependencies.get("gps").unwrap(),
+            &Dependency::Git(GitDependency {
+                git: url.to_string(),
+                tag: Some("0.1.0".to_string()),
+                rev: None,
+            })
+        );
+
+        let lock = lockfile::read_lockfile(&f.lockfile_path).unwrap();
+        assert_eq!(lock.packages, vec![locked.clone()]);
+
+        let installed = f.cache_root.join("gps").join("1.0.0").join("laplace.toml");
+        assert!(installed.is_file());
+        // The cached copy must not carry .git metadata along with it.
+        assert!(!f.cache_root.join("gps").join("1.0.0").join(".git").exists());
+    }
+
+    #[test]
+    fn add_git_with_rev_records_git_source_and_installs() {
+        let f = fixture();
+        let (bare, rev) =
+            init_git_package_repo(f.registry_root.parent().unwrap(), "gps", "1.0.0", "0.1.0", &["rbf_cov"]);
+        let url = bare.to_str().unwrap();
+
+        let locked = add_git(
+            &f.project_manifest_path,
+            &f.lockfile_path,
+            &f.cache_root,
+            "gps",
+            url,
+            None,
+            Some(&rev),
+        )
+        .unwrap();
+
+        assert_eq!(locked.version, "1.0.0");
+        assert_eq!(locked.source, format!("git+{url}@{rev}"));
+
+        let manifest = manifest::read_project_manifest(&f.project_manifest_path).unwrap();
+        assert_eq!(
+            manifest.dependencies.get("gps").unwrap(),
+            &Dependency::Git(GitDependency {
+                git: url.to_string(),
+                tag: None,
+                rev: Some(rev),
+            })
+        );
+    }
+
+    #[test]
+    fn add_git_errors_on_package_name_mismatch() {
+        let f = fixture();
+        let (bare, _rev) = init_git_package_repo(
+            f.registry_root.parent().unwrap(),
+            "not-gps",
+            "1.0.0",
+            "0.1.0",
+            &["rbf_cov"],
+        );
+        let url = bare.to_str().unwrap();
+
+        let err = add_git(
+            &f.project_manifest_path,
+            &f.lockfile_path,
+            &f.cache_root,
+            "gps",
+            url,
+            Some("0.1.0"),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ResolveError::PackageNameMismatch { .. }));
+    }
+
+    #[test]
+    fn install_refetches_git_sourced_package_on_a_fresh_machine() {
+        let f = fixture();
+        let (bare, _rev) =
+            init_git_package_repo(f.registry_root.parent().unwrap(), "gps", "1.0.0", "0.1.0", &["rbf_cov"]);
+        let url = bare.to_str().unwrap();
+
+        let locked = add_git(
+            &f.project_manifest_path,
+            &f.lockfile_path,
+            &f.cache_root,
+            "gps",
+            url,
+            Some("0.1.0"),
+            None,
+        )
+        .unwrap();
+
+        // Simulate a fresh machine: no cache, and (since this package was
+        // never in the local registry to begin with) no registry entry
+        // either -- `install` must restore purely from the lock's `source`.
+        fs::remove_dir_all(&f.cache_root).unwrap();
+        assert!(f.registry.available_versions("gps").unwrap().is_empty());
+
+        let installed = install(&f.lockfile_path, &f.registry, &f.cache_root).unwrap();
+        assert_eq!(installed, vec![locked]);
+
+        let restored = f.cache_root.join("gps").join("1.0.0").join("laplace.toml");
+        assert!(restored.is_file());
+    }
+
+    #[test]
+    fn install_detects_checksum_mismatch_for_git_source() {
+        let f = fixture();
+        let (bare, _rev) =
+            init_git_package_repo(f.registry_root.parent().unwrap(), "gps", "1.0.0", "0.1.0", &["rbf_cov"]);
+        let url = bare.to_str().unwrap();
+
+        add_git(
+            &f.project_manifest_path,
+            &f.lockfile_path,
+            &f.cache_root,
+            "gps",
+            url,
+            Some("0.1.0"),
+            None,
+        )
+        .unwrap();
+
+        // Tamper with the lock's checksum after the fact.
+        let mut lock = lockfile::read_lockfile(&f.lockfile_path).unwrap();
+        lock.packages[0].checksum = "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string();
+        lockfile::write_lockfile(&f.lockfile_path, &lock).unwrap();
+
+        fs::remove_dir_all(&f.cache_root).unwrap();
+        let err = install(&f.lockfile_path, &f.registry, &f.cache_root).unwrap_err();
+        assert!(matches!(err, ResolveError::ChecksumMismatch { .. }));
+    }
+
+    #[test]
+    fn update_on_a_git_dependency_refetches_from_the_pinned_ref() {
+        let f = fixture();
+        let (bare, _rev) =
+            init_git_package_repo(f.registry_root.parent().unwrap(), "gps", "1.0.0", "0.1.0", &["rbf_cov"]);
+        let url = bare.to_str().unwrap();
+
+        add_git(
+            &f.project_manifest_path,
+            &f.lockfile_path,
+            &f.cache_root,
+            "gps",
+            url,
+            Some("0.1.0"),
+            None,
+        )
+        .unwrap();
+
+        fs::remove_dir_all(&f.cache_root).unwrap();
+
+        let updated = update(
+            &f.project_manifest_path,
+            &f.lockfile_path,
+            &f.registry,
+            &f.cache_root,
+            "gps",
+        )
+        .unwrap();
+
+        assert_eq!(updated.version, "1.0.0");
+        assert!(f
+            .cache_root
+            .join("gps")
+            .join("1.0.0")
+            .join("laplace.toml")
+            .is_file());
     }
 }

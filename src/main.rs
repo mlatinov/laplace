@@ -46,8 +46,18 @@ enum Command {
     /// Install every package pinned in laplace.lock
     Install,
     /// Add a dependency (optionally pinned to `<pkg>@<version>`), resolving
-    /// it and updating laplace.toml + laplace.lock
-    Add { package: String },
+    /// it and updating laplace.toml + laplace.lock. Pass `--git <url>` with
+    /// `--tag <tag>` or `--rev <rev>` to add a git dependency instead of
+    /// resolving from the local registry.
+    Add {
+        package: String,
+        #[arg(long)]
+        git: Option<String>,
+        #[arg(long)]
+        tag: Option<String>,
+        #[arg(long)]
+        rev: Option<String>,
+    },
     /// Re-resolve a dependency to the latest version matching its existing
     /// range in laplace.toml
     Update { package: String },
@@ -77,7 +87,12 @@ fn run() -> Result<(), CliError> {
             validate,
         } => cmd_build(&file, output, check, validate),
         Command::Install => cmd_install(),
-        Command::Add { package } => cmd_add(&package),
+        Command::Add {
+            package,
+            git,
+            tag,
+            rev,
+        } => cmd_add(&package, git.as_deref(), tag.as_deref(), rev.as_deref()),
         Command::Update { package } => cmd_update(&package),
         Command::Doc { spec } => cmd_doc(&spec),
     }
@@ -245,13 +260,38 @@ fn cmd_install() -> Result<(), CliError> {
     Ok(())
 }
 
-fn cmd_add(spec: &str) -> Result<(), CliError> {
-    let (name, version) = parse_package_spec(spec);
+fn cmd_add(
+    spec: &str,
+    git: Option<&str>,
+    tag: Option<&str>,
+    rev: Option<&str>,
+) -> Result<(), CliError> {
     let project_manifest_path = PathBuf::from("laplace.toml");
     let lockfile_path = PathBuf::from("laplace.lock");
-    let registry = Registry::new(registry_root());
     let cache_root = default_cache_root();
 
+    if let Some(url) = git {
+        let locked = resolve::add_git(
+            &project_manifest_path,
+            &lockfile_path,
+            &cache_root,
+            spec,
+            url,
+            tag,
+            rev,
+        )?;
+        println!("added {}@{} (git)", locked.name, locked.version);
+        return Ok(());
+    }
+
+    if tag.is_some() || rev.is_some() {
+        return Err(CliError::Message(
+            "--tag/--rev only apply together with --git".to_string(),
+        ));
+    }
+
+    let (name, version) = parse_package_spec(spec);
+    let registry = Registry::new(registry_root());
     let locked = resolve::add(
         &project_manifest_path,
         &lockfile_path,

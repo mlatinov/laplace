@@ -7,16 +7,66 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Project-level `laplace.toml`: just the dependency ranges.
+/// Project-level `laplace.toml`: dependency entries, either a semver range
+/// (resolved via the local filesystem registry) or a git source.
 ///
 /// ```toml
 /// [dependencies]
 /// gps = "^1.0"
+/// gps2 = { git = "https://github.com/user/repo", tag = "0.1.0" }
+/// gps3 = { git = "https://github.com/user/repo", rev = "abc123" }
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectManifest {
     #[serde(default)]
-    pub dependencies: BTreeMap<String, String>,
+    pub dependencies: BTreeMap<String, Dependency>,
+}
+
+/// A single dependency entry in the project manifest: either the plain
+/// string form (a semver range, resolved via the local registry) or the
+/// table form (a git source).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Dependency {
+    Range(String),
+    Git(GitDependency),
+}
+
+impl Dependency {
+    pub fn as_range(&self) -> Option<&str> {
+        match self {
+            Dependency::Range(range) => Some(range),
+            Dependency::Git(_) => None,
+        }
+    }
+}
+
+/// The table form of a dependency entry: a git repository pinned to either
+/// a tag or a commit rev (exactly one of the two).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitDependency {
+    pub git: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+}
+
+impl GitDependency {
+    /// The single ref to check out. Exactly one of `tag`/`rev` must be set;
+    /// anything else is a malformed manifest entry.
+    pub fn git_ref(&self) -> Result<&str, ManifestError> {
+        match (&self.tag, &self.rev) {
+            (Some(tag), None) => Ok(tag),
+            (None, Some(rev)) => Ok(rev),
+            (None, None) => Err(ManifestError::GitRefMissing {
+                git: self.git.clone(),
+            }),
+            (Some(_), Some(_)) => Err(ManifestError::GitRefAmbiguous {
+                git: self.git.clone(),
+            }),
+        }
+    }
 }
 
 /// Package-level `laplace.toml`, shipped alongside a package's `.stan`
@@ -57,6 +107,12 @@ pub enum ManifestError {
         #[source]
         source: toml::ser::Error,
     },
+
+    #[error("git dependency `{git}` needs a `tag` or a `rev`")]
+    GitRefMissing { git: String },
+
+    #[error("git dependency `{git}` cannot have both `tag` and `rev` set")]
+    GitRefAmbiguous { git: String },
 }
 
 /// Read a project's `laplace.toml`. A missing file is treated as an empty
@@ -145,10 +201,81 @@ mod tests {
         let mut manifest = ProjectManifest::default();
         manifest
             .dependencies
-            .insert("gps".to_string(), "^1.0".to_string());
+            .insert("gps".to_string(), Dependency::Range("^1.0".to_string()));
 
         write_project_manifest(&path, &manifest).unwrap();
         assert_eq!(read_project_manifest(&path).unwrap(), manifest);
+    }
+
+    #[test]
+    fn project_manifest_parses_git_table_form() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("laplace.toml");
+        fs::write(
+            &path,
+            concat!(
+                "[dependencies]\n",
+                "gps = { git = \"https://github.com/user/repo\", tag = \"0.1.0\" }\n",
+                "gps2 = { git = \"https://github.com/user/repo\", rev = \"abc123\" }\n",
+            ),
+        )
+        .unwrap();
+
+        let manifest = read_project_manifest(&path).unwrap();
+        assert_eq!(
+            manifest.dependencies.get("gps").unwrap(),
+            &Dependency::Git(GitDependency {
+                git: "https://github.com/user/repo".to_string(),
+                tag: Some("0.1.0".to_string()),
+                rev: None,
+            })
+        );
+        assert_eq!(
+            manifest
+                .dependencies
+                .get("gps")
+                .unwrap()
+                .as_range(),
+            None
+        );
+        assert_eq!(
+            manifest.dependencies.get("gps2").unwrap(),
+            &Dependency::Git(GitDependency {
+                git: "https://github.com/user/repo".to_string(),
+                tag: None,
+                rev: Some("abc123".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn git_dependency_requires_exactly_one_of_tag_or_rev() {
+        let neither = GitDependency {
+            git: "https://example.com/repo".to_string(),
+            tag: None,
+            rev: None,
+        };
+        assert!(matches!(
+            neither.git_ref(),
+            Err(ManifestError::GitRefMissing { .. })
+        ));
+
+        let both = GitDependency {
+            git: "https://example.com/repo".to_string(),
+            tag: Some("0.1.0".to_string()),
+            rev: Some("abc123".to_string()),
+        };
+        assert!(matches!(
+            both.git_ref(),
+            Err(ManifestError::GitRefAmbiguous { .. })
+        ));
+
+        let tag_only = GitDependency {
+            git: "https://example.com/repo".to_string(),
+            tag: Some("0.1.0".to_string()),
+            rev: None,
+        };
+        assert_eq!(tag_only.git_ref().unwrap(), "0.1.0");
     }
 
     #[test]
