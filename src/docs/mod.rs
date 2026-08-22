@@ -163,6 +163,15 @@ pub fn render(package: &str, sig: &FunctionSig) -> String {
         out.push('\n');
     }
 
+    if let Some(math) = &doc.math {
+        out.push_str("\nMath:\n");
+        for line in math.lines() {
+            out.push_str("  ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+
     if !doc.params.is_empty() {
         out.push_str("\nParameters:\n");
         let width = doc.params.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
@@ -178,11 +187,116 @@ pub fn render(package: &str, sig: &FunctionSig) -> String {
     }
 
     if let Some(example) = &doc.example {
-        out.push_str("\nExample:\n  ");
-        out.push_str(example);
-        out.push('\n');
+        out.push_str("\nExample:\n");
+        for line in example.lines() {
+            out.push_str("  ");
+            out.push_str(line);
+            out.push('\n');
+        }
     }
 
+    out
+}
+
+/// Render a function's signature and doc comment as a minimal standalone
+/// HTML file: brief/params/return as plain text, the example in a
+/// `<pre><code>` block (preserving line breaks and monospacing, since it's
+/// Stan code, not prose), and -- if present -- the math field in a KaTeX
+/// auto-render span loaded from a CDN script tag, so opening the file in
+/// any browser renders both the formula and a correctly formatted example.
+pub fn render_html(package: &str, sig: &FunctionSig) -> String {
+    let params_sig = sig
+        .params
+        .iter()
+        .map(|(name, ty)| format!("{name}: {ty}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let title = format!("{package}::{}({params_sig}) -> {}", sig.name, sig.return_type);
+
+    let mut body = format!("<h1>{}</h1>\n", html_escape(&title));
+
+    let Some(doc) = &sig.doc else {
+        body.push_str("<p><em>no @laplace documentation available for this function</em></p>\n");
+        return wrap_html(&title, &body);
+    };
+
+    if let Some(brief) = &doc.brief {
+        body.push_str(&format!("<p>{}</p>\n", html_escape(brief)));
+    }
+
+    if let Some(math) = &doc.math {
+        body.push_str("<span class=\"math\">\\[");
+        body.push_str(&html_escape(math));
+        body.push_str("\\]</span>\n");
+    }
+
+    if !doc.params.is_empty() {
+        body.push_str("<h2>Parameters</h2>\n<ul>\n");
+        for (name, desc) in &doc.params {
+            body.push_str(&format!(
+                "<li><strong>{}</strong>: {}</li>\n",
+                html_escape(name),
+                html_escape(desc)
+            ));
+        }
+        body.push_str("</ul>\n");
+    }
+
+    if let Some(ret) = &doc.return_doc {
+        body.push_str(&format!("<h2>Returns</h2>\n<p>{}</p>\n", html_escape(ret)));
+    }
+
+    if let Some(example) = &doc.example {
+        body.push_str(&format!(
+            "<h2>Example</h2>\n<pre><code>{}</code></pre>\n",
+            html_escape(example)
+        ));
+    }
+
+    wrap_html(&title, &body)
+}
+
+fn wrap_html(title: &str, body: &str) -> String {
+    let title = html_escape(title);
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+</head>
+<body>
+{body}<script>
+document.addEventListener("DOMContentLoaded", function () {{
+  renderMathInElement(document.body, {{
+    delimiters: [
+      {{left: "\\[", right: "\\]", display: true}},
+      {{left: "\\(", right: "\\)", display: false}}
+    ]
+  }});
+}});
+</script>
+</body>
+</html>
+"#
+    )
+}
+
+fn html_escape(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for c in input.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
     out
 }
 
@@ -341,6 +455,7 @@ real jitter(real epsilon) {
                 ],
                 return_doc: Some("An N x N matrix.".to_string()),
                 example: Some("rbf_cov(x, 1.0)".to_string()),
+                math: None,
             }),
         };
 
@@ -366,5 +481,115 @@ real jitter(real epsilon) {
         let rendered = render("gps", &sig);
         assert!(rendered.starts_with("gps::jitter(epsilon: real) -> real\n"));
         assert!(rendered.contains("no @laplace documentation available"));
+    }
+
+    const RBF_COV_WITH_MATH_SOURCE: &str = r#"// @laplace
+// @brief Squared exponential (RBF) covariance matrix.
+// @math k(x, x') = \alpha^2 \exp\left(
+//   -\frac{(x - x')^2}{2 \rho^2}
+// \right)
+// @param x Vector of input locations.
+// @return An N x N positive semi-definite covariance matrix.
+// @example matrix k = rbf_cov(x, 1.0, 0.5);
+//   print(k);
+matrix rbf_cov(vector x, real alpha, real rho) {
+  return gp_exp_quad_cov(x, alpha, rho);
+}
+
+real jitter(real epsilon) {
+  return epsilon;
+}
+"#;
+
+    fn write_gps_package_with_math(dir: &Path) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(
+            dir.join("laplace.toml"),
+            "name = \"gps\"\nversion = \"1.0.0\"\nexports = [\"rbf_cov\"]\n",
+        )
+        .unwrap();
+        fs::write(dir.join("gps.stan"), RBF_COV_WITH_MATH_SOURCE).unwrap();
+    }
+
+    #[test]
+    fn math_round_trips_through_docs_json_verbatim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg_dir = tmp.path().join("gps").join("1.0.0");
+        write_gps_package_with_math(&pkg_dir);
+
+        write_sidecar(&pkg_dir, "gps", "1.0.0").unwrap();
+        let reloaded = read_docs_json(&pkg_dir.join("docs.json")).unwrap();
+        let rbf = reloaded.functions.iter().find(|f| f.name == "rbf_cov").unwrap();
+
+        let expected_math = "k(x, x') = \\alpha^2 \\exp\\left(\n-\\frac{(x - x')^2}{2 \\rho^2}\n\\right)";
+        assert_eq!(rbf.doc.as_ref().unwrap().math.as_deref(), Some(expected_math));
+
+        let rendered = render("gps", rbf);
+        assert!(rendered.contains("Math:\n"));
+        for line in expected_math.lines() {
+            assert!(rendered.contains(line), "rendered output missing math line: {line}");
+        }
+
+        let html = render_html("gps", rbf);
+        assert!(html.contains("<span class=\"math\">"));
+        // `&` in the LaTeX must be HTML-escaped so the browser hands KaTeX
+        // back the original raw string via textContent.
+        assert!(html.contains(&html_escape(expected_math)));
+        assert!(html.contains("katex"));
+    }
+
+    #[test]
+    fn no_math_tag_means_no_math_section_anywhere() {
+        // `write_gps_package` (defined above) uses RBF_COV_SOURCE, which is
+        // documented (@brief/@param/@return/@example) but has no @math tag.
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg_dir = tmp.path().join("gps").join("1.0.0");
+        write_gps_package(&pkg_dir);
+
+        write_sidecar(&pkg_dir, "gps", "1.0.0").unwrap();
+        let reloaded = read_docs_json(&pkg_dir.join("docs.json")).unwrap();
+        let rbf = reloaded.functions.iter().find(|f| f.name == "rbf_cov").unwrap();
+        assert_eq!(rbf.doc.as_ref().unwrap().math, None);
+
+        let rendered = render("gps", rbf);
+        assert!(!rendered.contains("Math:"));
+
+        let html = render_html("gps", rbf);
+        assert!(!html.contains("class=\"math\""));
+
+        // docs.json must omit the `math` key entirely (not serialize it as
+        // `null`) for a documented function with no @math tag.
+        let raw_json = fs::read_to_string(pkg_dir.join("docs.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw_json).unwrap();
+        let rbf_json = parsed["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == "rbf_cov")
+            .unwrap();
+        assert!(rbf_json["doc"].get("math").is_none());
+    }
+
+    #[test]
+    fn multiline_example_preserves_line_breaks_through_json_and_render() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg_dir = tmp.path().join("gps").join("1.0.0");
+        write_gps_package_with_math(&pkg_dir);
+
+        write_sidecar(&pkg_dir, "gps", "1.0.0").unwrap();
+        let reloaded = read_docs_json(&pkg_dir.join("docs.json")).unwrap();
+        let rbf = reloaded.functions.iter().find(|f| f.name == "rbf_cov").unwrap();
+
+        let expected_example = "matrix k = rbf_cov(x, 1.0, 0.5);\nprint(k);";
+        assert_eq!(rbf.doc.as_ref().unwrap().example.as_deref(), Some(expected_example));
+
+        let rendered = render("gps", rbf);
+        assert!(rendered.contains("Example:\n  matrix k = rbf_cov(x, 1.0, 0.5);\n  print(k);\n"));
+
+        let html = render_html("gps", rbf);
+        assert!(html.contains(&format!(
+            "<pre><code>{}</code></pre>",
+            html_escape(expected_example)
+        )));
     }
 }

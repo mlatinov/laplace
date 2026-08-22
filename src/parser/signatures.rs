@@ -30,6 +30,10 @@ pub struct Doc {
     pub params: Vec<Param>,
     pub return_doc: Option<String>,
     pub example: Option<String>,
+    /// Raw LaTeX, verbatim -- never parsed or validated, just stored and
+    /// passed through to docs.json / render / --html output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub math: Option<String>,
 }
 
 /// Extract every top-level function signature from `source`.
@@ -227,6 +231,7 @@ enum ActiveField {
     Param,
     Return,
     Example,
+    Math,
 }
 
 fn parse_doc_tags(lines: &[String]) -> Doc {
@@ -252,6 +257,9 @@ fn parse_doc_tags(lines: &[String]) -> Doc {
         } else if let Some(rest) = line.strip_prefix("@example") {
             doc.example = Some(rest.trim().to_string());
             active = ActiveField::Example;
+        } else if let Some(rest) = line.strip_prefix("@math") {
+            doc.math = Some(rest.trim().to_string());
+            active = ActiveField::Math;
         } else if !line.is_empty() {
             match active {
                 ActiveField::Brief => append_opt(&mut doc.brief, line),
@@ -261,7 +269,13 @@ fn parse_doc_tags(lines: &[String]) -> Doc {
                     }
                 }
                 ActiveField::Return => append_opt(&mut doc.return_doc, line),
-                ActiveField::Example => append_opt(&mut doc.example, line),
+                // @example and @math are code/LaTeX, not prose: preserve
+                // line breaks verbatim instead of collapsing to one line,
+                // since whitespace-sensitive content (multi-statement Stan
+                // code, LaTeX `cases` environments) would be silently
+                // corrupted by joining with a space.
+                ActiveField::Example => append_opt_lines(&mut doc.example, line),
+                ActiveField::Math => append_opt_lines(&mut doc.math, line),
                 ActiveField::None => {}
             }
         }
@@ -273,6 +287,16 @@ fn parse_doc_tags(lines: &[String]) -> Doc {
 fn append_opt(field: &mut Option<String>, extra: &str) {
     match field {
         Some(s) => append_str(s, extra),
+        None => *field = Some(extra.to_string()),
+    }
+}
+
+fn append_opt_lines(field: &mut Option<String>, extra: &str) {
+    match field {
+        Some(s) => {
+            s.push('\n');
+            s.push_str(extra);
+        }
         None => *field = Some(extra.to_string()),
     }
 }
@@ -500,5 +524,102 @@ real wrapped(real x) {
         assert_eq!(sigs.len(), 1);
         assert_eq!(sigs[0].name, "constant_one");
         assert!(sigs[0].params.is_empty());
+    }
+
+    #[test]
+    fn function_without_math_tag_has_no_math() {
+        let sigs = extract_signatures(RBF_COV_PACKAGE);
+        let rbf_cov = sigs.iter().find(|s| s.name == "rbf_cov").unwrap();
+        assert_eq!(rbf_cov.doc.as_ref().unwrap().math, None);
+    }
+
+    #[test]
+    fn multiline_math_preserves_line_breaks_verbatim() {
+        let source = r#"
+// @laplace
+// @brief RBF kernel.
+// @math k(x, x') = \alpha^2 \exp\left(
+//   -\frac{(x - x')^2}{2 \rho^2}
+// \right)
+// @param x Vector of input locations.
+matrix rbf_cov(vector x) {
+  return x;
+}
+"#;
+        let sigs = extract_signatures(source);
+        let doc = sigs[0].doc.as_ref().unwrap();
+        assert_eq!(
+            doc.math.as_deref(),
+            Some(
+                "k(x, x') = \\alpha^2 \\exp\\left(\n-\\frac{(x - x')^2}{2 \\rho^2}\n\\right)"
+            )
+        );
+    }
+
+    #[test]
+    fn math_with_latex_special_characters_is_not_mistaken_for_a_new_tag() {
+        // Backslashes, ampersands, and `\\` line breaks inside a `cases`
+        // environment must never be parsed as a new `@tag` boundary.
+        let source = r#"
+// @laplace
+// @brief Piecewise function.
+// @math f(x) = \begin{cases}
+//   x^2 & \text{if } x \geq 0 \\
+//   -x^2 & \text{if } x < 0
+// \end{cases}
+real piecewise(real x) {
+  return x;
+}
+"#;
+        let sigs = extract_signatures(source);
+        let doc = sigs[0].doc.as_ref().unwrap();
+        assert_eq!(
+            doc.math.as_deref(),
+            Some(
+                "f(x) = \\begin{cases}\nx^2 & \\text{if } x \\geq 0 \\\\\n-x^2 & \\text{if } x < 0\n\\end{cases}"
+            )
+        );
+    }
+
+    #[test]
+    fn multiline_example_preserves_line_breaks() {
+        let source = r#"
+// @laplace
+// @brief Fits a model in two steps.
+// @example real mu = compute_mean(x);
+//   real sigma = compute_sd(x);
+real fit(vector x) {
+  return x[1];
+}
+"#;
+        let sigs = extract_signatures(source);
+        let doc = sigs[0].doc.as_ref().unwrap();
+        assert_eq!(
+            doc.example.as_deref(),
+            Some("real mu = compute_mean(x);\nreal sigma = compute_sd(x);")
+        );
+    }
+
+    #[test]
+    fn example_as_last_tag_does_not_swallow_function_signature() {
+        // @example directly followed by the function declaration, with no
+        // trailing @tag -- the most common real case. Capture must stop at
+        // the comment block boundary, not spill into the header.
+        let source = r#"
+// @laplace
+// @brief Sums an array.
+// @example array_sum({1.0, 2.0, 3.0})
+real array_sum(array[N] real xs) {
+  return sum(xs);
+}
+"#;
+        let sigs = extract_signatures(source);
+        assert_eq!(sigs.len(), 1);
+        assert_eq!(sigs[0].name, "array_sum");
+        let doc = sigs[0].doc.as_ref().unwrap();
+        assert_eq!(
+            doc.example.as_deref(),
+            Some("array_sum({1.0, 2.0, 3.0})")
+        );
     }
 }

@@ -321,6 +321,66 @@ matrix rbf_cov(vector x, real alpha, real rho) {
 }
 
 #[test]
+fn doc_html_renders_math_and_multiline_example() {
+    let project = setup();
+    project.write_package(
+        "gps",
+        "1.0.0",
+        &["rbf_cov"],
+        r#"// @laplace
+// @brief Squared exponential covariance matrix.
+// @math k(x, x') = \alpha^2 \exp\left(-\frac{(x - x')^2}{2 \rho^2}\right)
+// @param x Vector of input locations.
+// @return An N x N covariance matrix.
+// @example matrix k = rbf_cov(x, 1.0, 0.5);
+//   print(k);
+matrix rbf_cov(vector x, real alpha, real rho) {
+  return gp_exp_quad_cov(x, alpha, rho);
+}
+"#,
+    );
+    project.run(&["add", "gps"]);
+    project.run(&["install"]);
+
+    let out_path = project.dir.join("rbf_cov.html");
+    let out = project.run(&[
+        "doc",
+        "gps::rbf_cov",
+        "--html",
+        "-o",
+        out_path.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let html = fs::read_to_string(&out_path).unwrap();
+    assert!(html.contains("katex"));
+    assert!(html.contains("class=\"math\""));
+    assert!(html.contains("k(x, x&#39;)"));
+    assert!(html.contains("<pre><code>matrix k = rbf_cov(x, 1.0, 0.5);\nprint(k);</code></pre>"));
+}
+
+#[test]
+fn doc_html_without_math_tag_has_no_katex_span() {
+    let project = setup();
+    project.write_package("gps", "1.0.0", &["rbf_cov"], GPS_STAN);
+    project.run(&["add", "gps"]);
+    project.run(&["install"]);
+
+    let out_path = project.dir.join("rbf_cov.html");
+    let out = project.run(&[
+        "doc",
+        "gps::rbf_cov",
+        "--html",
+        "-o",
+        out_path.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let html = fs::read_to_string(&out_path).unwrap();
+    assert!(!html.contains("class=\"math\""));
+}
+
+#[test]
 fn doc_on_undocumented_function_notes_no_docs_available() {
     let project = setup();
     project.write_package(

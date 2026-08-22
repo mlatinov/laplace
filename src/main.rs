@@ -69,6 +69,15 @@ enum Command {
     Doc {
         /// `<package>::<function>`
         spec: String,
+        /// Render as a standalone HTML file instead of printing to the
+        /// terminal: brief/params/return as plain text, the example in a
+        /// <pre><code> block, and the math field (if any) rendered with
+        /// KaTeX. Requires -o/--output.
+        #[arg(long)]
+        html: bool,
+        /// Output path for --html
+        #[arg(short, long)]
+        output: Option<PathBuf>,
     },
 }
 
@@ -99,7 +108,7 @@ fn run() -> Result<(), CliError> {
             rev,
         } => cmd_add(&package, git.as_deref(), tag.as_deref(), rev.as_deref()),
         Command::Update { package } => cmd_update(&package),
-        Command::Doc { spec } => cmd_doc(&spec),
+        Command::Doc { spec, html, output } => cmd_doc(&spec, html, output),
     }
 }
 
@@ -355,7 +364,7 @@ fn cmd_update(package: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-fn cmd_doc(spec: &str) -> Result<(), CliError> {
+fn cmd_doc(spec: &str, html: bool, output: Option<PathBuf>) -> Result<(), CliError> {
     let Some((package, func)) = spec.split_once("::") else {
         return Err(CliError::Message(format!(
             "expected `<package>::<function>`, got `{spec}`"
@@ -366,7 +375,15 @@ fn cmd_doc(spec: &str) -> Result<(), CliError> {
     let cache_root = default_cache_root();
 
     let sig = docs::lookup(&lockfile_path, &cache_root, package, func)?;
-    print!("{}", docs::render(package, &sig));
+
+    if html {
+        let output = output
+            .ok_or_else(|| CliError::Message("--html requires -o/--output <path>".to_string()))?;
+        fs::write(&output, docs::render_html(package, &sig))?;
+        println!("wrote {}", output.display());
+    } else {
+        print!("{}", docs::render(package, &sig));
+    }
     Ok(())
 }
 
