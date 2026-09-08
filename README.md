@@ -330,10 +330,3 @@ This reads a `docs.json` sidecar that's generated once, at install time —
 there's no network access or Stan re-parsing at lookup time. A function with
 no `@laplace` comment still prints its signature, with a note that no
 documentation is available for it.
-
-## Project layout / for contributors
-
-If you want to work on laplace itself rather than use it, start with
-[`CLAUDE.md`](CLAUDE.md) for the non-negotiable design constraints and
-[`laplace-project-plan.md`](laplace-project-plan.md) for the task breakdown
-and current milestone — this README covers usage only.
