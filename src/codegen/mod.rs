@@ -95,7 +95,7 @@ pub fn generate(
     library_block: Option<&LibraryBlock>,
     installed: &[InstalledPackage],
 ) -> Result<String, CodegenError> {
-    generate_impl(source, library_block, installed).map(|(text, _)| text)
+    generate_impl(source, library_block, installed).map(|(text, ..)| text)
 }
 
 /// Same as [`generate`], but also reports which output lines came from
@@ -106,17 +106,80 @@ pub fn generate_with_package_lines(
     library_block: Option<&LibraryBlock>,
     installed: &[InstalledPackage],
 ) -> Result<GeneratedStan, CodegenError> {
-    generate_impl(source, library_block, installed).map(|(text, package_line_ranges)| GeneratedStan {
+    generate_impl(source, library_block, installed).map(|(text, package_line_ranges, _)| GeneratedStan {
         source: text,
         package_line_ranges,
     })
+}
+
+/// Same as [`generate_with_package_lines`], but also returns a [`SourceMap`]
+/// from byte offsets in the compiled output back to the original `.laplace`
+/// source -- for relocating live `stanc` diagnostics (the LSP's `stanc`
+/// pass) onto the file the user is actually editing.
+pub fn generate_with_source_map(
+    source: &str,
+    library_block: Option<&LibraryBlock>,
+    installed: &[InstalledPackage],
+) -> Result<(GeneratedStan, SourceMap), CodegenError> {
+    generate_impl(source, library_block, installed).map(|(text, package_line_ranges, source_map)| {
+        (
+            GeneratedStan {
+                source: text,
+                package_line_ranges,
+            },
+            source_map,
+        )
+    })
+}
+
+/// Maps a byte offset in generated `.stan` output back to the corresponding
+/// byte offset in the original `.laplace` source. `None` for output text
+/// that has no single corresponding source position: the boilerplate
+/// `functions { }` wrapper codegen synthesizes, and code spliced in from an
+/// imported package (that byte belongs to the package's own source, not
+/// this file). A renamed `pkg::func` call site maps its whole span back to
+/// the start of the original call -- approximate, but exact enough to place
+/// a diagnostic on the right line.
+#[derive(Debug, Clone)]
+pub struct SourceMap {
+    // Sorted, contiguous, non-overlapping output ranges, in increasing
+    // order -- built in one pass over the same edits `apply_edits` applies.
+    segments: Vec<(Range<usize>, SegmentKind)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SegmentKind {
+    /// Exact 1:1 copy from source starting at this original offset -- add
+    /// the in-segment delta to get the exact original offset.
+    Copied(usize),
+    /// Every offset in this output range maps to this same single original
+    /// offset (used for edited spans, e.g. a renamed `pkg::func` call,
+    /// where column-for-column mapping isn't meaningful).
+    Approx(usize),
+    /// No corresponding position in the original file.
+    Unmapped,
+}
+
+impl SourceMap {
+    pub fn map(&self, output_offset: usize) -> Option<usize> {
+        let idx = self.segments.partition_point(|(r, _)| r.end <= output_offset);
+        let (range, kind) = self.segments.get(idx)?;
+        if output_offset < range.start || output_offset > range.end {
+            return None;
+        }
+        match *kind {
+            SegmentKind::Copied(orig_start) => Some(orig_start + (output_offset - range.start)),
+            SegmentKind::Approx(orig) => Some(orig),
+            SegmentKind::Unmapped => None,
+        }
+    }
 }
 
 fn generate_impl(
     source: &str,
     library_block: Option<&LibraryBlock>,
     installed: &[InstalledPackage],
-) -> Result<(String, Vec<PackageLineRange>), CodegenError> {
+) -> Result<(String, Vec<PackageLineRange>, SourceMap), CodegenError> {
     let imports: &[ImportStatement] = library_block.map(|b| b.imports.as_slice()).unwrap_or(&[]);
 
     let mut by_name: BTreeMap<&str, &InstalledPackage> = BTreeMap::new();
@@ -253,7 +316,7 @@ fn generate_impl(
         }
     }
 
-    let (text, splice_start_in_output) = apply_edits(source, edits);
+    let (text, splice_start_in_output, source_map) = apply_edits(source, edits);
 
     let package_line_ranges = splice_start_in_output
         .map(|splice_start| {
@@ -271,7 +334,7 @@ fn generate_impl(
         })
         .unwrap_or_default();
 
-    Ok((text, package_line_ranges))
+    Ok((text, package_line_ranges, source_map))
 }
 
 /// 1-indexed line number containing byte offset `at` in `text`.
@@ -289,30 +352,59 @@ struct Edit {
 
 /// Apply a set of non-overlapping edits (in original-source byte offsets) in
 /// one linear pass, so offsets computed up front never need adjusting for
-/// earlier edits. Returns the compiled text and, if one of the edits was
-/// the import-splice insertion, the byte offset in that text where the
-/// spliced package text begins.
-fn apply_edits(source: &str, mut edits: Vec<Edit>) -> (String, Option<usize>) {
+/// earlier edits. Returns the compiled text, the byte offset in that text
+/// where the spliced package text begins (if one of the edits was the
+/// import-splice insertion), and a [`SourceMap`] back to `source`.
+fn apply_edits(source: &str, mut edits: Vec<Edit>) -> (String, Option<usize>, SourceMap) {
     edits.sort_by_key(|e| (e.range.start, e.range.end));
 
     let mut out = String::with_capacity(source.len());
     let mut cursor = 0usize;
     let mut splice_start_in_output = None;
+    let mut segments: Vec<(Range<usize>, SegmentKind)> = Vec::new();
+
     for edit in edits {
         if edit.range.start < cursor {
             // Overlapping edits shouldn't occur given how callers build
             // them; skip defensively rather than corrupt the output.
             continue;
         }
-        out.push_str(&source[cursor..edit.range.start]);
+
+        if edit.range.start > cursor {
+            let copy_start = out.len();
+            out.push_str(&source[cursor..edit.range.start]);
+            segments.push((copy_start..out.len(), SegmentKind::Copied(cursor)));
+        }
+
+        let replacement_start = out.len();
         if let Some(offset) = edit.splice_offset {
             splice_start_in_output = Some(out.len() + offset);
         }
         out.push_str(&edit.replacement);
+        if !edit.replacement.is_empty() {
+            // Synthesized text (the import-splice insertion) has no source
+            // position to map back to; everything else -- a renamed
+            // `pkg::func` call being the only other kind of replacement --
+            // maps approximately to where the original text it replaced
+            // started.
+            let kind = if edit.splice_offset.is_some() {
+                SegmentKind::Unmapped
+            } else {
+                SegmentKind::Approx(edit.range.start)
+            };
+            segments.push((replacement_start..out.len(), kind));
+        }
+
         cursor = edit.range.end;
     }
-    out.push_str(&source[cursor..]);
-    (out, splice_start_in_output)
+
+    if cursor < source.len() {
+        let copy_start = out.len();
+        out.push_str(&source[cursor..]);
+        segments.push((copy_start..out.len(), SegmentKind::Copied(cursor)));
+    }
+
+    (out, splice_start_in_output, SourceMap { segments })
 }
 
 struct FunctionsBlock {
@@ -666,4 +758,52 @@ model {
         let output = generate(source, block.as_ref(), &[gps_package()]).unwrap();
         assert!(output.contains("return gps__rbf_cov(x, alpha, rho)[1, 1];"));
     }
+
+    #[test]
+    fn source_map_is_identity_for_a_pure_passthrough() {
+        let source = "data {\n  int n;\n}\nmodel {\n}\n";
+        let (generated, source_map) = generate_with_source_map(source, None, &[]).unwrap();
+        assert_eq!(generated.source, source);
+        for offset in 0..source.len() {
+            assert_eq!(source_map.map(offset), Some(offset));
+        }
+    }
+
+    #[test]
+    fn source_map_relocates_user_code_after_a_synthesized_functions_block() {
+        let laplace_source = r#"library {
+  import gps@1.0.0
 }
+
+model {
+  matrix[1, 1] K = gps::rbf_cov([1.0], 1.0, 1.0);
+}
+"#;
+        let block = parse_library_block(laplace_source).unwrap();
+        let installed = vec![gps_package()];
+        let (generated, source_map) =
+            generate_with_source_map(laplace_source, block.as_ref(), &installed).unwrap();
+
+        // A byte offset inside the `model { }` block in the generated output
+        // (well past the synthesized `functions { }` block) should map back
+        // to the exact same text in the original `.laplace` source.
+        let gen_model_at = generated.source.find("matrix[1, 1] K").unwrap();
+        let orig_model_at = laplace_source.find("matrix[1, 1] K").unwrap();
+        assert_eq!(source_map.map(gen_model_at), Some(orig_model_at));
+
+        // A byte offset inside the spliced-in `gps` package code has no
+        // position in *this* file.
+        let gen_pkg_at = generated.source.find("gp_exp_quad_cov").unwrap();
+        assert_eq!(source_map.map(gen_pkg_at), None);
+
+        // The renamed call site maps (approximately) back to where the
+        // original `gps::rbf_cov(...)` call started. Search for the call
+        // with its arguments, not just `gps__rbf_cov(` -- that also matches
+        // the spliced-in function *definition* earlier in the output, which
+        // renaming touches too.
+        let gen_call_at = generated.source.find("gps__rbf_cov([1.0]").unwrap();
+        let orig_call_at = laplace_source.find("gps::rbf_cov(").unwrap();
+        assert_eq!(source_map.map(gen_call_at), Some(orig_call_at));
+    }
+}
+
