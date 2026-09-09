@@ -69,20 +69,42 @@ impl GitDependency {
     }
 }
 
-/// Package-level `laplace.toml`, shipped alongside a package's `.stan`
-/// file(s) in the registry.
+/// Package-level `laplace.toml`, shipped alongside a package's `.stan` /
+/// `.laplacelib` file(s) in the registry.
 ///
 /// ```toml
-/// name = "gps"
+/// name = "regression"
 /// version = "1.0.0"
-/// exports = ["rbf_cov"]
+/// exports = ["fit"]
+///
+/// [dependencies]
+/// stats = "^1.0"
 /// ```
+///
+/// `[dependencies]` uses exactly the same syntax as a project's
+/// `laplace.toml` -- that is what lets a `.laplacelib` library depend on
+/// another library. A package with no `[dependencies]` table (every package
+/// written before libraries could depend on libraries) reads as a leaf.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackageManifest {
     pub name: String,
     pub version: String,
     #[serde(default)]
     pub exports: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub dependencies: BTreeMap<String, Dependency>,
+}
+
+impl PackageManifest {
+    /// A leaf package manifest: no dependencies of its own.
+    pub fn new(name: impl Into<String>, version: impl Into<String>, exports: Vec<String>) -> Self {
+        PackageManifest {
+            name: name.into(),
+            version: version.into(),
+            exports,
+            dependencies: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -176,8 +198,12 @@ pub fn write_package_manifest(
 }
 
 /// Read and concatenate every `.stan` file directly inside `package_dir`, in
-/// filename order, so codegen and doc extraction always agree on what a
-/// package's source is.
+/// filename order.
+///
+/// Prefer [`crate::package::read_package_sources`], which additionally
+/// understands `.laplacelib` files. This one stays for the callers that are
+/// looking at a directory of plain Stan (`laplace init`, which scaffolds a
+/// manifest for an existing Stan-functions directory).
 pub fn read_package_stan_source(package_dir: &Path) -> std::io::Result<String> {
     let mut stan_files: Vec<PathBuf> = fs::read_dir(package_dir)?
         .filter_map(|entry| entry.ok())
@@ -306,6 +332,48 @@ mod tests {
         assert_eq!(manifest.name, "gps");
         assert_eq!(manifest.version, "1.0.0");
         assert_eq!(manifest.exports, vec!["rbf_cov", "matern_cov"]);
+        assert!(manifest.dependencies.is_empty());
+    }
+
+    #[test]
+    fn package_manifest_parses_its_own_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("laplace.toml");
+        fs::write(
+            &path,
+            concat!(
+                "name = \"regression\"\n",
+                "version = \"1.0.0\"\n",
+                "exports = [\"fit\"]\n",
+                "\n[dependencies]\n",
+                "stats = \"^1.0\"\n",
+                "priors = { git = \"https://example.com/priors\", tag = \"0.2.0\" }\n",
+            ),
+        )
+        .unwrap();
+
+        let manifest = read_package_manifest(&path).unwrap();
+        assert_eq!(
+            manifest.dependencies.get("stats").unwrap().as_range(),
+            Some("^1.0")
+        );
+        assert!(matches!(
+            manifest.dependencies.get("priors").unwrap(),
+            Dependency::Git(_)
+        ));
+    }
+
+    #[test]
+    fn a_package_manifest_with_dependencies_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("laplace.toml");
+        let mut manifest = PackageManifest::new("regression", "1.0.0", vec!["fit".to_string()]);
+        manifest
+            .dependencies
+            .insert("stats".to_string(), Dependency::Range("^1.0".to_string()));
+
+        write_package_manifest(&path, &manifest).unwrap();
+        assert_eq!(read_package_manifest(&path).unwrap(), manifest);
     }
 
     #[test]
@@ -319,11 +387,7 @@ mod tests {
     fn package_manifest_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("laplace.toml");
-        let manifest = PackageManifest {
-            name: "gps".to_string(),
-            version: "0.1.0".to_string(),
-            exports: vec!["rbf_cov".to_string()],
-        };
+        let manifest = PackageManifest::new("gps", "0.1.0", vec!["rbf_cov".to_string()]);
 
         write_package_manifest(&path, &manifest).unwrap();
         assert_eq!(read_package_manifest(&path).unwrap(), manifest);

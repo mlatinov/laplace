@@ -10,6 +10,11 @@ produces a real, readable, committable `.stan` file, and laplace itself is
 never a runtime dependency of your model — once `build/model.stan` exists, you
 can hand it to `stanc`/cmdstan without laplace installed at all.
 
+Libraries can depend on other libraries: a package declares its own
+`[dependencies]`, laplace resolves the whole graph (unifying diamonds,
+rejecting cycles), and pins it in `laplace.lock`. See [Libraries that depend on
+libraries](#libraries-that-depend-on-libraries).
+
 ## Installing laplace
 
 laplace is built from source with Cargo (edition 2021 — any reasonably recent
@@ -188,6 +193,13 @@ that's present in the `.stan` file but absent from `exports` cannot be called
 as `pkg::func` from outside the package — regardless of whether it has an
 `@laplace` comment. Documentation and visibility are two separate concerns.
 
+One caveat about non-exported functions: laplace leaves their names alone
+(only exports get the `pkg__` prefix), and Stan has a single flat function
+namespace. If two packages in the same build both define a private helper
+called `softplus`, the build fails with an error naming both packages rather
+than silently emitting two definitions. Give private helpers distinctive
+names, or export them.
+
 ### Scaffolding the manifest with `laplace init`
 
 Rather than hand-writing `laplace.toml`, run `laplace init` inside a
@@ -244,6 +256,126 @@ Exactly one of `tag`/`rev` must be set per git dependency. A git-sourced
 package is otherwise treated identically to a registry one from that point
 on — same checksum in the lock, same install cache layout.
 
+## Libraries that depend on libraries
+
+A library can build on another library. Say `regression` wants to use `stats`'s
+`mean_`. Two things change relative to a leaf package.
+
+**1. The manifest gets a `[dependencies]` table**, with exactly the same syntax
+as a project's `laplace.toml`:
+
+```toml
+# regression/laplace.toml
+name = "regression"
+version = "1.0.0"
+exports = ["centre"]
+
+[dependencies]
+stats = "^1.0"
+```
+
+**2. The source file becomes `.laplacelib`** instead of `.stan`, so it can carry
+a `library { }` block and `pkg::func()` calls:
+
+```stan
+// regression/regression.laplacelib
+library {
+  import stats
+}
+
+// @laplace
+// @brief Centre a vector on its mean.
+// @param x The vector to centre.
+// @return `x` minus its mean.
+vector centre(vector x) {
+  return x - stats::mean_(x);
+}
+```
+
+`.laplacelib` is a relaxed dialect: bare function definitions, an optional
+`functions { }` wrapper around them, and an optional `library { }` block. The
+model-shaped blocks (`data`, `transformed data`, `parameters`, `transformed
+parameters`, `model`, `generated quantities`) are rejected with a clear error —
+a library provides functions to a model, it isn't a model. A package can mix
+`.laplacelib` and plain `.stan` files freely; the `.stan` ones are ordinary
+Stan, passed through verbatim, and can't import anything.
+
+### What the consumer sees
+
+Nothing new. A project that wants `regression` just adds it, and `stats` comes
+along automatically:
+
+```
+$ laplace add regression
+added regression@1.0.0
+$ laplace install
+installed 2 packages
+$ laplace build model.laplace
+wrote build/model.stan (33 lines, 1 dependency + 1 transitive)
+```
+
+`laplace.toml` still records only what you asked for; `laplace.lock` records the
+whole graph, including the edges between packages:
+
+```toml
+root = ["regression"]
+
+[[package]]
+name = "regression"
+version = "1.0.0"
+checksum = "sha256:..."
+source = "registry"
+dependencies = ["stats"]
+
+[[package]]
+name = "stats"
+version = "1.0.0"
+checksum = "sha256:..."
+source = "registry"
+dependencies = []
+```
+
+That's what lets `laplace install` restore the full graph on a new machine
+without re-resolving a single version range.
+
+### Imports are private
+
+`regression` importing `stats` does **not** give *your* model access to
+`stats`. If you want to call `stats::mean_` yourself, `laplace add stats` and
+import it in your own `library { }` block — at which point laplace makes sure
+both of you agree on one version of it. Libraries can't borrow each other's
+dependencies either: a package may only call packages listed in its own
+`[dependencies]`.
+
+There is no re-export mechanism yet.
+
+### Version conflicts and cycles
+
+A build contains **exactly one version of any package**. When several
+dependents want the same package, laplace picks one version satisfying all of
+their ranges (the newest that qualifies). If no version qualifies, the build
+stops and names everyone involved:
+
+```
+error: cannot pick one version of `stats`:
+  this project requires `^1`
+  `regression@1.0.0` requires `^2`
+  available versions: 1.0.0, 2.0.0
+```
+
+The fix is to widen one of the ranges, not to run two copies — two copies would
+mangle to the same `stats__mean_` name and clobber each other.
+
+Circular dependencies are rejected outright, with the cycle printed:
+
+```
+error: dependency cycle: alpha -> beta -> alpha
+```
+
+`laplace add` and `laplace update` only move the package you name. Everything
+else stays at its locked version unless a constraint forces it to move, so
+adding one dependency never silently bumps the rest of your graph.
+
 ## Using a library in a model
 
 Import a package in the `library { }` block, bare (latest resolved version)
@@ -264,7 +396,8 @@ Dependencies are tracked across two files:
 - **`laplace.toml`** — hand-edited, loose version ranges (`gps = "^1.0"`) or
   git sources. This is where you state what you're willing to accept.
 - **`laplace.lock`** — machine-written, exact resolved versions and
-  checksums. This is what actually gets installed. Commit it to git.
+  checksums for the *whole* graph, transitive dependencies included, plus the
+  edges between them. This is what actually gets installed. Commit it to git.
 
 `laplace install` reads **only** the lock, never `laplace.toml`'s ranges —
 that's what makes a fresh clone reproducible: two machines with the same
@@ -273,10 +406,12 @@ that's what makes a fresh clone reproducible: two machines with the same
 The three commands, and when to reach for each:
 
 - **`laplace add <pkg>[@version]`** — introducing a new dependency. Resolves
-  a version matching the range (or pins a new one), fetches it, and updates
-  both `laplace.toml` and `laplace.lock`.
+  a version matching the range (or pins a new one), pulls in whatever that
+  package itself depends on, fetches it all, and updates both `laplace.toml`
+  and `laplace.lock`.
 - **`laplace update <pkg>`** — bumping an existing dependency to the latest
-  version matching its current range in `laplace.toml`.
+  version matching its current range in `laplace.toml`. Only `<pkg>` moves;
+  the rest of the graph keeps its pins unless a constraint forces otherwise.
 - **`laplace install`** — restoring an already-locked project on a new
   machine (e.g. right after `git clone`). Reads `laplace.lock` only.
 
@@ -289,10 +424,81 @@ laplace build <file.laplace> [-o build/model.stan]
 By default, output goes to `build/<stem>.stan` — e.g. `model.laplace` builds
 to `build/model.stan`. Override with `-o`/`--output`.
 
+`--split-functions` changes the output *shape*. By default every imported
+function is inlined into the compiled `.stan` file, so you ship one
+self-contained file. With `--split-functions`, each directly imported package
+instead gets its own `<pkg>.stanfunctions` file next to the output, and the
+`functions { }` block gets an `#include` line per package:
+
+```
+$ laplace build model.laplace --split-functions
+wrote build/model.stan (15 lines, 1 dependency + 1 transitive)
+wrote build/regression.stanfunctions (stats, regression)
+note: keep the .stanfunctions files next to build/model.stan -- stanc resolves #include relative
+to the including file, or pass --include-paths=build
+```
+
+```stan
+// build/model.stan
+functions {
+#include "regression.stanfunctions"
+
+}
+
+
+data {
+  int<lower=1> N;
+  vector[N] y;
+}
+
+model {
+  vector[N] c = regression__centre(y);
+  c ~ std_normal();
+}
+```
+
+```stan
+// build/regression.stanfunctions
+// Generated by laplace from package `regression` 1.0.0. Do not edit.
+// Bundled dependencies of `regression`: stats 1.0.0.
+
+// @laplace
+// @brief Arithmetic mean of a vector.
+real stats__mean_(vector x) {
+  return sum(x) / num_elements(x);
+}
+
+// @laplace
+// @brief Centre a vector on its mean.
+vector regression__centre(vector x) {
+  return x - stats__mean_(x);
+}
+```
+
+Notes on split mode:
+
+- Functions you wrote yourself in the `.laplace` file's `functions { }` block
+  stay inline. Only *imported* package functions move out.
+- A transitive dependency has no file of its own — it's flattened into the file
+  of the package that pulled it in (`stats` above). laplace never generates an
+  `#include` of one `.stanfunctions` file from another, so "what has to ship
+  next to my `.stan` file" is answerable from your `library { }` block. If two
+  of your direct imports share a dependency, it's still emitted exactly once,
+  and the `#include` lines are ordered so every function is defined before it's
+  used.
+- The `.stanfunctions` files must travel with the `.stan` file. `stanc` resolves
+  `#include` relative to the including file's directory first, so keeping them
+  in the same directory just works; otherwise pass `--include-paths`.
+- A project with no imports is unaffected — `--split-functions` is a no-op.
+- It's off by default because one self-contained `.stan` file is the more
+  portable artifact. Turn it on when the inlined output has grown too big to
+  read comfortably.
+
 `--check` is for CI: it runs codegen and diffs the result against the
 existing output file instead of writing, exiting non-zero if they differ.
 Use it to catch a committed `.stan` file that's gone stale relative to its
-`.laplace` source.
+`.laplace` source. With `--split-functions` it checks the `.stanfunctions`
+files too.
 
 `--validate` shells out to `stanc` after writing, to type-check the
 generated file. It's off by default, so a normal `laplace build` never

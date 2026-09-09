@@ -1,10 +1,6 @@
-mod codegen;
-mod docs;
-mod init;
-mod manifest;
-mod parser;
-mod resolve;
-mod validate;
+//! The `laplace` CLI. All of the actual work lives in the library crate
+//! (`src/lib.rs` and below); this file is argument parsing, filesystem
+//! paths, and terminal output.
 
 use std::env;
 use std::fs;
@@ -13,9 +9,10 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use codegen::InstalledPackage;
-use parser::library_block::{parse_library_block, ImportStatement};
-use resolve::Registry;
+use laplace::codegen::{self, CodegenOptions};
+use laplace::parser::library_block::{parse_library_block, ImportStatement};
+use laplace::resolve::{self, Registry};
+use laplace::{docs, init, manifest, package, validate};
 
 #[derive(Parser)]
 #[command(
@@ -46,6 +43,12 @@ enum Command {
         /// PATH). Off by default so build never requires stanc installed.
         #[arg(long)]
         validate: bool,
+        /// Write each imported package's functions to its own
+        /// `<pkg>.stanfunctions` file next to the output and `#include` it,
+        /// instead of inlining every function into the `.stan` file. Off by
+        /// default, so a plain build still produces one self-contained file.
+        #[arg(long)]
+        split_functions: bool,
     },
     /// Install every package pinned in laplace.lock
     Install,
@@ -99,7 +102,8 @@ fn run() -> Result<(), CliError> {
             output,
             check,
             validate,
-        } => cmd_build(&file, output, check, validate),
+            split_functions,
+        } => cmd_build(&file, output, check, validate, split_functions),
         Command::Install => cmd_install(),
         Command::Add {
             package,
@@ -119,7 +123,9 @@ enum CliError {
     #[error(transparent)]
     Init(#[from] init::InitError),
     #[error(transparent)]
-    LibraryBlock(#[from] parser::library_block::LibraryBlockError),
+    LibraryBlock(#[from] laplace::parser::library_block::LibraryBlockError),
+    #[error(transparent)]
+    Package(Box<package::PackageError>),
     #[error(transparent)]
     Codegen(#[from] codegen::CodegenError),
     #[error(transparent)]
@@ -146,6 +152,12 @@ enum CliError {
 impl From<resolve::ResolveError> for CliError {
     fn from(err: resolve::ResolveError) -> Self {
         CliError::Resolve(Box::new(err))
+    }
+}
+
+impl From<package::PackageError> for CliError {
+    fn from(err: package::PackageError) -> Self {
+        CliError::Package(Box::new(err))
     }
 }
 
@@ -193,6 +205,7 @@ fn cmd_build(
     output: Option<PathBuf>,
     check: bool,
     validate: bool,
+    split_functions: bool,
 ) -> Result<(), CliError> {
     let source = fs::read_to_string(file)?;
     let library_block = parse_library_block(&source)?;
@@ -204,15 +217,46 @@ fn cmd_build(
     let lockfile_path = PathBuf::from("laplace.lock");
     let cache_root = default_cache_root();
     let lock = resolve::lockfile::read_lockfile(&lockfile_path)?;
+    let roots = lock.root_names();
 
-    let mut installed = Vec::with_capacity(imports.len());
+    // Direct imports first, in `library { }` order, then every transitive
+    // dependency sorted by name. Codegen re-orders dependency-first and
+    // falls back to this order for packages with no ordering relation, so a
+    // project with no transitive dependencies compiles exactly as it always
+    // has.
+    let mut order: Vec<String> = Vec::new();
     for import in imports {
-        let Some(locked) = lock.packages.iter().find(|p| p.name == import.name) else {
+        if lock.get(&import.name).is_none() {
             return Err(CliError::Message(format!(
                 "`{}` is imported but not recorded in laplace.lock -- run `laplace add {}` first",
                 import.name, import.name
             )));
-        };
+        }
+        if !roots.iter().any(|r| r == &import.name) {
+            return Err(CliError::Message(format!(
+                "`{}` is imported but is only a transitive dependency (some other package pulls \
+                 it in) -- a package's imports are private, so run `laplace add {}` to depend on \
+                 it directly",
+                import.name, import.name
+            )));
+        }
+        order.push(import.name.clone());
+    }
+    let direct_count = order.len();
+    for locked in lock.closure(&order.clone()) {
+        if !order.iter().any(|n| n == &locked.name) {
+            order.push(locked.name.clone());
+        }
+    }
+
+    let mut installed = Vec::with_capacity(order.len());
+    for name in &order {
+        let locked = lock.get(name).ok_or_else(|| {
+            CliError::Message(format!(
+                "`{name}` is required by another locked package but has no laplace.lock entry -- \
+                 the lockfile is inconsistent; re-run `laplace add`"
+            ))
+        })?;
         let package_dir = cache_root.join(&locked.name).join(&locked.version);
         if !package_dir.is_dir() {
             return Err(CliError::Message(format!(
@@ -220,35 +264,70 @@ fn cmd_build(
                 locked.name, locked.version
             )));
         }
-        installed.push(load_installed_package(&package_dir, &locked.name)?);
+        installed.push(package::load(&package_dir, &locked.name)?);
     }
 
-    let generated = codegen::generate_with_package_lines(&source, library_block.as_ref(), &installed)?;
+    let options = CodegenOptions { split_functions };
+    let generated =
+        codegen::generate_with_options(&source, library_block.as_ref(), &installed, &options)?;
     let output_path = output.unwrap_or_else(|| default_output_path(file));
+    let output_dir = output_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
 
     if check {
         let existing = fs::read_to_string(&output_path).unwrap_or_default();
         if existing != generated.source {
             return Err(CliError::CheckFailed(output_path));
         }
+        for file in &generated.function_files {
+            let path = output_dir.join(&file.file_name);
+            if fs::read_to_string(&path).unwrap_or_default() != file.contents {
+                return Err(CliError::CheckFailed(path));
+            }
+        }
         println!("{} is up to date", output_path.display());
         return Ok(());
     }
 
-    if let Some(parent) = output_path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        fs::create_dir_all(parent)?;
-    }
+    fs::create_dir_all(&output_dir)?;
     fs::write(&output_path, &generated.source)?;
+    for file in &generated.function_files {
+        fs::write(output_dir.join(&file.file_name), &file.contents)?;
+    }
 
     let lines = generated.source.lines().count();
     println!(
-        "wrote {} ({} {}, {} {})",
+        "wrote {} ({} {}, {} {}{})",
         output_path.display(),
         lines,
         pluralize(lines, "line", "lines"),
-        imports.len(),
-        pluralize(imports.len(), "dependency", "dependencies"),
+        direct_count,
+        pluralize(direct_count, "dependency", "dependencies"),
+        match order.len() - direct_count {
+            0 => String::new(),
+            n => format!(" + {n} transitive"),
+        },
     );
+
+    for file in &generated.function_files {
+        let path = output_dir.join(&file.file_name);
+        println!(
+            "wrote {} ({})",
+            path.display(),
+            file.packages.join(", "),
+        );
+    }
+    if !generated.function_files.is_empty() {
+        println!(
+            "note: keep the .stanfunctions files next to {} -- stanc resolves #include relative \
+             to the including file, or pass --include-paths={}",
+            output_path.display(),
+            output_dir.display(),
+        );
+    }
 
     if validate {
         validate::validate(&stanc_command(), &output_path, &generated)?;
@@ -262,18 +341,6 @@ fn cmd_build(
 /// `LAPLACE_STANC` so tests never depend on a real stanc install.
 fn stanc_command() -> String {
     env::var("LAPLACE_STANC").unwrap_or_else(|_| "stanc".to_string())
-}
-
-fn load_installed_package(package_dir: &Path, name: &str) -> Result<InstalledPackage, CliError> {
-    let pkg_manifest = manifest::read_package_manifest(&package_dir.join("laplace.toml"))?;
-    let source = manifest::read_package_stan_source(package_dir)?;
-    let signatures = parser::signatures::extract_signatures(&source);
-    Ok(InstalledPackage {
-        name: name.to_string(),
-        source,
-        signatures,
-        exported: pkg_manifest.exports,
-    })
 }
 
 fn default_output_path(file: &Path) -> PathBuf {
@@ -314,9 +381,11 @@ fn cmd_add(
     let cache_root = default_cache_root();
 
     if let Some(url) = git {
+        let registry = Registry::new(registry_root());
         let locked = resolve::add_git(
             &project_manifest_path,
             &lockfile_path,
+            &registry,
             &cache_root,
             spec,
             url,

@@ -9,8 +9,11 @@
 //! identically: same checksum, same cache layout, same `install_one`.
 
 mod git;
+pub mod graph;
 pub mod lockfile;
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,8 +22,9 @@ use semver::{Version, VersionReq};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::manifest::{self, Dependency, GitDependency, ManifestError};
-use lockfile::{LockedPackage, LockfileError};
+use crate::manifest::{self, Dependency, GitDependency, ManifestError, PackageManifest};
+use graph::{DepRequirement, GraphError, PackageProvider};
+use lockfile::{LockedPackage, Lockfile, LockfileError};
 
 /// The `source` value recorded in `laplace.lock` for packages resolved from
 /// the local filesystem registry.
@@ -120,6 +124,9 @@ pub enum ResolveError {
 
     #[error(transparent)]
     Docs(Box<crate::docs::DocsError>),
+
+    #[error(transparent)]
+    Graph(Box<GraphError>),
 }
 
 /// A local filesystem package registry: `<root>/<name>/<version>/` folders,
@@ -172,6 +179,249 @@ impl Registry {
     }
 }
 
+/// Turn a manifest dependency entry into the requirement the graph
+/// resolver speaks.
+fn dep_requirement(dep: &Dependency) -> Result<DepRequirement, ResolveError> {
+    match dep {
+        Dependency::Range(range) => {
+            let req = VersionReq::parse(range).map_err(|source| ResolveError::InvalidVersionReq {
+                value: range.clone(),
+                source,
+            })?;
+            Ok(DepRequirement::Range(req))
+        }
+        Dependency::Git(git_dep) => Ok(DepRequirement::Git {
+            url: git_dep.git.clone(),
+            git_ref: git_dep.git_ref()?.to_string(),
+        }),
+    }
+}
+
+fn root_requirements(
+    manifest: &manifest::ProjectManifest,
+) -> Result<Vec<(String, DepRequirement)>, ResolveError> {
+    manifest
+        .dependencies
+        .iter()
+        .map(|(name, dep)| Ok((name.clone(), dep_requirement(dep)?)))
+        .collect()
+}
+
+/// A checked-out git package, kept alive for the duration of a resolve so
+/// the same ref is cloned at most once and the resolved copy can be
+/// installed straight from it afterwards.
+struct GitCheckout {
+    dir: tempfile::TempDir,
+    version: Version,
+    source: String,
+}
+
+/// The [`PackageProvider`] laplace actually resolves against: the local
+/// filesystem registry, plus on-demand git checkouts.
+struct RegistryProvider<'a> {
+    registry: &'a Registry,
+    git: RefCell<BTreeMap<String, GitCheckout>>,
+    /// The last structured error a provider callback hit. `GraphError` is a
+    /// plain-data type (it has to be, so the resolver stays unit-testable
+    /// against synthetic graphs), so it can only carry a provider failure as
+    /// a string. Stashing the real error here lets `resolve` hand the caller
+    /// back the precise `ResolveError` -- a name mismatch, a git failure --
+    /// instead of a flattened message.
+    last_error: RefCell<Option<ResolveError>>,
+}
+
+impl<'a> RegistryProvider<'a> {
+    fn new(registry: &'a Registry) -> Self {
+        RegistryProvider {
+            registry,
+            git: RefCell::new(BTreeMap::new()),
+            last_error: RefCell::new(None),
+        }
+    }
+
+    /// Record `err` and wrap it for the resolver.
+    fn fail(&self, err: ResolveError) -> GraphError {
+        let message = err.to_string();
+        *self.last_error.borrow_mut() = Some(err);
+        GraphError::Provider(message)
+    }
+
+    fn take_error(&self) -> Option<ResolveError> {
+        self.last_error.borrow_mut().take()
+    }
+
+    /// Where a resolved package's files live, and what `source` string the
+    /// lockfile should record for it.
+    fn locate(&self, name: &str, version: &Version) -> Result<(PathBuf, String), ResolveError> {
+        if let Some(checkout) = self.git.borrow().get(name) {
+            return Ok((checkout.dir.path().to_path_buf(), checkout.source.clone()));
+        }
+        Ok((
+            self.registry.package_dir(name, version),
+            REGISTRY_SOURCE.to_string(),
+        ))
+    }
+
+    fn manifest_of(&self, name: &str, version: &Version) -> Result<PackageManifest, ResolveError> {
+        let (dir, _) = self.locate(name, version)?;
+        manifest::read_package_manifest(&dir.join("laplace.toml")).map_err(ResolveError::from)
+    }
+}
+
+impl PackageProvider for RegistryProvider<'_> {
+    fn available_versions(&self, name: &str) -> Result<Vec<Version>, GraphError> {
+        self.registry.available_versions(name).map_err(|e| self.fail(e))
+    }
+
+    fn git_version(&self, name: &str, url: &str, git_ref: &str) -> Result<Version, GraphError> {
+        let source = git::git_source(url, git_ref);
+        if let Some(checkout) = self.git.borrow().get(name) {
+            if checkout.source == source {
+                return Ok(checkout.version.clone());
+            }
+        }
+
+        let tmp = tempfile::tempdir().map_err(|e| self.fail(ResolveError::TempDir(e)))?;
+        git::fetch(url, git_ref, tmp.path()).map_err(|e| self.fail(e.into()))?;
+
+        let pkg_manifest = manifest::read_package_manifest(&tmp.path().join("laplace.toml"))
+            .map_err(|e| self.fail(e.into()))?;
+        if pkg_manifest.name != name {
+            return Err(self.fail(ResolveError::PackageNameMismatch {
+                path: tmp.path().join("laplace.toml"),
+                expected: name.to_string(),
+                found: pkg_manifest.name,
+            }));
+        }
+        let version = Version::parse(&pkg_manifest.version).map_err(|source| {
+            self.fail(ResolveError::InvalidVersion {
+                value: pkg_manifest.version.clone(),
+                source,
+            })
+        })?;
+
+        self.git.borrow_mut().insert(
+            name.to_string(),
+            GitCheckout {
+                dir: tmp,
+                version: version.clone(),
+                source,
+            },
+        );
+        Ok(version)
+    }
+
+    fn dependencies_of(
+        &self,
+        name: &str,
+        version: &Version,
+    ) -> Result<Vec<(String, DepRequirement)>, GraphError> {
+        let pkg_manifest = self.manifest_of(name, version).map_err(|e| self.fail(e))?;
+        pkg_manifest
+            .dependencies
+            .iter()
+            .map(|(dep_name, dep)| {
+                Ok((
+                    dep_name.clone(),
+                    dep_requirement(dep).map_err(|e| self.fail(e))?,
+                ))
+            })
+            .collect()
+    }
+}
+
+/// Resolve the project's entire dependency graph, install every package in
+/// it, and write the full graph to `laplace.lock`.
+///
+/// `free` names the one package (if any) allowed to move off its currently
+/// locked version -- the target of `add`/`update`. Every other already-
+/// locked package is preferred at its locked version, so one `add` does not
+/// silently bump the rest of the graph. `pinned` overrides that for an
+/// explicit `add pkg@version`.
+fn resolve_install_and_lock(
+    project_manifest: &manifest::ProjectManifest,
+    lockfile_path: &Path,
+    registry: &Registry,
+    cache_root: &Path,
+    free: Option<&str>,
+    pinned: &BTreeMap<String, Version>,
+) -> Result<Lockfile, ResolveError> {
+    let roots = root_requirements(project_manifest)?;
+
+    let previous = lockfile::read_lockfile(lockfile_path)?;
+    let mut preferred: BTreeMap<String, Version> = BTreeMap::new();
+    for pkg in &previous.packages {
+        if Some(pkg.name.as_str()) == free {
+            continue;
+        }
+        if let Ok(version) = Version::parse(&pkg.version) {
+            preferred.insert(pkg.name.clone(), version);
+        }
+    }
+    preferred.extend(pinned.iter().map(|(k, v)| (k.clone(), v.clone())));
+
+    let provider = RegistryProvider::new(registry);
+    let graph = graph::resolve_graph_with_preferences(&roots, &provider, &preferred)
+        .map_err(|err| match provider.take_error() {
+            // A provider callback failed; report the precise error it hit
+            // rather than the resolver's stringified copy of it.
+            Some(original) if matches!(err, GraphError::Provider(_)) => original,
+            _ => map_graph_error(err, registry),
+        })?;
+
+    let mut packages = Vec::with_capacity(graph.packages.len());
+    for resolved in graph.packages.values() {
+        let (package_dir, source) = provider.locate(&resolved.name, &resolved.version)?;
+        let pkg_manifest = manifest::read_package_manifest(&package_dir.join("laplace.toml"))?;
+        if pkg_manifest.name != resolved.name {
+            return Err(ResolveError::PackageNameMismatch {
+                path: package_dir.join("laplace.toml"),
+                expected: resolved.name.clone(),
+                found: pkg_manifest.name,
+            });
+        }
+
+        let locked = LockedPackage {
+            name: resolved.name.clone(),
+            version: resolved.version.to_string(),
+            checksum: checksum_dir(&package_dir)?,
+            source,
+            dependencies: resolved.dependencies.clone(),
+        };
+        install_one(&package_dir, cache_root, &locked)?;
+        packages.push(locked);
+    }
+
+    let lock = Lockfile {
+        root: graph.roots.clone(),
+        packages,
+    };
+    lockfile::write_lockfile(lockfile_path, &lock)?;
+    Ok(lock)
+}
+
+/// Translate the pure resolver's errors into laplace's user-facing ones,
+/// keeping the registry-specific wording where it is more helpful.
+fn map_graph_error(err: GraphError, registry: &Registry) -> ResolveError {
+    match err {
+        // A package nothing can supply. This is usually a *transitive*
+        // dependency, so name the registry it was looked for in -- the user
+        // never wrote this name down anywhere and needs the hint.
+        GraphError::PackageUnavailable { package } => ResolveError::PackageNotInRegistry {
+            package,
+            registry_root: registry.root.clone(),
+        },
+        other => ResolveError::Graph(Box::new(other)),
+    }
+}
+
+fn locked_for<'a>(lock: &'a Lockfile, package: &str) -> Result<&'a LockedPackage, ResolveError> {
+    lock.get(package)
+        .ok_or_else(|| ResolveError::NotADependency {
+            package: package.to_string(),
+        })
+}
+
 /// `laplace add <pkg>[@version]`.
 ///
 /// - With an explicit `@version`: that exact version must exist in the
@@ -182,8 +432,10 @@ impl Registry {
 ///   is new to the manifest, picks the latest available version and writes
 ///   `^<version>` as its range.
 ///
-/// Either way, resolves to exactly one version, records its checksum in
-/// `laplace.lock`, and copies it into `cache_root/<name>/<version>/`.
+/// Either way it re-resolves the *whole* dependency graph (packages can
+/// have dependencies of their own), installs every package in it, and
+/// writes the full graph to `laplace.lock`. Packages already pinned in the
+/// lock stay where they are unless a constraint forces them to move.
 pub fn add(
     project_manifest_path: &Path,
     lockfile_path: &Path,
@@ -193,8 +445,9 @@ pub fn add(
     pinned_version: Option<&str>,
 ) -> Result<LockedPackage, ResolveError> {
     let mut project_manifest = manifest::read_project_manifest(project_manifest_path)?;
+    let mut pinned: BTreeMap<String, Version> = BTreeMap::new();
 
-    let resolved_version = match pinned_version {
+    match pinned_version {
         Some(raw) => {
             let version = Version::parse(raw).map_err(|source| ResolveError::InvalidVersion {
                 value: raw.to_string(),
@@ -217,65 +470,58 @@ pub fn add(
                 package.to_string(),
                 Dependency::Range(format!("^{version}")),
             );
-            version
+            pinned.insert(package.to_string(), version);
         }
         None => {
-            let existing_range = match project_manifest.dependencies.get(package) {
-                Some(Dependency::Range(range)) => Some(range.clone()),
+            match project_manifest.dependencies.get(package) {
                 Some(Dependency::Git(_)) => {
                     return Err(ResolveError::NotARegistryDependency {
                         package: package.to_string(),
                     })
                 }
-                None => None,
-            };
-            let req = match &existing_range {
-                Some(range) => VersionReq::parse(range).map_err(|source| {
-                    ResolveError::InvalidVersionReq {
-                        value: range.clone(),
-                        source,
-                    }
-                })?,
-                None => VersionReq::STAR,
-            };
-
-            let available = registry.available_versions(package)?;
-            if available.is_empty() {
-                return Err(ResolveError::PackageNotInRegistry {
-                    package: package.to_string(),
-                    registry_root: registry.root.clone(),
-                });
+                Some(Dependency::Range(_)) => {}
+                None => {
+                    // New to the manifest: pick the latest available version
+                    // and record `^<version>` as the range to accept.
+                    let latest = registry
+                        .available_versions(package)?
+                        .into_iter()
+                        .max()
+                        .ok_or_else(|| ResolveError::PackageNotInRegistry {
+                            package: package.to_string(),
+                            registry_root: registry.root.clone(),
+                        })?;
+                    project_manifest.dependencies.insert(
+                        package.to_string(),
+                        Dependency::Range(format!("^{latest}")),
+                    );
+                }
             }
-            let latest = available
-                .into_iter()
-                .filter(|v| req.matches(v))
-                .max()
-                .ok_or_else(|| ResolveError::NoMatchingVersion {
-                    package: package.to_string(),
-                    range: existing_range.clone().unwrap_or_else(|| "*".to_string()),
-                })?;
-
-            project_manifest
-                .dependencies
-                .entry(package.to_string())
-                .or_insert_with(|| Dependency::Range(format!("^{latest}")));
-            latest
         }
-    };
+    }
 
-    let locked = fetch_and_lock(lockfile_path, registry, cache_root, package, &resolved_version)?;
+    let lock = resolve_install_and_lock(
+        &project_manifest,
+        lockfile_path,
+        registry,
+        cache_root,
+        Some(package),
+        &pinned,
+    )?;
     manifest::write_project_manifest(project_manifest_path, &project_manifest)?;
 
-    Ok(locked)
+    Ok(locked_for(&lock, package)?.clone())
 }
 
 /// `laplace update <pkg>`: re-resolve `pkg` against its *existing* entry in
-/// `laplace.toml` and refresh its lockfile entry + cache copy. For a
-/// registry range, picks the latest version that still satisfies it. For a
-/// git source, simply refetches the pinned tag/rev (useful if a tag moved,
-/// or just to refresh the cache). Never creates a new dependency or changes
-/// the manifest entry -- `pkg` must already be in `laplace.toml` (use `add`
-/// for that).
+/// `laplace.toml` and refresh the lock. For a registry range, picks the
+/// latest version that still satisfies it. For a git source, refetches the
+/// pinned tag/rev (useful if a tag moved, or just to refresh the cache).
+/// Never creates a new dependency or changes the manifest entry -- `pkg`
+/// must already be in `laplace.toml` (use `add` for that).
+///
+/// Only `pkg` is free to move; every other locked package keeps its pin
+/// unless `pkg`'s new version forces it.
 pub fn update(
     project_manifest_path: &Path,
     lockfile_path: &Path,
@@ -284,50 +530,31 @@ pub fn update(
     package: &str,
 ) -> Result<LockedPackage, ResolveError> {
     let project_manifest = manifest::read_project_manifest(project_manifest_path)?;
-    let Some(dep) = project_manifest.dependencies.get(package) else {
+    if !project_manifest.dependencies.contains_key(package) {
         return Err(ResolveError::NotADependency {
             package: package.to_string(),
         });
-    };
-
-    let range = match dep {
-        Dependency::Range(range) => range.clone(),
-        Dependency::Git(git_dep) => {
-            let git_ref = git_dep.git_ref()?;
-            return refresh_git(lockfile_path, cache_root, package, &git_dep.git, git_ref);
-        }
-    };
-
-    let req = VersionReq::parse(&range).map_err(|source| ResolveError::InvalidVersionReq {
-        value: range.clone(),
-        source,
-    })?;
-
-    let available = registry.available_versions(package)?;
-    if available.is_empty() {
-        return Err(ResolveError::PackageNotInRegistry {
-            package: package.to_string(),
-            registry_root: registry.root.clone(),
-        });
     }
-    let latest = available
-        .into_iter()
-        .filter(|v| req.matches(v))
-        .max()
-        .ok_or_else(|| ResolveError::NoMatchingVersion {
-            package: package.to_string(),
-            range: range.clone(),
-        })?;
 
-    fetch_and_lock(lockfile_path, registry, cache_root, package, &latest)
+    let lock = resolve_install_and_lock(
+        &project_manifest,
+        lockfile_path,
+        registry,
+        cache_root,
+        Some(package),
+        &BTreeMap::new(),
+    )?;
+    Ok(locked_for(&lock, package)?.clone())
 }
 
-/// `laplace add <pkg> --git <url> --tag <tag>` (or `--rev <rev>`): fetch the
-/// package from git, record it in `laplace.lock`, and write the git table
-/// form into `laplace.toml`.
+/// `laplace add <pkg> --git <url> --tag <tag>` (or `--rev <rev>`): record
+/// the git source in `laplace.toml`, then resolve, fetch and lock the whole
+/// graph exactly as a registry `add` does.
+#[allow(clippy::too_many_arguments)]
 pub fn add_git(
     project_manifest_path: &Path,
     lockfile_path: &Path,
+    registry: &Registry,
     cache_root: &Path,
     package: &str,
     url: &str,
@@ -339,95 +566,25 @@ pub fn add_git(
         tag: tag.map(str::to_string),
         rev: rev.map(str::to_string),
     };
-    let git_ref = git_dep.git_ref()?;
-
-    let locked = refresh_git(lockfile_path, cache_root, package, url, git_ref)?;
+    // Validate the tag/rev pair before touching anything on disk.
+    git_dep.git_ref()?;
 
     let mut project_manifest = manifest::read_project_manifest(project_manifest_path)?;
     project_manifest
         .dependencies
         .insert(package.to_string(), Dependency::Git(git_dep));
+
+    let lock = resolve_install_and_lock(
+        &project_manifest,
+        lockfile_path,
+        registry,
+        cache_root,
+        Some(package),
+        &BTreeMap::new(),
+    )?;
     manifest::write_project_manifest(project_manifest_path, &project_manifest)?;
 
-    Ok(locked)
-}
-
-/// Fetch `package` from `url` at `git_ref`, verify its declared name, hash
-/// it, copy it into the cache, and record it in `laplace.lock`. Shared by
-/// `add_git` and `update` (for existing git dependencies).
-fn refresh_git(
-    lockfile_path: &Path,
-    cache_root: &Path,
-    package: &str,
-    url: &str,
-    git_ref: &str,
-) -> Result<LockedPackage, ResolveError> {
-    let tmp = tempfile::tempdir().map_err(ResolveError::TempDir)?;
-    git::fetch(url, git_ref, tmp.path())?;
-
-    let pkg_manifest = manifest::read_package_manifest(&tmp.path().join("laplace.toml"))?;
-    if pkg_manifest.name != package {
-        return Err(ResolveError::PackageNameMismatch {
-            path: tmp.path().join("laplace.toml"),
-            expected: package.to_string(),
-            found: pkg_manifest.name,
-        });
-    }
-
-    let checksum = checksum_dir(tmp.path())?;
-    let locked = LockedPackage {
-        name: package.to_string(),
-        version: pkg_manifest.version,
-        checksum,
-        source: git::git_source(url, git_ref),
-    };
-
-    install_one(tmp.path(), cache_root, &locked)?;
-
-    let mut lock = lockfile::read_lockfile(lockfile_path)?;
-    lock.packages.retain(|p| p.name != locked.name);
-    lock.packages.push(locked.clone());
-    lockfile::write_lockfile(lockfile_path, &lock)?;
-
-    Ok(locked)
-}
-
-/// Shared tail of `add`/`update`: verify the resolved version's package
-/// manifest actually declares this name, hash its contents, copy it into
-/// the cache, and record it in `laplace.lock`.
-fn fetch_and_lock(
-    lockfile_path: &Path,
-    registry: &Registry,
-    cache_root: &Path,
-    package: &str,
-    version: &Version,
-) -> Result<LockedPackage, ResolveError> {
-    let package_dir = registry.package_dir(package, version);
-    let pkg_manifest = manifest::read_package_manifest(&package_dir.join("laplace.toml"))?;
-    if pkg_manifest.name != package {
-        return Err(ResolveError::PackageNameMismatch {
-            path: package_dir.join("laplace.toml"),
-            expected: package.to_string(),
-            found: pkg_manifest.name,
-        });
-    }
-
-    let checksum = checksum_dir(&package_dir)?;
-    let locked = LockedPackage {
-        name: package.to_string(),
-        version: version.to_string(),
-        checksum,
-        source: REGISTRY_SOURCE.to_string(),
-    };
-
-    install_one(&package_dir, cache_root, &locked)?;
-
-    let mut lock = lockfile::read_lockfile(lockfile_path)?;
-    lock.packages.retain(|p| p.name != locked.name);
-    lock.packages.push(locked.clone());
-    lockfile::write_lockfile(lockfile_path, &lock)?;
-
-    Ok(locked)
+    Ok(locked_for(&lock, package)?.clone())
 }
 
 /// `laplace install`: read `laplace.lock` only -- never `laplace.toml` -- and
@@ -808,12 +965,13 @@ mod tests {
         lockfile::write_lockfile(
             &f.lockfile_path,
             &Lockfile {
-                packages: vec![LockedPackage {
-                    name: "gps".to_string(),
-                    version: "1.0.0".to_string(),
-                    checksum,
-                    source: REGISTRY_SOURCE.to_string(),
-                }],
+                root: vec!["gps".to_string()],
+                packages: vec![LockedPackage::leaf(
+                    "gps",
+                    "1.0.0",
+                    &checksum,
+                    REGISTRY_SOURCE,
+                )],
             },
         )
         .unwrap();
@@ -846,12 +1004,13 @@ mod tests {
         lockfile::write_lockfile(
             &f.lockfile_path,
             &Lockfile {
-                packages: vec![LockedPackage {
-                    name: "gps".to_string(),
-                    version: "1.0.0".to_string(),
-                    checksum,
-                    source: REGISTRY_SOURCE.to_string(),
-                }],
+                root: vec!["gps".to_string()],
+                packages: vec![LockedPackage::leaf(
+                    "gps",
+                    "1.0.0",
+                    &checksum,
+                    REGISTRY_SOURCE,
+                )],
             },
         )
         .unwrap();
@@ -868,12 +1027,12 @@ mod tests {
         lockfile::write_lockfile(
             &f.lockfile_path,
             &Lockfile {
-                packages: vec![LockedPackage {
-                    name: "gps".to_string(),
-                    version: "1.0.0".to_string(),
-                    checksum: "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-                    source: REGISTRY_SOURCE.to_string(),
-                }],
+                root: vec!["gps".to_string().to_string()],
+                packages: vec![LockedPackage::leaf(
+                    "gps",
+                    "1.0.0",
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    REGISTRY_SOURCE,)],
             },
         )
         .unwrap();
@@ -888,12 +1047,12 @@ mod tests {
         lockfile::write_lockfile(
             &f.lockfile_path,
             &Lockfile {
-                packages: vec![LockedPackage {
-                    name: "ghost".to_string(),
-                    version: "1.0.0".to_string(),
-                    checksum: "sha256:doesnotmatter".to_string(),
-                    source: REGISTRY_SOURCE.to_string(),
-                }],
+                root: vec!["ghost".to_string().to_string()],
+                packages: vec![LockedPackage::leaf(
+                    "ghost",
+                    "1.0.0",
+                    "sha256:doesnotmatter",
+                    REGISTRY_SOURCE,)],
             },
         )
         .unwrap();
@@ -1122,6 +1281,7 @@ mod tests {
         let locked = add_git(
             &f.project_manifest_path,
             &f.lockfile_path,
+            &f.registry,
             &f.cache_root,
             "gps",
             url,
@@ -1163,6 +1323,7 @@ mod tests {
         let locked = add_git(
             &f.project_manifest_path,
             &f.lockfile_path,
+            &f.registry,
             &f.cache_root,
             "gps",
             url,
@@ -1200,6 +1361,7 @@ mod tests {
         let err = add_git(
             &f.project_manifest_path,
             &f.lockfile_path,
+            &f.registry,
             &f.cache_root,
             "gps",
             url,
@@ -1220,6 +1382,7 @@ mod tests {
         let locked = add_git(
             &f.project_manifest_path,
             &f.lockfile_path,
+            &f.registry,
             &f.cache_root,
             "gps",
             url,
@@ -1251,6 +1414,7 @@ mod tests {
         add_git(
             &f.project_manifest_path,
             &f.lockfile_path,
+            &f.registry,
             &f.cache_root,
             "gps",
             url,
@@ -1279,6 +1443,7 @@ mod tests {
         add_git(
             &f.project_manifest_path,
             &f.lockfile_path,
+            &f.registry,
             &f.cache_root,
             "gps",
             url,

@@ -296,6 +296,7 @@ mod tests {
         let generated = GeneratedStan {
             source: String::new(),
             package_line_ranges: vec![],
+            function_files: vec![],
         };
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let err = validate(

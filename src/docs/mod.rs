@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::manifest;
 use crate::parser::signatures::{extract_signatures, FunctionSig};
 use crate::resolve::lockfile::{self, LockfileError};
 
@@ -59,6 +58,9 @@ pub enum DocsError {
 
     #[error("package `{package}` has no function named `{func}`")]
     FunctionNotFound { package: String, func: String },
+
+    #[error(transparent)]
+    Package(Box<crate::package::PackageError>),
 }
 
 /// Extract every function signature from `package_dir`'s `.stan` file(s)
@@ -66,12 +68,10 @@ pub enum DocsError {
 /// copied into the cache, so `laplace doc` never has to re-parse Stan
 /// source at lookup time.
 pub fn write_sidecar(package_dir: &Path, name: &str, version: &str) -> Result<PackageDocs, DocsError> {
-    let source = manifest::read_package_stan_source(package_dir).map_err(|source| DocsError::Io {
-        path: package_dir.to_path_buf(),
-        source,
-    })?;
+    let sources = crate::package::read_package_sources(package_dir)
+        .map_err(|source| DocsError::Package(Box::new(source)))?;
 
-    let mut functions = extract_signatures(&source);
+    let mut functions = extract_signatures(&sources.body);
     functions.sort_by(|a, b| a.name.cmp(&b.name));
 
     let docs = PackageDocs {
@@ -373,12 +373,13 @@ real jitter(real epsilon) {
         lockfile::write_lockfile(
             &lockfile_path,
             &Lockfile {
-                packages: vec![LockedPackage {
-                    name: "gps".to_string(),
-                    version: "1.0.0".to_string(),
-                    checksum: "sha256:whatever".to_string(),
-                    source: "registry".to_string(),
-                }],
+                root: vec!["gps".to_string()],
+                packages: vec![LockedPackage::leaf(
+                    "gps",
+                    "1.0.0",
+                    "sha256:whatever",
+                    "registry",
+                )],
             },
         )
         .unwrap();
@@ -401,12 +402,13 @@ real jitter(real epsilon) {
         lockfile::write_lockfile(
             &lockfile_path,
             &Lockfile {
-                packages: vec![LockedPackage {
-                    name: "gps".to_string(),
-                    version: "1.0.0".to_string(),
-                    checksum: "sha256:whatever".to_string(),
-                    source: "registry".to_string(),
-                }],
+                root: vec!["gps".to_string()],
+                packages: vec![LockedPackage::leaf(
+                    "gps",
+                    "1.0.0",
+                    "sha256:whatever",
+                    "registry",
+                )],
             },
         )
         .unwrap();
@@ -424,12 +426,13 @@ real jitter(real epsilon) {
         lockfile::write_lockfile(
             &lockfile_path,
             &Lockfile {
-                packages: vec![LockedPackage {
-                    name: "gps".to_string(),
-                    version: "1.0.0".to_string(),
-                    checksum: "sha256:whatever".to_string(),
-                    source: "registry".to_string(),
-                }],
+                root: vec!["gps".to_string()],
+                packages: vec![LockedPackage::leaf(
+                    "gps",
+                    "1.0.0",
+                    "sha256:whatever",
+                    "registry",
+                )],
             },
         )
         .unwrap();

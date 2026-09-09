@@ -54,7 +54,7 @@ pub fn parse_library_block(source: &str) -> Result<Option<LibraryBlock>, Library
     )?;
 
     let body = &source[open_brace + 1..close_brace];
-    let imports = parse_imports(body)?;
+    let imports = parse_import_statements(body)?;
 
     Ok(Some(LibraryBlock {
         imports,
@@ -109,7 +109,13 @@ fn find_matching_brace(source: &str, open_brace: usize) -> Option<usize> {
     None
 }
 
-fn parse_imports(body: &str) -> Result<Vec<ImportStatement>, LibraryBlockError> {
+/// Parse the *body* of a `library { }` block (the text between the braces)
+/// into its import statements.
+///
+/// Exposed separately from [`parse_library_block`] so the `.laplacelib`
+/// dialect can reuse exactly this logic on a block it located itself --
+/// import syntax must never diverge between the two source dialects.
+pub fn parse_import_statements(body: &str) -> Result<Vec<ImportStatement>, LibraryBlockError> {
     let mut imports = Vec::new();
     for statement in split_statements(body) {
         let statement = statement.trim();

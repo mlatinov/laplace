@@ -11,10 +11,10 @@
 /// Block comments (`/* ... */`) are not handled -- the `// @laplace` doc
 /// comment convention this tool cares about is line-comment-only, and Stan
 /// source in the wild overwhelmingly uses `//` as well.
-pub(crate) struct CodeMask(Vec<bool>);
+pub struct CodeMask(Vec<bool>);
 
 impl CodeMask {
-    pub(crate) fn new(source: &str) -> Self {
+    pub fn new(source: &str) -> Self {
         let bytes = source.as_bytes();
         let mut mask = vec![true; bytes.len()];
         let mut in_line_comment = false;
@@ -54,16 +54,16 @@ impl CodeMask {
         CodeMask(mask)
     }
 
-    pub(crate) fn is_real(&self, index: usize) -> bool {
+    pub fn is_real(&self, index: usize) -> bool {
         self.0[index]
     }
 
-    pub(crate) fn find_real(&self, source: &str, from: usize, target: u8) -> Option<usize> {
+    pub fn find_real(&self, source: &str, from: usize, target: u8) -> Option<usize> {
         let bytes = source.as_bytes();
         (from..bytes.len()).find(|&i| bytes[i] == target && self.0[i])
     }
 
-    pub(crate) fn match_closing_brace(&self, source: &str, open_brace: usize) -> Option<usize> {
+    pub fn match_closing_brace(&self, source: &str, open_brace: usize) -> Option<usize> {
         let bytes = source.as_bytes();
         let mut depth = 0i32;
         for (i, &b) in bytes.iter().enumerate().skip(open_brace) {
@@ -85,7 +85,7 @@ impl CodeMask {
     }
 }
 
-pub(crate) fn is_ident_char(b: u8) -> bool {
+pub fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 

@@ -59,11 +59,7 @@ pub fn init(dir: &Path) -> Result<InitSummary, InitError> {
         }
     }
 
-    let package_manifest = PackageManifest {
-        name: name.clone(),
-        version: "0.1.0".to_string(),
-        exports: included.clone(),
-    };
+    let package_manifest = PackageManifest::new(name.clone(), "0.1.0", included.clone());
     manifest::write_package_manifest(&manifest_path, &package_manifest)?;
 
     Ok(InitSummary {

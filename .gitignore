@@ -1,1 +1,6 @@
 /target
+
+# Prompt/spec files handed to Claude Code for a piece of work. Kept locally
+# for reference; the decisions they lock in live in CLAUDE.md and
+# laplace-project-plan.md instead.
+/claude-instructions/
