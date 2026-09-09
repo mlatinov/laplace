@@ -87,17 +87,29 @@ pub fn fetch(url: &str, git_ref: &str, dest: &Path) -> Result<(), GitError> {
     Ok(())
 }
 
-/// The `laplace.lock` `source` string for a git-sourced package.
-pub fn git_source(url: &str, git_ref: &str) -> String {
-    format!("git+{url}@{git_ref}")
+/// The `laplace.lock` `source` string for a git-sourced package:
+/// `git+<url>@<ref>`, with `#<subdir>` appended when the package is rooted
+/// in a subdirectory of the repository rather than at its top level.
+pub fn git_source(url: &str, git_ref: &str, subdir: Option<&str>) -> String {
+    match subdir {
+        Some(subdir) => format!("git+{url}@{git_ref}#{subdir}"),
+        None => format!("git+{url}@{git_ref}"),
+    }
 }
 
-/// Parse a `laplace.lock` `source` string back into `(url, git_ref)`, or
-/// `None` if it isn't a git source (e.g. `"registry"`). Splits on the last
-/// `@` so scp-style urls containing their own `@` (`git@host:user/repo`)
-/// still parse correctly.
-pub fn parse_git_source(source: &str) -> Option<(&str, &str)> {
-    source.strip_prefix("git+")?.rsplit_once('@')
+/// Parse a `laplace.lock` `source` string back into `(url, git_ref,
+/// subdir)`, or `None` if it isn't a git source (e.g. `"registry"`). The
+/// `#<subdir>` fragment is split off first, then the remainder is split on
+/// its *last* `@` so scp-style urls containing their own `@`
+/// (`git@host:user/repo`) still parse correctly.
+pub fn parse_git_source(source: &str) -> Option<(&str, &str, Option<&str>)> {
+    let rest = source.strip_prefix("git+")?;
+    let (rest, subdir) = match rest.split_once('#') {
+        Some((rest, subdir)) => (rest, Some(subdir)),
+        None => (rest, None),
+    };
+    let (url, git_ref) = rest.rsplit_once('@')?;
+    Some((url, git_ref, subdir))
 }
 
 #[cfg(test)]
@@ -106,20 +118,44 @@ mod tests {
 
     #[test]
     fn git_source_round_trips_through_parse() {
-        let source = git_source("https://github.com/user/repo", "0.1.0");
+        let source = git_source("https://github.com/user/repo", "0.1.0", None);
         assert_eq!(source, "git+https://github.com/user/repo@0.1.0");
         assert_eq!(
             parse_git_source(&source),
-            Some(("https://github.com/user/repo", "0.1.0"))
+            Some(("https://github.com/user/repo", "0.1.0", None))
+        );
+    }
+
+    #[test]
+    fn git_source_round_trips_with_a_subdir() {
+        let source = git_source("https://github.com/user/repo", "0.1.0", Some("laplace"));
+        assert_eq!(source, "git+https://github.com/user/repo@0.1.0#laplace");
+        assert_eq!(
+            parse_git_source(&source),
+            Some(("https://github.com/user/repo", "0.1.0", Some("laplace")))
+        );
+    }
+
+    #[test]
+    fn nested_subdir_survives_the_round_trip() {
+        let source = git_source("https://example.com/repo", "v2", Some("pkgs/stats"));
+        assert_eq!(
+            parse_git_source(&source),
+            Some(("https://example.com/repo", "v2", Some("pkgs/stats")))
         );
     }
 
     #[test]
     fn parse_git_source_handles_scp_style_urls_with_embedded_at() {
-        let source = git_source("git@github.com:user/repo", "abc123");
+        let source = git_source("git@github.com:user/repo", "abc123", None);
         assert_eq!(
             parse_git_source(&source),
-            Some(("git@github.com:user/repo", "abc123"))
+            Some(("git@github.com:user/repo", "abc123", None))
+        );
+        let with_subdir = git_source("git@github.com:user/repo", "abc123", Some("lib"));
+        assert_eq!(
+            parse_git_source(&with_subdir),
+            Some(("git@github.com:user/repo", "abc123", Some("lib")))
         );
     }
 

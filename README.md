@@ -256,6 +256,28 @@ Exactly one of `tag`/`rev` must be set per git dependency. A git-sourced
 package is otherwise treated identically to a registry one from that point
 on — same checksum in the lock, same install cache layout.
 
+By default the package is expected at the **root** of the repository: its
+`laplace.toml` sits next to the repo's `.git`. If the repo keeps the package
+below the top level — beside a README, or one of several packages in a
+monorepo — point `subdir` at the directory holding its `laplace.toml`:
+
+```toml
+[dependencies]
+gps = { git = "https://github.com/user/gps-stan", tag = "0.1.0", subdir = "laplace" }
+```
+
+```sh
+laplace add gps --git https://github.com/user/gps-stan --tag 0.1.0 --subdir laplace
+```
+
+The subdirectory is part of the source's identity: it is recorded in the lock
+as `git+<url>@<ref>#<subdir>`, only that directory is checksummed and
+installed, and two dependencies naming the same repo and ref but different
+subdirectories are different packages (and conflict, like any other two git
+sources for one package name). It must be a plain relative path inside the
+repository — an absolute path or one containing `..` is rejected, in
+`laplace.toml` and in `laplace.lock` alike.
+
 ## Libraries that depend on libraries
 
 A library can build on another library. Say `regression` wants to use `stats`'s
