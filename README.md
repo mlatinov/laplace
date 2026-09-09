@@ -537,9 +537,60 @@ there's no network access or Stan re-parsing at lookup time. A function with
 no `@laplace` comment still prints its signature, with a note that no
 documentation is available for it.
 
-## Project layout / for contributors
+## Design decisions
 
-If you want to work on laplace itself rather than use it, start with
-[`CLAUDE.md`](CLAUDE.md) for the non-negotiable design constraints and
-[`laplace-project-plan.md`](laplace-project-plan.md) for the task breakdown
-and current milestone — this README covers usage only.
+A few choices are worth stating outright, because they're baked into published
+packages' symbol names and into the lockfile format, and are expensive to
+change later.
+
+**laplace is not a Stan compiler.** It never parses Stan's grammar or
+semantics. Only the `library { }` block is parsed in depth, plus a shallow
+scan for top-level block keywords and function signatures. Everything else —
+every statement in every block — is opaque text, passed through byte for byte
+except for `pkg::func(` call-site rewriting. That's the reason the compiled
+output is trustworthy: laplace can't quietly change the meaning of code it
+never understood.
+
+**Build output is deterministic.** The same source plus the same
+`laplace.lock` always produces byte-identical `.stan` output. No timestamps,
+no hash-map iteration order leaking into generated code. It's meant to be
+committed and diffed.
+
+**The lockfile is a graph, not a list.** `laplace.lock` records `root` (your
+direct dependencies) and a `dependencies` list on every package, so
+`laplace install` reconstructs the entire transitive graph without re-resolving
+a single version range. Locks written before this format still read correctly:
+a missing `dependencies` means "leaf", and a missing `root` means "every
+locked package is direct".
+
+**One version of any package per build.** Every requirement on a package name
+— from your `laplace.toml` and from every package's own `[dependencies]` — is
+collected, and one version satisfying all of them is chosen. If none exists,
+the build stops and names every requirer. Two copies of a package would mangle
+to the same `pkg__func` names and silently clobber each other, so this isn't
+negotiable. Cycles are rejected with the path printed.
+
+**Mangling is a plain `pkg__func` prefix**, for transitive dependencies too —
+no content hash, no version fragment. That's safe *because* of the
+one-version-per-build rule, which makes a package name a unique prefix, and it
+keeps `--split-functions` output readable. If single-version unification is
+ever relaxed, the mangling scheme has to be revisited in the same change.
+
+**Non-exported functions keep their names.** Only exports get the `pkg__`
+prefix. Since Stan has one flat function namespace, two packages defining the
+same private helper is a hard error naming both, rather than a silent double
+definition. Auto-mangling private names would be tidier but would change the
+compiled output of every existing project, and byte-identical output is worth
+more.
+
+**Imports are private, and there are no re-exports.** A package may call only
+the packages in its own `[dependencies]`; your model may call only the
+packages in its own `library { }` block. Depending on something transitively
+doesn't put it in scope.
+
+**Transitive dependencies are flattened, never chained.** In
+`--split-functions` mode, laplace never emits an `#include` of one
+`.stanfunctions` file from another, so "what has to ship next to my `.stan`
+file" is answerable from the `library { }` block alone. Each package is still
+emitted exactly once across the build, ordered so every function is defined
+before it's used.

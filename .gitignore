@@ -1,6 +1,12 @@
 /target
 
-# Prompt/spec files handed to Claude Code for a piece of work. Kept locally
-# for reference; the decisions they lock in live in CLAUDE.md and
-# laplace-project-plan.md instead.
+# Internal planning docs and the prompts/specs handed to Claude Code. Kept on
+# disk for future sessions, deliberately out of the repo -- the design
+# decisions they record live in README.md's "Design decisions" section, which
+# is the version anyone reading the project actually sees.
+#
+# CLAUDE.md stays at the repo root (rather than moving into
+# claude-instructions/) because that is the only path Claude Code auto-loads
+# as project instructions.
+/CLAUDE.md
 /claude-instructions/
