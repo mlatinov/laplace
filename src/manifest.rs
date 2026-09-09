@@ -42,7 +42,9 @@ impl Dependency {
 }
 
 /// The table form of a dependency entry: a git repository pinned to either
-/// a tag or a commit rev (exactly one of the two).
+/// a tag or a commit rev (exactly one of the two), optionally with the
+/// package rooted in a subdirectory of the repository rather than at its
+/// top level.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitDependency {
     pub git: String,
@@ -50,6 +52,10 @@ pub struct GitDependency {
     pub tag: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rev: Option<String>,
+    /// Where the package's `laplace.toml` lives relative to the repository
+    /// root. `None` means the repository root itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subdir: Option<String>,
 }
 
 impl GitDependency {
@@ -67,6 +73,47 @@ impl GitDependency {
             }),
         }
     }
+
+    /// The validated subdirectory the package is rooted in, if any.
+    pub fn subdir(&self) -> Result<Option<&str>, ManifestError> {
+        match self.subdir.as_deref() {
+            None => Ok(None),
+            Some(subdir) => {
+                validate_subdir(subdir).map_err(|reason| ManifestError::GitSubdirInvalid {
+                    git: self.git.clone(),
+                    subdir: subdir.to_string(),
+                    reason,
+                })?;
+                Ok(Some(subdir))
+            }
+        }
+    }
+}
+
+/// Reject anything that is not a plain relative path *inside* the clone.
+/// A `subdir` reaches the filesystem straight from `laplace.toml` and from
+/// `laplace.lock`'s `source` string, so an absolute path or a `..`
+/// component would let a manifest read and install files from outside the
+/// checkout it is supposed to be confined to.
+pub(crate) fn validate_subdir(subdir: &str) -> Result<(), &'static str> {
+    use std::path::Component;
+
+    if subdir.is_empty() {
+        return Err("it is empty -- omit `subdir` for a package at the repository root");
+    }
+    if subdir.contains('#') {
+        return Err("it contains `#`, which laplace.lock uses to separate the subdirectory \
+                    from the git ref");
+    }
+    for component in Path::new(subdir).components() {
+        match component {
+            Component::Normal(_) => {}
+            Component::CurDir => {}
+            Component::ParentDir => return Err("it contains a `..` component"),
+            Component::RootDir | Component::Prefix(_) => return Err("it is an absolute path"),
+        }
+    }
+    Ok(())
 }
 
 /// Package-level `laplace.toml`, shipped alongside a package's `.stan` /
@@ -132,6 +179,13 @@ pub enum ManifestError {
 
     #[error("git dependency `{git}` needs a `tag` or a `rev`")]
     GitRefMissing { git: String },
+
+    #[error("git dependency `{git}` has an invalid `subdir` (`{subdir}`): {reason}")]
+    GitSubdirInvalid {
+        git: String,
+        subdir: String,
+        reason: &'static str,
+    },
 
     #[error("git dependency `{git}` cannot have both `tag` and `rev` set")]
     GitRefAmbiguous { git: String },
@@ -268,6 +322,7 @@ mod tests {
                 git: "https://github.com/user/repo".to_string(),
                 tag: Some("0.1.0".to_string()),
                 rev: None,
+                subdir: None,
             })
         );
         assert_eq!(
@@ -284,8 +339,87 @@ mod tests {
                 git: "https://github.com/user/repo".to_string(),
                 tag: None,
                 rev: Some("abc123".to_string()),
+                subdir: None,
             })
         );
+    }
+
+    #[test]
+    fn git_dependency_parses_and_round_trips_a_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("laplace.toml");
+        fs::write(
+            &path,
+            concat!(
+                "[dependencies]\n",
+                "gps = { git = \"https://github.com/user/repo\", tag = \"0.1.0\", \
+                 subdir = \"laplace\" }\n",
+            ),
+        )
+        .unwrap();
+
+        let manifest = read_project_manifest(&path).unwrap();
+        let dep = GitDependency {
+            git: "https://github.com/user/repo".to_string(),
+            tag: Some("0.1.0".to_string()),
+            rev: None,
+            subdir: Some("laplace".to_string()),
+        };
+        assert_eq!(
+            manifest.dependencies.get("gps").unwrap(),
+            &Dependency::Git(dep.clone())
+        );
+        assert_eq!(dep.subdir().unwrap(), Some("laplace"));
+
+        // Writing it back and reading it again keeps the subdir.
+        let out = dir.path().join("out.toml");
+        write_project_manifest(&out, &manifest).unwrap();
+        assert_eq!(read_project_manifest(&out).unwrap(), manifest);
+    }
+
+    #[test]
+    fn a_git_dependency_without_a_subdir_serializes_without_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("laplace.toml");
+        let mut manifest = ProjectManifest::default();
+        manifest.dependencies.insert(
+            "gps".to_string(),
+            Dependency::Git(GitDependency {
+                git: "https://example.com/repo".to_string(),
+                tag: Some("0.1.0".to_string()),
+                rev: None,
+                subdir: None,
+            }),
+        );
+        write_project_manifest(&path, &manifest).unwrap();
+        assert!(!fs::read_to_string(&path).unwrap().contains("subdir"));
+    }
+
+    #[test]
+    fn a_subdir_that_escapes_the_repository_is_rejected() {
+        for bad in ["../elsewhere", "/etc", "", "lib#x", "a/../../b"] {
+            let dep = GitDependency {
+                git: "https://example.com/repo".to_string(),
+                tag: Some("0.1.0".to_string()),
+                rev: None,
+                subdir: Some(bad.to_string()),
+            };
+            assert!(
+                matches!(dep.subdir(), Err(ManifestError::GitSubdirInvalid { .. })),
+                "expected `{bad}` to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_nested_subdir_is_accepted() {
+        let dep = GitDependency {
+            git: "https://example.com/repo".to_string(),
+            tag: Some("0.1.0".to_string()),
+            rev: None,
+            subdir: Some("pkgs/stats".to_string()),
+        };
+        assert_eq!(dep.subdir().unwrap(), Some("pkgs/stats"));
     }
 
     #[test]
@@ -294,6 +428,7 @@ mod tests {
             git: "https://example.com/repo".to_string(),
             tag: None,
             rev: None,
+            subdir: None,
         };
         assert!(matches!(
             neither.git_ref(),
@@ -304,6 +439,7 @@ mod tests {
             git: "https://example.com/repo".to_string(),
             tag: Some("0.1.0".to_string()),
             rev: Some("abc123".to_string()),
+            subdir: None,
         };
         assert!(matches!(
             both.git_ref(),
@@ -314,6 +450,7 @@ mod tests {
             git: "https://example.com/repo".to_string(),
             tag: Some("0.1.0".to_string()),
             rev: None,
+            subdir: None,
         };
         assert_eq!(tag_only.git_ref().unwrap(), "0.1.0");
     }

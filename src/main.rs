@@ -55,7 +55,8 @@ enum Command {
     /// Add a dependency (optionally pinned to `<pkg>@<version>`), resolving
     /// it and updating laplace.toml + laplace.lock. Pass `--git <url>` with
     /// `--tag <tag>` or `--rev <rev>` to add a git dependency instead of
-    /// resolving from the local registry.
+    /// resolving from the local registry, and `--subdir <path>` if that
+    /// repository keeps the package below its top level.
     Add {
         package: String,
         #[arg(long)]
@@ -64,6 +65,10 @@ enum Command {
         tag: Option<String>,
         #[arg(long)]
         rev: Option<String>,
+        /// Directory inside the git repository holding the package's
+        /// laplace.toml (default: the repository root)
+        #[arg(long)]
+        subdir: Option<String>,
     },
     /// Re-resolve a dependency to the latest version matching its existing
     /// range in laplace.toml
@@ -110,7 +115,14 @@ fn run() -> Result<(), CliError> {
             git,
             tag,
             rev,
-        } => cmd_add(&package, git.as_deref(), tag.as_deref(), rev.as_deref()),
+            subdir,
+        } => cmd_add(
+            &package,
+            git.as_deref(),
+            tag.as_deref(),
+            rev.as_deref(),
+            subdir.as_deref(),
+        ),
         Command::Update { package } => cmd_update(&package),
         Command::Doc { spec, html, output } => cmd_doc(&spec, html, output),
     }
@@ -375,6 +387,7 @@ fn cmd_add(
     git: Option<&str>,
     tag: Option<&str>,
     rev: Option<&str>,
+    subdir: Option<&str>,
 ) -> Result<(), CliError> {
     let project_manifest_path = PathBuf::from("laplace.toml");
     let lockfile_path = PathBuf::from("laplace.lock");
@@ -391,14 +404,15 @@ fn cmd_add(
             url,
             tag,
             rev,
+            subdir,
         )?;
         println!("added {}@{} (git)", locked.name, locked.version);
         return Ok(());
     }
 
-    if tag.is_some() || rev.is_some() {
+    if tag.is_some() || rev.is_some() || subdir.is_some() {
         return Err(CliError::Message(
-            "--tag/--rev only apply together with --git".to_string(),
+            "--tag/--rev/--subdir only apply together with --git".to_string(),
         ));
     }
 

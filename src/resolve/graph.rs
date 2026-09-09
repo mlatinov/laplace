@@ -34,7 +34,15 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DepRequirement {
     Range(VersionReq),
-    Git { url: String, git_ref: String },
+    Git {
+        url: String,
+        git_ref: String,
+        /// The subdirectory of the repository the package is rooted in, or
+        /// `None` for the repository root. Part of the identity of the git
+        /// source: two requirements naming the same repo and ref but
+        /// different subdirectories are different packages, and conflict.
+        subdir: Option<String>,
+    },
 }
 
 impl DepRequirement {
@@ -42,8 +50,19 @@ impl DepRequirement {
     fn describe(&self) -> String {
         match self {
             DepRequirement::Range(req) => req.to_string(),
-            DepRequirement::Git { url, git_ref } => format!("git+{url}@{git_ref}"),
+            DepRequirement::Git {
+                url,
+                git_ref,
+                subdir,
+            } => describe_git(url, git_ref, subdir.as_deref()),
         }
+    }
+}
+
+fn describe_git(url: &str, git_ref: &str, subdir: Option<&str>) -> String {
+    match subdir {
+        Some(subdir) => format!("git+{url}@{git_ref}#{subdir}"),
+        None => format!("git+{url}@{git_ref}"),
     }
 }
 
@@ -60,8 +79,15 @@ pub trait PackageProvider {
     fn available_versions(&self, name: &str) -> Result<Vec<Version>, GraphError>;
 
     /// Resolve a git requirement to the concrete version its manifest
-    /// declares. May fetch.
-    fn git_version(&self, name: &str, url: &str, git_ref: &str) -> Result<Version, GraphError>;
+    /// declares. May fetch. `subdir` names the directory inside the
+    /// repository the package is rooted in, or `None` for its root.
+    fn git_version(
+        &self,
+        name: &str,
+        url: &str,
+        git_ref: &str,
+        subdir: Option<&str>,
+    ) -> Result<Version, GraphError>;
 
     /// The dependencies `name@version` declares in its own manifest.
     fn dependencies_of(
@@ -324,29 +350,41 @@ fn pick_version(
     provider: &dyn PackageProvider,
     preferred: Option<&Version>,
 ) -> Result<Version, GraphError> {
-    let mut git: Option<(&str, &str, &str)> = None; // (url, ref, requirer)
+    // (url, ref, subdir, requirer)
+    let mut git: Option<(&str, &str, Option<&str>, &str)> = None;
     let mut ranges: Vec<(&VersionReq, &str)> = Vec::new();
 
     for constraint in constraints {
         match &constraint.requirement {
             DepRequirement::Range(req) => ranges.push((req, constraint.requirer.as_str())),
-            DepRequirement::Git { url, git_ref } => match git {
-                Some((prev_url, prev_ref, _)) if prev_url != url || prev_ref != git_ref => {
-                    return Err(GraphError::GitSourceConflict {
-                        package: name.to_string(),
-                        first: format!("{prev_url}@{prev_ref}"),
-                        second: format!("{url}@{git_ref}"),
-                    })
+            DepRequirement::Git {
+                url,
+                git_ref,
+                subdir,
+            } => {
+                let subdir = subdir.as_deref();
+                match git {
+                    Some((prev_url, prev_ref, prev_subdir, _))
+                        if (prev_url, prev_ref, prev_subdir) != (url, git_ref, subdir) =>
+                    {
+                        return Err(GraphError::GitSourceConflict {
+                            package: name.to_string(),
+                            first: describe_git(prev_url, prev_ref, prev_subdir),
+                            second: describe_git(url, git_ref, subdir),
+                        })
+                    }
+                    _ => git = Some((url, git_ref, subdir, constraint.requirer.as_str())),
                 }
-                _ => git = Some((url, git_ref, constraint.requirer.as_str())),
-            },
+            }
         }
     }
 
     let candidates: Vec<Version> = match git {
         // A git source is its own registry-of-one: the checked-out ref
         // decides the version, and every range constraint has to accept it.
-        Some((url, git_ref, _)) => vec![provider.git_version(name, url, git_ref)?],
+        Some((url, git_ref, subdir, _)) => {
+            vec![provider.git_version(name, url, git_ref, subdir)?]
+        }
         None => provider.available_versions(name)?,
     };
 
@@ -523,7 +561,13 @@ mod tests {
                 .collect())
         }
 
-        fn git_version(&self, name: &str, _url: &str, git_ref: &str) -> Result<Version, GraphError> {
+        fn git_version(
+            &self,
+            name: &str,
+            _url: &str,
+            git_ref: &str,
+            _subdir: Option<&str>,
+        ) -> Result<Version, GraphError> {
             let _ = name;
             Version::parse(git_ref).map_err(|e| GraphError::Provider(e.to_string()))
         }
@@ -784,6 +828,7 @@ mod tests {
                 DepRequirement::Git {
                     url: "https://example.com/stats".to_string(),
                     git_ref: "1.3.0".to_string(),
+                    subdir: None,
                 },
             ),
         ];
@@ -807,6 +852,7 @@ mod tests {
                 DepRequirement::Git {
                     url: "https://example.com/stats".to_string(),
                     git_ref: "1.0.0".to_string(),
+                    subdir: None,
                 },
             ),
             (
@@ -814,11 +860,44 @@ mod tests {
                 DepRequirement::Git {
                     url: "https://example.com/stats".to_string(),
                     git_ref: "2.0.0".to_string(),
+                    subdir: None,
                 },
             ),
         ];
         let err = resolve_graph(&roots, &provider).unwrap_err();
         assert!(matches!(err, GraphError::GitSourceConflict { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn the_same_git_ref_in_two_subdirs_conflicts() {
+        let provider = TestProvider::new();
+        let roots = vec![
+            (
+                "stats".to_string(),
+                DepRequirement::Git {
+                    url: "https://example.com/mono".to_string(),
+                    git_ref: "1.0.0".to_string(),
+                    subdir: Some("pkgs/stats".to_string()),
+                },
+            ),
+            (
+                "stats".to_string(),
+                DepRequirement::Git {
+                    url: "https://example.com/mono".to_string(),
+                    git_ref: "1.0.0".to_string(),
+                    subdir: None,
+                },
+            ),
+        ];
+        let err = resolve_graph(&roots, &provider).unwrap_err();
+        match err {
+            GraphError::GitSourceConflict { first, second, .. } => {
+                // Order follows the order the constraints were collected in.
+                assert_eq!(first, "git+https://example.com/mono@1.0.0");
+                assert_eq!(second, "git+https://example.com/mono@1.0.0#pkgs/stats");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

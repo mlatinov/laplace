@@ -110,6 +110,25 @@ pub enum ResolveError {
     #[error("failed to create a temporary directory: {0}")]
     TempDir(#[source] io::Error),
 
+    #[error(
+        "`{pkg_source}` has no laplace.toml at {location} -- a git package's \
+         laplace.toml must sit at the root of the directory the dependency points at{hint}"
+    )]
+    GitManifestMissing {
+        pkg_source: String,
+        location: String,
+        hint: String,
+    },
+
+    #[error(
+        "laplace.lock source `{pkg_source}` has an invalid subdirectory (`{subdir}`): {reason}"
+    )]
+    InvalidGitSubdir {
+        pkg_source: String,
+        subdir: String,
+        reason: &'static str,
+    },
+
     #[error(transparent)]
     Git(#[from] git::GitError),
 
@@ -193,6 +212,7 @@ fn dep_requirement(dep: &Dependency) -> Result<DepRequirement, ResolveError> {
         Dependency::Git(git_dep) => Ok(DepRequirement::Git {
             url: git_dep.git.clone(),
             git_ref: git_dep.git_ref()?.to_string(),
+            subdir: git_dep.subdir()?.map(str::to_string),
         }),
     }
 }
@@ -207,11 +227,87 @@ fn root_requirements(
         .collect()
 }
 
+/// Where a git package's files start inside a fresh clone at `clone`.
+fn package_root(clone: &Path, subdir: Option<&str>) -> PathBuf {
+    match subdir {
+        Some(subdir) => clone.join(subdir),
+        None => clone.to_path_buf(),
+    }
+}
+
+/// Read the `laplace.toml` of a freshly cloned git package, turning a
+/// missing one into an error that says *where* laplace looked -- the
+/// symptom is otherwise just a bare "No such file or directory" naming a
+/// temporary directory the user never sees. When the manifest is somewhere
+/// else in the clone, the error suggests the `subdir` that would find it.
+fn read_git_package_manifest(
+    root: &Path,
+    source: &str,
+    subdir: Option<&str>,
+) -> Result<PackageManifest, ResolveError> {
+    let manifest_path = root.join("laplace.toml");
+    if manifest_path.is_file() {
+        return manifest::read_package_manifest(&manifest_path).map_err(ResolveError::from);
+    }
+
+    let location = match subdir {
+        Some(subdir) => format!("`{subdir}/laplace.toml`"),
+        None => "its top level".to_string(),
+    };
+    // Only look one level up from the package root when the clone itself is
+    // the package root -- a wrong `subdir` is the user's own typo, and the
+    // clone root is not ours to rummage through beyond a single hint.
+    let hint = match subdir {
+        Some(_) => String::new(),
+        None => match find_manifest_dirs(root) {
+            candidates if candidates.is_empty() => String::new(),
+            candidates => format!(
+                ". Did you mean `subdir = \"{}\"`?",
+                candidates.join("` or `subdir = \"")
+            ),
+        },
+    };
+    Err(ResolveError::GitManifestMissing {
+        pkg_source: source.to_string(),
+        location,
+        hint,
+    })
+}
+
+/// Immediate subdirectories of `dir` that hold a `laplace.toml`, sorted, so
+/// the `subdir = "..."` hint is deterministic.
+fn find_manifest_dirs(dir: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        if !entry.path().join("laplace.toml").is_file() {
+            continue;
+        }
+        if let Some(name) = entry.file_name().to_str() {
+            found.push(name.to_string());
+        }
+    }
+    found.sort();
+    found
+}
+
 /// A checked-out git package, kept alive for the duration of a resolve so
 /// the same ref is cloned at most once and the resolved copy can be
 /// installed straight from it afterwards.
 struct GitCheckout {
+    /// The clone's `TempDir` guard. Never read -- it is held purely so the
+    /// directory `root` points into survives until the resolve is over.
+    /// Deleting this field deletes the checkout out from under `root`.
+    #[allow(dead_code)]
     dir: tempfile::TempDir,
+    /// The package root inside `dir`: the clone itself, or the `subdir` of
+    /// it the dependency named.
+    root: PathBuf,
     version: Version,
     source: String,
 }
@@ -254,7 +350,7 @@ impl<'a> RegistryProvider<'a> {
     /// lockfile should record for it.
     fn locate(&self, name: &str, version: &Version) -> Result<(PathBuf, String), ResolveError> {
         if let Some(checkout) = self.git.borrow().get(name) {
-            return Ok((checkout.dir.path().to_path_buf(), checkout.source.clone()));
+            return Ok((checkout.root.clone(), checkout.source.clone()));
         }
         Ok((
             self.registry.package_dir(name, version),
@@ -273,8 +369,14 @@ impl PackageProvider for RegistryProvider<'_> {
         self.registry.available_versions(name).map_err(|e| self.fail(e))
     }
 
-    fn git_version(&self, name: &str, url: &str, git_ref: &str) -> Result<Version, GraphError> {
-        let source = git::git_source(url, git_ref);
+    fn git_version(
+        &self,
+        name: &str,
+        url: &str,
+        git_ref: &str,
+        subdir: Option<&str>,
+    ) -> Result<Version, GraphError> {
+        let source = git::git_source(url, git_ref, subdir);
         if let Some(checkout) = self.git.borrow().get(name) {
             if checkout.source == source {
                 return Ok(checkout.version.clone());
@@ -284,11 +386,12 @@ impl PackageProvider for RegistryProvider<'_> {
         let tmp = tempfile::tempdir().map_err(|e| self.fail(ResolveError::TempDir(e)))?;
         git::fetch(url, git_ref, tmp.path()).map_err(|e| self.fail(e.into()))?;
 
-        let pkg_manifest = manifest::read_package_manifest(&tmp.path().join("laplace.toml"))
-            .map_err(|e| self.fail(e.into()))?;
+        let root = package_root(tmp.path(), subdir);
+        let pkg_manifest = read_git_package_manifest(&root, &source, subdir)
+            .map_err(|e| self.fail(e))?;
         if pkg_manifest.name != name {
             return Err(self.fail(ResolveError::PackageNameMismatch {
-                path: tmp.path().join("laplace.toml"),
+                path: root.join("laplace.toml"),
                 expected: name.to_string(),
                 found: pkg_manifest.name,
             }));
@@ -304,6 +407,7 @@ impl PackageProvider for RegistryProvider<'_> {
             name.to_string(),
             GitCheckout {
                 dir: tmp,
+                root,
                 version: version.clone(),
                 source,
             },
@@ -549,7 +653,9 @@ pub fn update(
 
 /// `laplace add <pkg> --git <url> --tag <tag>` (or `--rev <rev>`): record
 /// the git source in `laplace.toml`, then resolve, fetch and lock the whole
-/// graph exactly as a registry `add` does.
+/// graph exactly as a registry `add` does. `subdir` points at the directory
+/// inside the repository holding the package's `laplace.toml`, for repos
+/// that keep it below the top level.
 #[allow(clippy::too_many_arguments)]
 pub fn add_git(
     project_manifest_path: &Path,
@@ -560,14 +666,18 @@ pub fn add_git(
     url: &str,
     tag: Option<&str>,
     rev: Option<&str>,
+    subdir: Option<&str>,
 ) -> Result<LockedPackage, ResolveError> {
     let git_dep = GitDependency {
         git: url.to_string(),
         tag: tag.map(str::to_string),
         rev: rev.map(str::to_string),
+        subdir: subdir.map(str::to_string),
     };
-    // Validate the tag/rev pair before touching anything on disk.
+    // Validate the tag/rev pair and the subdir before touching anything on
+    // disk.
     git_dep.git_ref()?;
+    git_dep.subdir()?;
 
     let mut project_manifest = manifest::read_project_manifest(project_manifest_path)?;
     project_manifest
@@ -601,8 +711,8 @@ pub fn install(
     let lock = lockfile::read_lockfile(lockfile_path)?;
 
     for pkg in &lock.packages {
-        if let Some((url, git_ref)) = git::parse_git_source(&pkg.source) {
-            install_git_one(url, git_ref, cache_root, pkg)?;
+        if let Some((url, git_ref, subdir)) = git::parse_git_source(&pkg.source) {
+            install_git_one(url, git_ref, subdir, cache_root, pkg)?;
             continue;
         }
 
@@ -649,13 +759,32 @@ pub fn install(
 fn install_git_one(
     url: &str,
     git_ref: &str,
+    subdir: Option<&str>,
     cache_root: &Path,
     pkg: &LockedPackage,
 ) -> Result<(), ResolveError> {
+    let source = git::git_source(url, git_ref, subdir);
+    if let Some(subdir) = subdir {
+        // The subdir arrives from laplace.lock, which is a file like any
+        // other; re-validate before it reaches the filesystem so a hand-
+        // edited lock cannot install from outside the checkout.
+        manifest::validate_subdir(subdir).map_err(|reason| ResolveError::InvalidGitSubdir {
+            pkg_source: source.clone(),
+            subdir: subdir.to_string(),
+            reason,
+        })?;
+    }
+
     let tmp = tempfile::tempdir().map_err(ResolveError::TempDir)?;
     git::fetch(url, git_ref, tmp.path())?;
 
-    let actual = checksum_dir(tmp.path())?;
+    let root = package_root(tmp.path(), subdir);
+    // Not read for its contents -- this is the check that turns a missing
+    // subdirectory into an explanation rather than an empty-checksum
+    // mismatch further down.
+    read_git_package_manifest(&root, &source, subdir)?;
+
+    let actual = checksum_dir(&root)?;
     if actual != pkg.checksum {
         return Err(ResolveError::ChecksumMismatch {
             name: pkg.name.clone(),
@@ -665,7 +794,7 @@ fn install_git_one(
         });
     }
 
-    install_one(tmp.path(), cache_root, pkg)
+    install_one(&root, cache_root, pkg)
 }
 
 fn install_one(
@@ -1207,6 +1336,20 @@ mod tests {
         tag: &str,
         exports: &[&str],
     ) -> (PathBuf, String) {
+        init_git_package_repo_in(tmp_root, name, version, tag, exports, None)
+    }
+
+    /// Same, but with the package's files committed under `subdir` instead
+    /// of at the repository root -- the layout a repo uses when it holds a
+    /// package alongside a README, a LICENSE, or several packages at once.
+    fn init_git_package_repo_in(
+        tmp_root: &Path,
+        name: &str,
+        version: &str,
+        tag: &str,
+        exports: &[&str],
+        subdir: Option<&str>,
+    ) -> (PathBuf, String) {
         let bare = tmp_root.join(format!("{name}-bare.git"));
         let work = tmp_root.join(format!("{name}-work"));
 
@@ -1221,13 +1364,24 @@ mod tests {
             .map(|e| format!("\"{e}\""))
             .collect::<Vec<_>>()
             .join(", ");
+        let pkg_dir = match subdir {
+            Some(subdir) => {
+                let dir = work.join(subdir);
+                fs::create_dir_all(&dir).unwrap();
+                // Something at the top level that is *not* the package, so
+                // a checkout rooted at the repo root is visibly wrong.
+                fs::write(work.join("README.md"), "# repo\n").unwrap();
+                dir
+            }
+            None => work.clone(),
+        };
         fs::write(
-            work.join("laplace.toml"),
+            pkg_dir.join("laplace.toml"),
             format!("name = \"{name}\"\nversion = \"{version}\"\nexports = [{exports_toml}]\n"),
         )
         .unwrap();
         fs::write(
-            work.join(format!("{name}.stan")),
+            pkg_dir.join(format!("{name}.stan")),
             format!(
                 "real {}() {{\n  return 1;\n}}\n",
                 exports.first().copied().unwrap_or("noop")
@@ -1287,6 +1441,7 @@ mod tests {
             url,
             Some("0.1.0"),
             None,
+            None,
         )
         .unwrap();
 
@@ -1301,6 +1456,7 @@ mod tests {
                 git: url.to_string(),
                 tag: Some("0.1.0".to_string()),
                 rev: None,
+                subdir: None,
             })
         );
 
@@ -1329,6 +1485,7 @@ mod tests {
             url,
             None,
             Some(&rev),
+            None,
         )
         .unwrap();
 
@@ -1342,8 +1499,221 @@ mod tests {
                 git: url.to_string(),
                 tag: None,
                 rev: Some(rev),
+                subdir: None,
             })
         );
+    }
+
+    /// The whole clone -> checkout -> manifest-read -> install sequence for
+    /// a package that lives in a subdirectory of its repository, which is
+    /// the layout that used to fail with a bare "no such file or directory"
+    /// naming a temporary path. Also pins the tempdir lifetime: the
+    /// `TempDir` guard has to outlive every read below, so a refactor that
+    /// returns only a path from the checkout fails here.
+    #[test]
+    fn add_git_reads_the_manifest_from_a_subdirectory_and_installs_it() {
+        let f = fixture();
+        let (bare, _rev) = init_git_package_repo_in(
+            f.registry_root.parent().unwrap(),
+            "gps",
+            "1.0.0",
+            "0.1.0",
+            &["rbf_cov"],
+            Some("laplace"),
+        );
+        let url = bare.to_str().unwrap();
+
+        let locked = add_git(
+            &f.project_manifest_path,
+            &f.lockfile_path,
+            &f.registry,
+            &f.cache_root,
+            "gps",
+            url,
+            Some("0.1.0"),
+            None,
+            Some("laplace"),
+        )
+        .unwrap();
+
+        assert_eq!(locked.version, "1.0.0");
+        assert_eq!(locked.source, format!("git+{url}@0.1.0#laplace"));
+
+        let manifest = manifest::read_project_manifest(&f.project_manifest_path).unwrap();
+        assert_eq!(
+            manifest.dependencies.get("gps").unwrap(),
+            &Dependency::Git(GitDependency {
+                git: url.to_string(),
+                tag: Some("0.1.0".to_string()),
+                rev: None,
+                subdir: Some("laplace".to_string()),
+            })
+        );
+
+        // The cache holds the *package*, not the repository: the package
+        // files land at the top of the cache entry and the repo's own
+        // top-level files are not dragged along.
+        let cached = f.cache_root.join("gps").join("1.0.0");
+        assert!(cached.join("laplace.toml").is_file());
+        assert!(cached.join("gps.stan").is_file());
+        assert!(!cached.join("README.md").exists());
+        assert!(!cached.join("laplace").exists());
+    }
+
+    /// `install` reconstructs the subdirectory from the lock's `source`
+    /// alone -- the fresh-machine path, with no laplace.toml in sight.
+    #[test]
+    fn install_restores_a_subdirectory_git_package_from_the_lock_alone() {
+        let f = fixture();
+        let (bare, _rev) = init_git_package_repo_in(
+            f.registry_root.parent().unwrap(),
+            "gps",
+            "1.0.0",
+            "0.1.0",
+            &["rbf_cov"],
+            Some("pkgs/gps"),
+        );
+        let url = bare.to_str().unwrap();
+
+        let locked = add_git(
+            &f.project_manifest_path,
+            &f.lockfile_path,
+            &f.registry,
+            &f.cache_root,
+            "gps",
+            url,
+            Some("0.1.0"),
+            None,
+            Some("pkgs/gps"),
+        )
+        .unwrap();
+        assert_eq!(locked.source, format!("git+{url}@0.1.0#pkgs/gps"));
+
+        fs::remove_dir_all(&f.cache_root).unwrap();
+        fs::remove_file(&f.project_manifest_path).unwrap();
+
+        let installed = install(&f.lockfile_path, &f.registry, &f.cache_root).unwrap();
+        assert_eq!(installed, vec![locked]);
+        assert!(f
+            .cache_root
+            .join("gps")
+            .join("1.0.0")
+            .join("laplace.toml")
+            .is_file());
+    }
+
+    /// The reported failure, as a test: a repo whose package sits in a
+    /// subdirectory, added *without* `--subdir`. It must say what is wrong
+    /// and where the manifest actually is, not fail on a temporary path.
+    #[test]
+    fn add_git_without_subdir_explains_a_manifest_below_the_repo_root() {
+        let f = fixture();
+        let (bare, _rev) = init_git_package_repo_in(
+            f.registry_root.parent().unwrap(),
+            "gps",
+            "1.0.0",
+            "0.1.0",
+            &["rbf_cov"],
+            Some("laplace"),
+        );
+        let url = bare.to_str().unwrap();
+
+        let err = add_git(
+            &f.project_manifest_path,
+            &f.lockfile_path,
+            &f.registry,
+            &f.cache_root,
+            "gps",
+            url,
+            Some("0.1.0"),
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        let message = err.to_string();
+        assert!(matches!(err, ResolveError::GitManifestMissing { .. }), "{message}");
+        assert!(message.contains("its top level"), "{message}");
+        assert!(message.contains(r#"subdir = "laplace""#), "{message}");
+        // Nothing was written on the way to the error.
+        assert!(!f.lockfile_path.exists());
+    }
+
+    /// A wrong `--subdir` names the directory the user asked for rather
+    /// than guessing a different one.
+    #[test]
+    fn add_git_with_a_wrong_subdir_names_the_subdir_it_looked_in() {
+        let f = fixture();
+        let (bare, _rev) = init_git_package_repo_in(
+            f.registry_root.parent().unwrap(),
+            "gps",
+            "1.0.0",
+            "0.1.0",
+            &["rbf_cov"],
+            Some("laplace"),
+        );
+        let url = bare.to_str().unwrap();
+
+        let err = add_git(
+            &f.project_manifest_path,
+            &f.lockfile_path,
+            &f.registry,
+            &f.cache_root,
+            "gps",
+            url,
+            Some("0.1.0"),
+            None,
+            Some("lib"),
+        )
+        .unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("`lib/laplace.toml`"), "{message}");
+        assert!(!message.contains("Did you mean"), "{message}");
+    }
+
+    #[test]
+    fn add_git_rejects_a_subdir_that_escapes_the_checkout() {
+        let f = fixture();
+        let err = add_git(
+            &f.project_manifest_path,
+            &f.lockfile_path,
+            &f.registry,
+            &f.cache_root,
+            "gps",
+            "https://example.com/repo",
+            Some("0.1.0"),
+            None,
+            Some("../../etc"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ResolveError::Manifest(ManifestError::GitSubdirInvalid { .. })),
+            "{err:?}"
+        );
+    }
+
+    /// The same guard on the other entry point: a hand-edited lock cannot
+    /// talk `install` into copying from outside the clone.
+    #[test]
+    fn install_rejects_a_lock_subdir_that_escapes_the_checkout() {
+        let f = fixture();
+        lockfile::write_lockfile(
+            &f.lockfile_path,
+            &Lockfile {
+                root: vec!["gps".to_string()],
+                packages: vec![LockedPackage::leaf(
+                    "gps",
+                    "1.0.0",
+                    "sha256:doesnotmatter",
+                    "git+https://example.com/repo@0.1.0#../../etc",
+                )],
+            },
+        )
+        .unwrap();
+
+        let err = install(&f.lockfile_path, &f.registry, &f.cache_root).unwrap_err();
+        assert!(matches!(err, ResolveError::InvalidGitSubdir { .. }), "{err:?}");
     }
 
     #[test]
@@ -1367,6 +1737,7 @@ mod tests {
             url,
             Some("0.1.0"),
             None,
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, ResolveError::PackageNameMismatch { .. }));
@@ -1387,6 +1758,7 @@ mod tests {
             "gps",
             url,
             Some("0.1.0"),
+            None,
             None,
         )
         .unwrap();
@@ -1420,6 +1792,7 @@ mod tests {
             url,
             Some("0.1.0"),
             None,
+            None,
         )
         .unwrap();
 
@@ -1448,6 +1821,7 @@ mod tests {
             "gps",
             url,
             Some("0.1.0"),
+            None,
             None,
         )
         .unwrap();
