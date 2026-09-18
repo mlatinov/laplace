@@ -54,6 +54,8 @@ pub struct PackageSources {
     /// Package names imported by this package's `.laplacelib` files,
     /// sorted and deduplicated.
     pub imports: Vec<String>,
+    /// How many source files went into `body`.
+    pub files: usize,
 }
 
 /// Read and combine every source file in `package_dir`.
@@ -96,7 +98,11 @@ pub fn read_package_sources(package_dir: &Path) -> Result<PackageSources, Packag
 
     imports.sort();
     imports.dedup();
-    Ok(PackageSources { body, imports })
+    Ok(PackageSources {
+        body,
+        imports,
+        files: paths.len(),
+    })
 }
 
 /// Load `package_dir` into an [`InstalledPackage`] ready for codegen.

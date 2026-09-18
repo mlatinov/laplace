@@ -59,7 +59,7 @@ use thiserror::Error;
 use crate::parser::brace_match::CodeMask;
 use crate::parser::library_block::{ImportStatement, LibraryBlock};
 use crate::parser::signatures::FunctionSig;
-use rename::{find_qualified_calls, mangle, rename_identifier_calls};
+use rename::{find_qualified_calls, mangle, rename_identifier_calls, QualifiedCall};
 
 /// A resolved, installed package ready for codegen: its raw source (every
 /// function it defines, exported or private, with any `library { }` block
@@ -161,6 +161,17 @@ pub enum CodegenError {
     MissingImport { package: String },
 
     #[error(
+        "the `library {{ }}` block imports `{package}@{pinned}`, but laplace.lock pins \
+         `{package}` at {locked} -- change the dependency in laplace.toml and re-lock \
+         (`laplace add` / `laplace update`), or drop the `@{pinned}` to use the locked version"
+    )]
+    ImportVersionMismatch {
+        package: String,
+        pinned: String,
+        locked: String,
+    },
+
+    #[error(
         "`{package}` depends on `{dependency}`, but no installed package by that name was \
          provided -- laplace.lock may be stale (run `laplace install`?)"
     )]
@@ -168,6 +179,17 @@ pub enum CodegenError {
 
     #[error("`{package}::{func}(` is called, but `{func}` is not in `{package}`'s exports")]
     FunctionNotExported { package: String, func: String },
+
+    #[error(
+        "`{package}::{func}(` is called, but `{package}` exports `{density}`, not `{func}` -- \
+         write it as a distribution statement (`y ~ {package}::{func}(...)`) or call \
+         `{package}::{density}(y | ...)` directly"
+    )]
+    DensityCalledWithoutTilde {
+        package: String,
+        func: String,
+        density: String,
+    },
 
     #[error(
         "`{package}::{func}(` is called, but `{package}` was not imported in the `library {{ }}` block"
@@ -356,10 +378,26 @@ fn generate_impl(
         installed.iter().map(|p| (p.name.as_str(), p)).collect();
 
     for import in imports {
-        if !by_name.contains_key(import.name.as_str()) {
+        let Some(pkg) = by_name.get(import.name.as_str()) else {
             return Err(CodegenError::MissingImport {
                 package: import.name.clone(),
             });
+        };
+        // `import pkg@X` is a pin: the build must actually be using X. The
+        // version always comes from the lock, so a disagreement is an error
+        // rather than a silently ignored annotation.
+        if let Some(pinned) = &import.version {
+            let same = match (semver::Version::parse(pinned), semver::Version::parse(&pkg.version)) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => pinned == &pkg.version,
+            };
+            if !same {
+                return Err(CodegenError::ImportVersionMismatch {
+                    package: import.name.clone(),
+                    pinned: pinned.clone(),
+                    locked: pkg.version.clone(),
+                });
+            }
         }
     }
     // The packages this build actually needs: everything reachable from the
@@ -412,12 +450,7 @@ fn generate_impl(
             let target = by_name
                 .get(call.package.as_str())
                 .expect("dependency presence was checked above");
-            if !target.exported.iter().any(|e| e == &call.func) {
-                return Err(CodegenError::FunctionNotExported {
-                    package: call.package,
-                    func: call.func,
-                });
-            }
+            check_exported(target, &call)?;
             call_edits.push(Edit {
                 range: call.range.clone(),
                 replacement: mangle(&call.package, &call.func),
@@ -438,8 +471,17 @@ fn generate_impl(
     let mut edits: Vec<Edit> = Vec::new();
 
     if let Some(block) = library_block {
+        // A synthesized `functions { }` block goes at the very top of the
+        // file; if the `library { }` block was there too, keep one blank line
+        // between the two instead of swallowing it.
+        let synthesizes_functions_block =
+            !ordered.is_empty() && find_functions_block(source).is_none();
         edits.push(Edit {
-            range: block.byte_range.clone(),
+            range: library_block_removal_range(
+                source,
+                block.byte_range.clone(),
+                synthesizes_functions_block,
+            ),
             replacement: String::new(),
             splice_offset: None,
         });
@@ -465,12 +507,7 @@ fn generate_impl(
         let target = by_name
             .get(call.package.as_str())
             .expect("direct imports were checked above");
-        if !target.exported.iter().any(|e| e == &call.func) {
-            return Err(CodegenError::FunctionNotExported {
-                package: call.package,
-                func: call.func,
-            });
-        }
+        check_exported(target, &call)?;
 
         edits.push(Edit {
             range: call.range.clone(),
@@ -538,6 +575,35 @@ fn generate_impl(
         },
         source_map,
     ))
+}
+
+/// Suffixes Stan appends when it resolves `y ~ dist(...)`. The mangled call
+/// keeps the base name (`pkg__dist`), so Stan finds `pkg__dist_lpdf` itself.
+const DENSITY_SUFFIXES: [&str; 2] = ["_lpdf", "_lpmf"];
+
+/// A `pkg::func(` call site is valid if `func` is exported -- or, on the
+/// right of a `~`, if `func_lpdf`/`func_lpmf` is.
+fn check_exported(target: &InstalledPackage, call: &QualifiedCall) -> Result<(), CodegenError> {
+    let exports = |name: &str| target.exported.iter().any(|e| e == name);
+    if exports(&call.func) {
+        return Ok(());
+    }
+    let density = DENSITY_SUFFIXES
+        .iter()
+        .map(|suffix| format!("{}{suffix}", call.func))
+        .find(|name| exports(name));
+    match density {
+        Some(_) if call.after_tilde => Ok(()),
+        Some(density) => Err(CodegenError::DensityCalledWithoutTilde {
+            package: call.package.clone(),
+            func: call.func.clone(),
+            density,
+        }),
+        None => Err(CodegenError::FunctionNotExported {
+            package: call.package.clone(),
+            func: call.func.clone(),
+        }),
+    }
 }
 
 /// Everything reachable from the directly-imported packages, following each
@@ -775,6 +841,53 @@ fn function_file_header(root: &InstalledPackage, members: &[&InstalledPackage]) 
 }
 
 /// 1-indexed line number containing byte offset `at` in `text`.
+/// The byte range to delete for the `library { }` block. When the block sits
+/// on lines of its own (the normal layout), its whole lines go, not just the
+/// braces -- and if that would leave two blank lines back to back (the block
+/// was separated by a blank line on each side), the following ones go too, so
+/// the compiled `.stan` has the spacing a human would have written. At the
+/// top of the file the following blank lines go as well, unless
+/// `keep_separator_at_top` says a `functions { }` block is about to be
+/// inserted there and needs one.
+fn library_block_removal_range(
+    source: &str,
+    block: Range<usize>,
+    keep_separator_at_top: bool,
+) -> Range<usize> {
+    let bytes = source.as_bytes();
+    let line_start = source[..block.start].rfind('\n').map_or(0, |i| i + 1);
+    if !source[line_start..block.start].trim().is_empty() {
+        return block;
+    }
+    let mut end = block.end;
+    while end < bytes.len() && matches!(bytes[end], b' ' | b'\t' | b'\r') {
+        end += 1;
+    }
+    if end < bytes.len() {
+        if bytes[end] != b'\n' {
+            return block;
+        }
+        end += 1;
+    }
+
+    let at_top = source[..line_start].trim().is_empty();
+    let preceded_by_blank = line_start > 0
+        && source[..line_start - 1]
+            .rsplit('\n')
+            .next()
+            .is_some_and(|prev| prev.trim().is_empty());
+    let start = if at_top { 0 } else { line_start };
+    if preceded_by_blank && !at_top || at_top && !keep_separator_at_top {
+        while let Some(nl) = source[end..].find('\n') {
+            if !source[end..end + nl].trim().is_empty() {
+                break;
+            }
+            end += nl + 1;
+        }
+    }
+    start..end
+}
+
 fn line_at(text: &str, at: usize) -> usize {
     text.as_bytes()[..at].iter().filter(|&&b| b == b'\n').count() + 1
 }
@@ -959,11 +1072,10 @@ model {
             "functions {{\n{}\n}}\n",
             GPS_SOURCE.replace("rbf_cov", "gps__rbf_cov")
         );
-        let expected_tail = format!(
-            "{}{}",
-            &laplace_source[..byte_range.start],
-            &laplace_source[byte_range.end..]
-        )
+        // The block's own line goes with it; the blank line after it stays
+        // as the separator below the synthesized functions block.
+        assert_eq!(byte_range.start, 0);
+        let expected_tail = laplace_source[byte_range.end + 1..].to_string()
         .replace("gps::rbf_cov", "gps__rbf_cov");
         assert_eq!(output_1, format!("{expected_functions_block}{expected_tail}"));
     }
@@ -1093,7 +1205,83 @@ model {
         let source = "library {}\ndata {\n  int n;\n}\n";
         let block = parse_library_block(source).unwrap();
         let output = generate(source, block.as_ref(), &[]).unwrap();
-        assert_eq!(output, "\ndata {\n  int n;\n}\n");
+        assert_eq!(output, "data {\n  int n;\n}\n");
+    }
+
+    #[test]
+    fn removing_the_library_block_leaves_single_blank_line_spacing() {
+        let installed = vec![gps_package()];
+
+        // Header comment, then the block, then the model: one blank line
+        // between the comment and `data`, not two.
+        let source = "// header\nlibrary {\n  import gps\n}\n\ndata {\n  int n;\n}\n";
+        let block = parse_library_block(source).unwrap();
+        let output = generate(source, block.as_ref(), &installed).unwrap();
+        assert!(output.ends_with("}\n// header\n\ndata {\n  int n;\n}\n"), "{output:?}");
+
+        // Blank lines on both sides of the block collapse to one.
+        let source = "// header\n\nlibrary {\n  import gps\n}\n\ndata {\n  int n;\n}\n";
+        let block = parse_library_block(source).unwrap();
+        let output = generate(source, block.as_ref(), &installed).unwrap();
+        assert!(output.ends_with("}\n// header\n\ndata {\n  int n;\n}\n"), "{output:?}");
+
+        // A block on the same line as other code is removed on its own.
+        let source = "library { import gps } data {\n  int n;\n}\n";
+        let block = parse_library_block(source).unwrap();
+        let output = generate(source, block.as_ref(), &installed).unwrap();
+        assert!(output.ends_with("}\n data {\n  int n;\n}\n"), "{output:?}");
+    }
+
+    fn density_package() -> InstalledPackage {
+        InstalledPackage::leaf(
+            "gp",
+            "1.0.0",
+            "real marginal_normal_lpdf(vector y, real sigma) {\n  return normal_lpdf(y | 0, sigma);\n}\n",
+            vec!["marginal_normal_lpdf".to_string()],
+        )
+    }
+
+    #[test]
+    fn distribution_statement_resolves_to_the_exported_lpdf() {
+        let source = "library {\n  import gp\n}\nmodel {\n  y ~ gp::marginal_normal(sigma);\n}\n";
+        let block = parse_library_block(source).unwrap();
+        let output = generate(source, block.as_ref(), &[density_package()]).unwrap();
+        assert!(output.contains("real gp__marginal_normal_lpdf(vector y, real sigma)"));
+        assert!(output.contains("y ~ gp__marginal_normal(sigma);"), "{output}");
+    }
+
+    #[test]
+    fn density_base_name_outside_a_distribution_statement_names_the_suffix() {
+        let source = "library {\n  import gp\n}\nmodel {\n  target += gp::marginal_normal(y, sigma);\n}\n";
+        let block = parse_library_block(source).unwrap();
+        let err = generate(source, block.as_ref(), &[density_package()]).unwrap_err();
+        assert_eq!(
+            err,
+            CodegenError::DensityCalledWithoutTilde {
+                package: "gp".to_string(),
+                func: "marginal_normal".to_string(),
+                density: "marginal_normal_lpdf".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn pinned_import_must_match_the_locked_version() {
+        let source = "library {\n  import gps@1.0.0\n}\nmodel {\n}\n";
+        let block = parse_library_block(source).unwrap();
+        assert!(generate(source, block.as_ref(), &[gps_package()]).is_ok());
+
+        let source = "library {\n  import gps@9.9.9\n}\nmodel {\n}\n";
+        let block = parse_library_block(source).unwrap();
+        let err = generate(source, block.as_ref(), &[gps_package()]).unwrap_err();
+        assert_eq!(
+            err,
+            CodegenError::ImportVersionMismatch {
+                package: "gps".to_string(),
+                pinned: "9.9.9".to_string(),
+                locked: "1.0.0".to_string(),
+            }
+        );
     }
 
     #[test]

@@ -24,6 +24,9 @@ pub enum ValidateError {
         source: std::io::Error,
     },
 
+    #[error("could not create a scratch directory for stanc's generated C++: {0}")]
+    Scratch(#[source] std::io::Error),
+
     #[error("stanc reported errors in {path}:\n{annotated}")]
     TypeCheckFailed { path: PathBuf, annotated: String },
 }
@@ -31,8 +34,22 @@ pub enum ValidateError {
 /// Run `stanc` (or whatever `command` names) against the just-written file
 /// at `path`. `generated` is the codegen result that produced it, used to
 /// annotate any error output with likely-culprit packages.
+///
+/// This is a pure type-check: `stanc`'s generated C++ goes to a scratch
+/// directory that is deleted afterwards, never next to the `.stan` file the
+/// user commits. The output file's own directory is passed as an include
+/// path, because `stanc` does not resolve `#include` relative to the
+/// including file -- without it a `--split-functions` build could never
+/// validate.
 pub fn validate(command: &str, path: &Path, generated: &GeneratedStan) -> Result<(), ValidateError> {
+    let include_dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let scratch = tempfile::tempdir().map_err(ValidateError::Scratch)?;
     let output = Command::new(command)
+        .arg(format!("--include-paths={}", include_dir.display()))
+        .arg(format!("--o={}", scratch.path().join("model.hpp").display()))
         .arg(path)
         .output()
         .map_err(|source| ValidateError::CommandNotFound {

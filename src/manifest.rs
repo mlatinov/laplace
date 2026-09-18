@@ -90,6 +90,22 @@ impl GitDependency {
     }
 }
 
+/// Whether `name` can be a package name. It becomes the prefix of Stan
+/// identifiers (`pkg::func` -> `pkg__func`) and must survive the call-site
+/// scanner, so it follows Stan's identifier rules: a letter, then letters,
+/// digits and `_`. Notably no `-`: `laplace-splines::f(` would be read as
+/// `laplace - splines::f(`.
+pub fn is_valid_package_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Why `name` is not a valid package name, for error messages.
+pub const PACKAGE_NAME_RULE: &str =
+    "a package name must start with a letter and contain only letters, digits and `_` \
+     (it becomes the `pkg__` prefix of Stan identifiers)";
+
 /// Reject anything that is not a plain relative path *inside* the clone.
 /// A `subdir` reaches the filesystem straight from `laplace.toml` and from
 /// `laplace.lock`'s `source` string, so an absolute path or a `..`
@@ -249,29 +265,6 @@ pub fn write_package_manifest(
         path: path.to_path_buf(),
         source,
     })
-}
-
-/// Read and concatenate every `.stan` file directly inside `package_dir`, in
-/// filename order.
-///
-/// Prefer [`crate::package::read_package_sources`], which additionally
-/// understands `.laplacelib` files. This one stays for the callers that are
-/// looking at a directory of plain Stan (`laplace init`, which scaffolds a
-/// manifest for an existing Stan-functions directory).
-pub fn read_package_stan_source(package_dir: &Path) -> std::io::Result<String> {
-    let mut stan_files: Vec<PathBuf> = fs::read_dir(package_dir)?
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("stan"))
-        .collect();
-    stan_files.sort();
-
-    let mut source = String::new();
-    for path in &stan_files {
-        source.push_str(&fs::read_to_string(path)?);
-        source.push('\n');
-    }
-    Ok(source)
 }
 
 #[cfg(test)]
