@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::parser::signatures::{extract_signatures, FunctionSig};
+use crate::parser::signatures::{extract_signatures, Doc, FunctionSig};
 use crate::resolve::lockfile::{self, LockfileError};
 
 /// The full `docs.json` sidecar for one installed package version: every
@@ -21,8 +21,19 @@ use crate::resolve::lockfile::{self, LockfileError};
 pub struct PackageDocs {
     pub package: String,
     pub version: String,
+    /// Which doc extractor wrote this file ([`DOCS_FORMAT`]). A sidecar
+    /// from an older extractor is rebuilt from source on lookup, so a fix to
+    /// doc parsing reaches already-installed packages without a reinstall.
+    /// Absent in files written before it existed, which read as 0.
+    #[serde(default)]
+    pub format: u32,
     pub functions: Vec<FunctionSig>,
 }
+
+/// Bump whenever doc extraction changes what it produces for the same
+/// source. 1: a plain comment glued above `// @laplace` no longer hides the
+/// doc block.
+pub const DOCS_FORMAT: u32 = 1;
 
 #[derive(Debug, Error)]
 pub enum DocsError {
@@ -77,6 +88,7 @@ pub fn write_sidecar(package_dir: &Path, name: &str, version: &str) -> Result<Pa
     let docs = PackageDocs {
         package: name.to_string(),
         version: version.to_string(),
+        format: DOCS_FORMAT,
         functions,
     };
     write_docs_json(&package_dir.join("docs.json"), &docs)?;
@@ -106,13 +118,14 @@ fn read_docs_json(path: &Path) -> Result<PackageDocs, DocsError> {
 }
 
 /// `laplace doc <pkg>::<func>`: resolve `pkg`'s installed version via the
-/// project's lockfile, load its `docs.json`, and find `func`.
+/// project's lockfile, load its `docs.json`, and find every overload of
+/// `func`, in source order. Never empty on success.
 pub fn lookup(
     lockfile_path: &Path,
     cache_root: &Path,
     package: &str,
     func: &str,
-) -> Result<FunctionSig, DocsError> {
+) -> Result<Vec<FunctionSig>, DocsError> {
     let lock = lockfile::read_lockfile(lockfile_path)?;
     let Some(locked) = lock.packages.iter().find(|p| p.name == package) else {
         return Err(DocsError::PackageNotInLockfile {
@@ -129,30 +142,82 @@ pub fn lookup(
         });
     }
 
-    let docs = read_docs_json(&docs_path)?;
-    docs.functions
-        .into_iter()
-        .find(|f| f.name == func)
-        .ok_or_else(|| DocsError::FunctionNotFound {
+    let mut docs = read_docs_json(&docs_path)?;
+    if docs.format < DOCS_FORMAT {
+        docs = write_sidecar(&package_dir, &locked.name, &locked.version)?;
+    }
+    let overloads: Vec<FunctionSig> =
+        docs.functions.into_iter().filter(|f| f.name == func).collect();
+    if overloads.is_empty() {
+        return Err(DocsError::FunctionNotFound {
             package: package.to_string(),
             func: func.to_string(),
-        })
+        });
+    }
+    Ok(overloads)
 }
 
-/// Pretty-print a function's signature and doc comment (if any) for
-/// terminal display. A function with no `// @laplace` doc comment still
-/// renders its signature, with a note that no docs are available.
-pub fn render(package: &str, sig: &FunctionSig) -> String {
+/// Overloads that share one doc comment, for rendering: consecutive
+/// signatures with an identical doc, plus any undocumented overload directly
+/// after a documented one (a library typically writes one `@laplace` block
+/// above the first of several overloads).
+fn group_overloads(sigs: &[FunctionSig]) -> Vec<(Vec<&FunctionSig>, Option<&Doc>)> {
+    let mut groups: Vec<(Vec<&FunctionSig>, Option<&Doc>)> = Vec::new();
+    for sig in sigs {
+        let joins_previous = match groups.last() {
+            Some((_, group_doc)) => sig.doc.is_none() || sig.doc.as_ref() == *group_doc,
+            None => false,
+        };
+        if joins_previous {
+            groups.last_mut().expect("checked above").0.push(sig);
+        } else {
+            groups.push((vec![sig], sig.doc.as_ref()));
+        }
+    }
+    groups
+}
+
+/// Render every overload of one name for the terminal: each group of
+/// overloads sharing a doc comment lists its signatures, then the doc once.
+pub fn render_overloads(package: &str, sigs: &[FunctionSig]) -> String {
+    let mut out = String::new();
+    if sigs.len() > 1 {
+        out.push_str(&format!("{package}::{} has {} overloads\n\n", sigs[0].name, sigs.len()));
+    }
+    for (i, (members, doc)) in group_overloads(sigs).into_iter().enumerate() {
+        if i > 0 {
+            out.push_str("\n---\n\n");
+        }
+        for sig in members {
+            out.push_str(&signature_line(package, sig));
+            out.push('\n');
+        }
+        out.push_str(&doc_body(doc));
+    }
+    out
+}
+
+fn signature_line(package: &str, sig: &FunctionSig) -> String {
     let params_sig = sig
         .params
         .iter()
         .map(|(name, ty)| format!("{name}: {ty}"))
         .collect::<Vec<_>>()
         .join(", ");
+    format!("{package}::{}({params_sig}) -> {}", sig.name, sig.return_type)
+}
 
-    let mut out = format!("{package}::{}({params_sig}) -> {}\n", sig.name, sig.return_type);
+/// Pretty-print a function's signature and doc comment (if any) for
+/// terminal display. A function with no `// @laplace` doc comment still
+/// renders its signature, with a note that no docs are available.
+pub fn render(package: &str, sig: &FunctionSig) -> String {
+    format!("{}\n{}", signature_line(package, sig), doc_body(sig.doc.as_ref()))
+}
 
-    let Some(doc) = &sig.doc else {
+/// The part of [`render`] below the signature line.
+fn doc_body(doc: Option<&Doc>) -> String {
+    let mut out = String::new();
+    let Some(doc) = doc else {
         out.push_str("\n(no @laplace documentation available for this function)\n");
         return out;
     };
@@ -205,19 +270,31 @@ pub fn render(package: &str, sig: &FunctionSig) -> String {
 /// auto-render span loaded from a CDN script tag, so opening the file in
 /// any browser renders both the formula and a correctly formatted example.
 pub fn render_html(package: &str, sig: &FunctionSig) -> String {
-    let params_sig = sig
-        .params
-        .iter()
-        .map(|(name, ty)| format!("{name}: {ty}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let title = format!("{package}::{}({params_sig}) -> {}", sig.name, sig.return_type);
+    render_html_overloads(package, std::slice::from_ref(sig))
+}
 
-    let mut body = format!("<h1>{}</h1>\n", html_escape(&title));
+/// [`render_html`] for every overload of one name, grouped the same way as
+/// [`render_overloads`].
+pub fn render_html_overloads(package: &str, sigs: &[FunctionSig]) -> String {
+    let title = match sigs {
+        [only] => signature_line(package, only),
+        _ => format!("{package}::{}", sigs[0].name),
+    };
+    let mut body = String::new();
+    for (members, doc) in group_overloads(sigs) {
+        for sig in members {
+            body.push_str(&format!("<h1>{}</h1>\n", html_escape(&signature_line(package, sig))));
+        }
+        body.push_str(&html_doc_body(doc));
+    }
+    wrap_html(&title, &body)
+}
 
-    let Some(doc) = &sig.doc else {
+fn html_doc_body(doc: Option<&Doc>) -> String {
+    let mut body = String::new();
+    let Some(doc) = doc else {
         body.push_str("<p><em>no @laplace documentation available for this function</em></p>\n");
-        return wrap_html(&title, &body);
+        return body;
     };
 
     if let Some(brief) = &doc.brief {
@@ -253,7 +330,7 @@ pub fn render_html(package: &str, sig: &FunctionSig) -> String {
         ));
     }
 
-    wrap_html(&title, &body)
+    body
 }
 
 fn wrap_html(title: &str, body: &str) -> String {
@@ -384,9 +461,36 @@ real jitter(real epsilon) {
         )
         .unwrap();
 
-        let sig = lookup(&lockfile_path, &cache_root, "gps", "rbf_cov").unwrap();
-        assert_eq!(sig.name, "rbf_cov");
-        assert!(sig.doc.is_some());
+        let sigs = lookup(&lockfile_path, &cache_root, "gps", "rbf_cov").unwrap();
+        assert_eq!(sigs.len(), 1);
+        assert_eq!(sigs[0].name, "rbf_cov");
+        assert!(sigs[0].doc.is_some());
+    }
+
+    #[test]
+    fn lookup_rebuilds_a_sidecar_from_an_older_extractor() {
+        let (_tmp, lockfile_path, cache_root) = fixture();
+        let pkg_dir = cache_root.join("gps").join("1.0.0");
+        write_gps_package(&pkg_dir);
+        // What an older laplace wrote: no `format`, and the doc lost.
+        fs::write(
+            pkg_dir.join("docs.json"),
+            r#"{"package":"gps","version":"1.0.0","functions":[{"name":"rbf_cov","params":[],"return_type":"matrix","doc":null}]}"#,
+        )
+        .unwrap();
+        lockfile::write_lockfile(
+            &lockfile_path,
+            &Lockfile {
+                root: vec!["gps".to_string()],
+                packages: vec![LockedPackage::leaf("gps", "1.0.0", "sha256:whatever", "registry")],
+            },
+        )
+        .unwrap();
+
+        let sigs = lookup(&lockfile_path, &cache_root, "gps", "rbf_cov").unwrap();
+        assert!(sigs[0].doc.is_some());
+        let rewritten = read_docs_json(&pkg_dir.join("docs.json")).unwrap();
+        assert_eq!(rewritten.format, DOCS_FORMAT);
     }
 
     #[test]
@@ -470,6 +574,32 @@ real jitter(real epsilon) {
         assert!(rendered.contains("alpha  Marginal std dev."));
         assert!(rendered.contains("Returns:\n  An N x N matrix."));
         assert!(rendered.contains("Example:\n  rbf_cov(x, 1.0)"));
+    }
+
+    #[test]
+    fn render_overloads_shows_every_signature_and_shares_the_doc() {
+        let source = "// @laplace\n// @brief Hill curve.\nreal hill(real x) {\n  return x;\n}\n\
+                      vector hill(vector x) {\n  return x;\n}\n\n\
+                      // @laplace\n// @brief Matrix form.\nmatrix hill(matrix x) {\n  return x;\n}\n";
+        let sigs = extract_signatures(source);
+        let rendered = render_overloads("kinetics", &sigs);
+
+        assert!(rendered.starts_with("kinetics::hill has 3 overloads\n"), "{rendered}");
+        assert!(rendered.contains(
+            "kinetics::hill(x: real) -> real\nkinetics::hill(x: vector) -> vector\n\nHill curve.\n"
+        ), "{rendered}");
+        assert!(rendered.contains("kinetics::hill(x: matrix) -> matrix\n\nMatrix form.\n"), "{rendered}");
+        assert_eq!(rendered.matches("Hill curve.").count(), 1);
+        assert!(!rendered.contains("no @laplace documentation"));
+
+        let html = render_html_overloads("kinetics", &sigs);
+        assert_eq!(html.matches("<h1>").count(), 3);
+    }
+
+    #[test]
+    fn render_overloads_of_a_single_function_matches_render() {
+        let sigs = extract_signatures("// @laplace\n// @brief One.\nreal f(real x) {\n  return x;\n}\n");
+        assert_eq!(render_overloads("p", &sigs), render("p", &sigs[0]));
     }
 
     #[test]

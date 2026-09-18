@@ -1196,3 +1196,108 @@ fn update_moves_only_the_named_package() {
         "`other` must stay pinned at 1.0.0:\n{lock}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Ecosystem-test fixes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn build_validate_passes_the_include_path_and_keeps_stancs_cpp_out_of_build() {
+    let mut project = setup();
+    project.write_package("gps", "1.0.0", &["rbf_cov"], GPS_STAN);
+    project.run(&["add", "gps"]);
+    project.write_project_file("model.laplace", MODEL_LAPLACE);
+
+    // A fake stanc that records its arguments, then writes to whatever
+    // `--o=` names, the way the real one writes the .hpp.
+    let args_file = project.dir.join("stanc_args.txt");
+    let script = project.dir.join("recording_stanc.sh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nfor a in \"$@\"; do case \"$a\" in --o=*) echo cpp > \"${{a#--o=}}\";; esac; done\nexit 0\n",
+            args_file.display()
+        ),
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    fs::set_permissions(&script, perms).unwrap();
+    project
+        .extra_env
+        .push(("LAPLACE_STANC".to_string(), script.to_string_lossy().to_string()));
+
+    let out = project.run(&["build", "model.laplace", "--split-functions", "--validate"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let args = fs::read_to_string(&args_file).unwrap();
+    assert!(args.lines().any(|a| a == "--include-paths=build"), "{args}");
+    assert!(args.lines().any(|a| a.starts_with("--o=")), "{args}");
+    assert!(args.lines().any(|a| a == "build/model.stan"), "{args}");
+    let mut build_files: Vec<String> = fs::read_dir(project.dir.join("build"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    build_files.sort();
+    assert_eq!(build_files, vec!["gps.stanfunctions", "model.stan"]);
+}
+
+#[test]
+fn build_output_may_name_a_directory() {
+    let project = setup();
+    project.write_project_file("model.laplace", "data {\n  int n;\n}\n");
+    fs::create_dir_all(project.dir.join("out")).unwrap();
+
+    let out = project.run(&["build", "model.laplace", "--output", "out"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(project.project_file_exists("out/model.stan"));
+
+    let out = project.run(&["build", "model.laplace", "--output", "fresh/"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(project.project_file_exists("fresh/model.stan"));
+}
+
+#[test]
+fn add_rejects_a_hyphenated_package_name() {
+    let project = setup();
+    let out = project.run(&["add", "laplace-splines"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("invalid package name `laplace-splines`"), "{}", stderr(&out));
+    assert!(!project.project_file_exists("laplace.toml"));
+}
+
+#[test]
+fn build_rejects_an_import_pinned_to_a_version_the_lock_does_not_hold() {
+    let project = setup();
+    project.write_package("gps", "1.0.0", &["rbf_cov"], GPS_STAN);
+    assert!(project.run(&["add", "gps"]).status.success());
+    project.write_project_file(
+        "model.laplace",
+        "library {\n  import gps@9.9.9\n}\nmodel {\n}\n",
+    );
+
+    let out = project.run(&["build", "model.laplace"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("imports `gps@9.9.9`, but laplace.lock pins `gps` at 1.0.0"), "{err}");
+}
+
+#[test]
+fn doc_prints_every_overload() {
+    let project = setup();
+    project.write_package(
+        "kinetics",
+        "1.0.0",
+        &["hill"],
+        "// @laplace\n// @brief Hill curve.\nreal hill(real x) {\n  return x;\n}\nvector hill(vector x) {\n  return x;\n}\n",
+    );
+    assert!(project.run(&["add", "kinetics"]).status.success());
+
+    let out = project.run(&["doc", "kinetics::hill"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("kinetics::hill has 2 overloads"), "{text}");
+    assert!(text.contains("kinetics::hill(x: real) -> real"), "{text}");
+    assert!(text.contains("kinetics::hill(x: vector) -> vector"), "{text}");
+    assert!(text.contains("Hill curve."), "{text}");
+}

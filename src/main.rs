@@ -32,7 +32,8 @@ enum Command {
     /// Compile a .laplace file to .stan
     Build {
         file: PathBuf,
-        /// Output path (default: build/<name>.stan)
+        /// Output file (default: build/<name>.stan). An existing directory,
+        /// or a path ending in `/`, means `<dir>/<name>.stan`.
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Diff against the existing build output instead of writing; exits
@@ -190,8 +191,26 @@ fn cmd_init() -> Result<(), CliError> {
     let summary = init::init(&dir)?;
 
     println!("wrote laplace.toml for `{}`", summary.name);
-    if summary.included.is_empty() {
-        println!("no @laplace-documented functions found -- exports is empty, add entries by hand");
+    if let Some(dir_name) = &summary.renamed_from {
+        println!(
+            "note: the directory name `{dir_name}` is not a valid package name, so `{}` was used \
+             instead -- {}",
+            summary.name,
+            manifest::PACKAGE_NAME_RULE,
+        );
+    }
+    if summary.source_files == 0 {
+        println!(
+            "no .stan or .laplacelib files found in this directory -- exports is empty, add \
+             entries by hand"
+        );
+    } else if summary.included.is_empty() {
+        println!(
+            "none of the functions in the {} source {} has a `// @laplace` doc comment -- \
+             exports is empty, add entries by hand",
+            summary.source_files,
+            pluralize(summary.source_files, "file", "files"),
+        );
     } else {
         println!(
             "included {} exported {}: {}",
@@ -206,6 +225,13 @@ fn cmd_init() -> Result<(), CliError> {
             summary.excluded.len(),
             pluralize(summary.excluded.len(), "function", "functions"),
             summary.excluded.join(", "),
+        );
+    }
+    if !summary.imports.is_empty() {
+        println!(
+            "note: the sources import {} -- add {} under [dependencies] in laplace.toml",
+            summary.imports.join(", "),
+            pluralize(summary.imports.len(), "it", "them"),
         );
     }
 
@@ -282,7 +308,7 @@ fn cmd_build(
     let options = CodegenOptions { split_functions };
     let generated =
         codegen::generate_with_options(&source, library_block.as_ref(), &installed, &options)?;
-    let output_path = output.unwrap_or_else(|| default_output_path(file));
+    let output_path = resolve_output_path(file, output);
     let output_dir = output_path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -334,9 +360,11 @@ fn cmd_build(
     }
     if !generated.function_files.is_empty() {
         println!(
-            "note: keep the .stanfunctions files next to {} -- stanc resolves #include relative \
-             to the including file, or pass --include-paths={}",
+            "note: keep the .stanfunctions files next to {} and compile with the include path \
+             set to that directory -- `stanc --include-paths={}`, or \
+             `cmdstan_model(..., include_paths = \"{}\")` in cmdstanr",
             output_path.display(),
+            output_dir.display(),
             output_dir.display(),
         );
     }
@@ -356,8 +384,33 @@ fn stanc_command() -> String {
 }
 
 fn default_output_path(file: &Path) -> PathBuf {
+    PathBuf::from("build").join(output_file_name(file))
+}
+
+/// `-o/--output` names a file, but a directory is accepted too: an existing
+/// directory, or a path spelled with a trailing separator, gets
+/// `<name>.stan` appended rather than failing with a bare "Is a directory".
+fn resolve_output_path(file: &Path, output: Option<PathBuf>) -> PathBuf {
+    match output {
+        None => default_output_path(file),
+        Some(path) => {
+            let names_a_dir = path.is_dir()
+                || path
+                    .as_os_str()
+                    .to_str()
+                    .is_some_and(|s| s.ends_with(std::path::MAIN_SEPARATOR) || s.ends_with('/'));
+            if names_a_dir {
+                path.join(output_file_name(file))
+            } else {
+                path
+            }
+        }
+    }
+}
+
+fn output_file_name(file: &Path) -> String {
     let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("model");
-    PathBuf::from("build").join(format!("{stem}.stan"))
+    format!("{stem}.stan")
 }
 
 fn pluralize(count: usize, singular: &'static str, plural: &'static str) -> &'static str {
@@ -392,6 +445,14 @@ fn cmd_add(
     let project_manifest_path = PathBuf::from("laplace.toml");
     let lockfile_path = PathBuf::from("laplace.lock");
     let cache_root = default_cache_root();
+
+    let (name, _) = parse_package_spec(spec);
+    if !manifest::is_valid_package_name(name) {
+        return Err(CliError::Message(format!(
+            "invalid package name `{name}`: {}",
+            manifest::PACKAGE_NAME_RULE
+        )));
+    }
 
     if let Some(url) = git {
         let registry = Registry::new(registry_root());
@@ -457,15 +518,15 @@ fn cmd_doc(spec: &str, html: bool, output: Option<PathBuf>) -> Result<(), CliErr
     let lockfile_path = PathBuf::from("laplace.lock");
     let cache_root = default_cache_root();
 
-    let sig = docs::lookup(&lockfile_path, &cache_root, package, func)?;
+    let overloads = docs::lookup(&lockfile_path, &cache_root, package, func)?;
 
     if html {
         let output = output
             .ok_or_else(|| CliError::Message("--html requires -o/--output <path>".to_string()))?;
-        fs::write(&output, docs::render_html(package, &sig))?;
+        fs::write(&output, docs::render_html_overloads(package, &overloads))?;
         println!("wrote {}", output.display());
     } else {
-        print!("{}", docs::render(package, &sig));
+        print!("{}", docs::render_overloads(package, &overloads));
     }
     Ok(())
 }

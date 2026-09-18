@@ -59,6 +59,9 @@ pub struct QualifiedCall {
     pub func: String,
     /// Byte range of the `package::func` text itself (not including the `(`).
     pub range: Range<usize>,
+    /// The call is the right-hand side of a `~` distribution statement
+    /// (`y ~ pkg::dist(...)`), which Stan resolves to `dist_lpdf`/`dist_lpmf`.
+    pub after_tilde: bool,
 }
 
 /// Find every `identifier::identifier(` occurrence in `source`, ignoring
@@ -94,6 +97,7 @@ pub fn find_qualified_calls(source: &str) -> Vec<QualifiedCall> {
                         package: source[pkg_start..pkg_end].to_string(),
                         func: source[func_start..func_end].to_string(),
                         range: pkg_start..func_end,
+                        after_tilde: preceded_by_tilde(bytes, &mask, pkg_start),
                     });
                     i = func_end;
                     continue;
@@ -104,6 +108,19 @@ pub fn find_qualified_calls(source: &str) -> Vec<QualifiedCall> {
     }
 
     out
+}
+
+/// Whether the last real (non-comment, non-whitespace) byte before `at` is `~`.
+fn preceded_by_tilde(bytes: &[u8], mask: &CodeMask, at: usize) -> bool {
+    let mut j = at;
+    while j > 0 {
+        let b = bytes[j - 1];
+        if mask.is_real(j - 1) && !b.is_ascii_whitespace() {
+            return b == b'~';
+        }
+        j -= 1;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -156,6 +173,7 @@ mod tests {
                 package: "gps".to_string(),
                 func: "rbf_cov".to_string(),
                 range: 11..23,
+                after_tilde: false,
             }]
         );
         assert_eq!(&source[calls[0].range.clone()], "gps::rbf_cov");
@@ -172,6 +190,16 @@ mod tests {
     fn find_qualified_calls_ignores_comments_and_strings() {
         let source = "// gps::rbf_cov(x)\nreal y = 1; // \"gps::rbf_cov(x)\"\n";
         assert_eq!(find_qualified_calls(source), vec![]);
+    }
+
+    #[test]
+    fn find_qualified_calls_marks_distribution_statements() {
+        let source = "y ~ gp::marginal_normal(mu, K, sigma);\nz ~ // note\n  gp::other(1);\nreal a = gp::f(1);\n";
+        let calls = find_qualified_calls(source);
+        assert_eq!(
+            calls.iter().map(|c| c.after_tilde).collect::<Vec<_>>(),
+            vec![true, true, false]
+        );
     }
 
     #[test]

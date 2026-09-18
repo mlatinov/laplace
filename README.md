@@ -456,8 +456,8 @@ instead gets its own `<pkg>.stanfunctions` file next to the output, and the
 $ laplace build model.laplace --split-functions
 wrote build/model.stan (15 lines, 1 dependency + 1 transitive)
 wrote build/regression.stanfunctions (stats, regression)
-note: keep the .stanfunctions files next to build/model.stan -- stanc resolves #include relative
-to the including file, or pass --include-paths=build
+note: keep the .stanfunctions files next to build/model.stan and compile with the include path
+set to that directory -- `stanc --include-paths=build`, or `cmdstan_model(..., include_paths = "build")` in cmdstanr
 ```
 
 ```stan
@@ -508,9 +508,10 @@ Notes on split mode:
   of your direct imports share a dependency, it's still emitted exactly once,
   and the `#include` lines are ordered so every function is defined before it's
   used.
-- The `.stanfunctions` files must travel with the `.stan` file. `stanc` resolves
-  `#include` relative to the including file's directory first, so keeping them
-  in the same directory just works; otherwise pass `--include-paths`.
+- The `.stanfunctions` files must travel with the `.stan` file, and `stanc`
+  must be told where they are: it does not resolve `#include` relative to the
+  including file, so pass `--include-paths=<dir>` (or `include_paths =` in
+  cmdstanr). `laplace build --validate` does this for you.
 - A project with no imports is unaffected — `--split-functions` is a no-op.
 - It's off by default because one self-contained `.stan` file is the more
   portable artifact. Turn it on when the inlined output has grown too big to
@@ -523,7 +524,9 @@ Use it to catch a committed `.stan` file that's gone stale relative to its
 files too.
 
 `--validate` shells out to `stanc` after writing, to type-check the
-generated file. It's off by default, so a normal `laplace build` never
+generated file. It passes the output directory as an include path and sends
+`stanc`'s generated C++ to a scratch directory, so nothing but the `.stan`
+(and any `.stanfunctions`) lands in `build/`. It's off by default, so a normal `laplace build` never
 requires Stan to be installed. Point it at a specific binary with the
 `LAPLACE_STANC` environment variable if `stanc` isn't on `PATH`.
 

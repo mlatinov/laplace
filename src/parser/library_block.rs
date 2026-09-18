@@ -35,6 +35,15 @@ pub enum LibraryBlockError {
 
     #[error("import statement `{statement}` has no package name")]
     EmptyPackageName { statement: String },
+
+    #[error("invalid package name in `{statement}`: {}", crate::manifest::PACKAGE_NAME_RULE)]
+    InvalidPackageName { statement: String },
+
+    #[error(
+        "invalid version in `{statement}`: a pinned import names one exact version, \
+         e.g. `import {name}@1.2.0`"
+    )]
+    InvalidVersion { statement: String, name: String },
 }
 
 /// Find the `library { }` block in `source`, if present, and parse its imports.
@@ -175,15 +184,26 @@ fn parse_one_import(statement: &str) -> Result<ImportStatement, LibraryBlockErro
             statement: statement.to_string(),
         });
     }
-    if !is_valid_package_name(name) {
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
         return Err(LibraryBlockError::MalformedImport {
             statement: statement.to_string(),
         });
     }
+    if !crate::manifest::is_valid_package_name(name) {
+        return Err(LibraryBlockError::InvalidPackageName {
+            statement: statement.to_string(),
+        });
+    }
     if let Some(version) = version {
-        if version.is_empty() || !is_valid_version(version) {
+        if version.is_empty() {
             return Err(LibraryBlockError::MalformedImport {
                 statement: statement.to_string(),
+            });
+        }
+        if semver::Version::parse(version).is_err() {
+            return Err(LibraryBlockError::InvalidVersion {
+                statement: statement.to_string(),
+                name: name.to_string(),
             });
         }
     }
@@ -192,20 +212,6 @@ fn parse_one_import(statement: &str) -> Result<ImportStatement, LibraryBlockErro
         name: name.to_string(),
         version: version.map(str::to_string),
     })
-}
-
-fn is_valid_package_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-}
-
-fn is_valid_version(version: &str) -> bool {
-    !version.is_empty()
-        && version
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
 }
 
 #[cfg(test)]
@@ -372,6 +378,32 @@ mod tests {
             err,
             LibraryBlockError::EmptyPackageName {
                 statement: "import".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn hyphenated_package_name_is_rejected_with_the_naming_rule() {
+        let source = "library {\n  import laplace-splines\n}\n";
+        let err = parse_library_block(source).unwrap_err();
+        assert_eq!(
+            err,
+            LibraryBlockError::InvalidPackageName {
+                statement: "import laplace-splines".to_string()
+            }
+        );
+        assert!(err.to_string().contains("start with a letter"), "{err}");
+    }
+
+    #[test]
+    fn pinned_version_must_be_an_exact_semver_version() {
+        let source = "library {\n  import splines@not-a-version\n}\n";
+        let err = parse_library_block(source).unwrap_err();
+        assert_eq!(
+            err,
+            LibraryBlockError::InvalidVersion {
+                statement: "import splines@not-a-version".to_string(),
+                name: "splines".to_string(),
             }
         );
     }

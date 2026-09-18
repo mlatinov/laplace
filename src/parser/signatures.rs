@@ -204,20 +204,19 @@ fn split_header_and_comment(text: &str) -> (Vec<String>, Vec<String>) {
     (header_lines, comment_lines)
 }
 
-/// If `comment_lines` is a `// @laplace`-tagged block, parse it into a `Doc`.
-/// Any other (untagged) comment block directly above a function is treated
-/// as an ordinary comment, not documentation, and yields `None`.
+/// If `comment_lines` contains a `// @laplace` marker, parse everything after
+/// the last such marker into a `Doc`. Ordinary comment lines glued on above
+/// the marker (a section banner, a maintainer's note) are not documentation
+/// and are ignored. A comment block with no marker at all is an ordinary
+/// comment and yields `None`.
 fn parse_doc_block(comment_lines: &[String]) -> Option<Doc> {
     let stripped: Vec<String> = comment_lines
         .iter()
         .map(|l| strip_comment_prefix(l))
         .collect();
 
-    if stripped.first().map(|s| s.trim()) != Some("@laplace") {
-        return None;
-    }
-
-    Some(parse_doc_tags(&stripped[1..]))
+    let marker = stripped.iter().rposition(|s| s.trim() == "@laplace")?;
+    Some(parse_doc_tags(&stripped[marker + 1..]))
 }
 
 fn strip_comment_prefix(line: &str) -> String {
@@ -485,6 +484,22 @@ real detached(real x) {
 "#;
         let sigs = extract_signatures(source);
         assert_eq!(sigs[0].doc, None);
+    }
+
+    #[test]
+    fn plain_comment_glued_above_the_marker_does_not_hide_the_doc() {
+        let source = r#"
+// 16 OU kernel ==========================================
+// @laplace
+// @brief Ornstein-Uhlenbeck kernel.
+// @param x Input locations.
+real ou(real x) {
+  return x;
+}
+"#;
+        let doc = extract_signatures(source)[0].doc.clone().expect("doc attached");
+        assert_eq!(doc.brief.as_deref(), Some("Ornstein-Uhlenbeck kernel."));
+        assert_eq!(doc.params, vec![("x".to_string(), "Input locations.".to_string())]);
     }
 
     #[test]
