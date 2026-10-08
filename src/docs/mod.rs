@@ -28,12 +28,20 @@ pub struct PackageDocs {
     #[serde(default)]
     pub format: u32,
     pub functions: Vec<FunctionSig>,
+    /// Names defined in a `.laplacelib` file without `pub`: private to
+    /// the package, so `laplace doc` does not show them. Only
+    /// `.laplacelib` items appear here -- a plain `.stan` package has no
+    /// `pub` keyword, so its functions are all documented as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub private: Vec<String>,
 }
 
 /// Bump whenever doc extraction changes what it produces for the same
 /// source. 1: a plain comment glued above `// @laplace` no longer hides the
-/// doc block.
-pub const DOCS_FORMAT: u32 = 1;
+/// doc block. 2: `private` records which `.laplacelib` items are not
+/// `pub`, so a sidecar written before `pub` existed is rebuilt rather
+/// than trusted to know what is public.
+pub const DOCS_FORMAT: u32 = 2;
 
 #[derive(Debug, Error)]
 pub enum DocsError {
@@ -70,6 +78,12 @@ pub enum DocsError {
     #[error("package `{package}` has no function named `{func}`")]
     FunctionNotFound { package: String, func: String },
 
+    #[error(
+        "`{package}::{func}` is private to package `{package}`\n  help: only items marked `pub` \
+         are part of `{package}`'s documented API"
+    )]
+    ItemIsPrivate { package: String, func: String },
+
     #[error(transparent)]
     Package(Box<crate::package::PackageError>),
 }
@@ -85,11 +99,19 @@ pub fn write_sidecar(package_dir: &Path, name: &str, version: &str) -> Result<Pa
     let mut functions = extract_signatures(&sources.body);
     functions.sort_by(|a, b| a.name.cmp(&b.name));
 
+    let private: Vec<String> = sources
+        .laplacelib_items
+        .iter()
+        .filter(|name| !sources.public_items.contains(name))
+        .cloned()
+        .collect();
+
     let docs = PackageDocs {
         package: name.to_string(),
         version: version.to_string(),
         format: DOCS_FORMAT,
         functions,
+        private,
     };
     write_docs_json(&package_dir.join("docs.json"), &docs)?;
     Ok(docs)
@@ -145,6 +167,12 @@ pub fn lookup(
     let mut docs = read_docs_json(&docs_path)?;
     if docs.format < DOCS_FORMAT {
         docs = write_sidecar(&package_dir, &locked.name, &locked.version)?;
+    }
+    if docs.private.iter().any(|name| name == func) {
+        return Err(DocsError::ItemIsPrivate {
+            package: package.to_string(),
+            func: func.to_string(),
+        });
     }
     let overloads: Vec<FunctionSig> =
         docs.functions.into_iter().filter(|f| f.name == func).collect();
@@ -564,6 +592,7 @@ real jitter(real epsilon) {
                 example: Some("rbf_cov(x, 1.0)".to_string()),
                 math: None,
             }),
+            ..Default::default()
         };
 
         let rendered = render("gps", &sig);
@@ -609,6 +638,7 @@ real jitter(real epsilon) {
             params: vec![("epsilon".to_string(), "real".to_string())],
             return_type: "real".to_string(),
             doc: None,
+            ..Default::default()
         };
 
         let rendered = render("gps", &sig);

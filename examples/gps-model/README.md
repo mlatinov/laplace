@@ -13,6 +13,12 @@ process model whose covariance function comes from an imported `gps` package.
 - `build/model.stan` — the compiled output, committed on purpose: it's meant to
   be readable and runnable without laplace installed.
 
+> **Stale.** This committed output predates the provenance comments added in
+> patch 1 session 1, so it is missing the `// gps v1.0.0 (pub) -- ...` line
+> above `gps__rbf_cov`. Re-run `laplace build model.laplace` on a machine that
+> has `gps@1.0.0` in its registry to regenerate it; `laplace build --check`
+> reports it as out of date until then.
+
 To rebuild it you need `gps@1.0.0` in a registry laplace can see
 (`~/.laplace/registry/gps/1.0.0/`, or point `LAPLACE_REGISTRY` elsewhere), then:
 

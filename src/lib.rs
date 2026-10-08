@@ -8,9 +8,12 @@
 
 pub mod codegen;
 pub mod docs;
+pub mod expand;
 pub mod init;
 pub mod manifest;
+pub mod monomorphize;
 pub mod package;
 pub mod parser;
+pub mod pipeline;
 pub mod resolve;
 pub mod validate;

@@ -9,9 +9,10 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use laplace::codegen::{self, CodegenOptions};
+use laplace::codegen::CodegenOptions;
 use laplace::parser::library_block::{parse_library_block, ImportStatement};
 use laplace::resolve::{self, Registry};
+use laplace::pipeline;
 use laplace::{docs, init, manifest, package, validate};
 
 #[derive(Parser)]
@@ -140,7 +141,7 @@ enum CliError {
     #[error(transparent)]
     Package(Box<package::PackageError>),
     #[error(transparent)]
-    Codegen(#[from] codegen::CodegenError),
+    Pipeline(Box<pipeline::PipelineError>),
     #[error(transparent)]
     Resolve(Box<resolve::ResolveError>),
     #[error(transparent)]
@@ -165,6 +166,15 @@ enum CliError {
 impl From<resolve::ResolveError> for CliError {
     fn from(err: resolve::ResolveError) -> Self {
         CliError::Resolve(Box::new(err))
+    }
+}
+
+// PipelineError carries a CodegenError, which clippy flags as a large
+// error type to return by value -- box it and write the conversion by
+// hand so `?` still works on a plain PipelineError.
+impl From<pipeline::PipelineError> for CliError {
+    fn from(err: pipeline::PipelineError) -> Self {
+        CliError::Pipeline(Box::new(err))
     }
 }
 
@@ -225,6 +235,25 @@ fn cmd_init() -> Result<(), CliError> {
             summary.excluded.len(),
             pluralize(summary.excluded.len(), "function", "functions"),
             summary.excluded.join(", "),
+        );
+    }
+    if !summary.already_pub.is_empty() {
+        println!(
+            "note: {} `.laplacelib` {} already marked `pub` and need no manifest entry: {}",
+            summary.already_pub.len(),
+            pluralize(summary.already_pub.len(), "item is", "items are"),
+            summary.already_pub.join(", "),
+        );
+    }
+    if !summary.needs_pub.is_empty() {
+        println!(
+            "note: {} `.laplacelib` {} private; write `pub` in front of {} in the source to \
+             publish {} (`exports` does not apply to `.laplacelib` items): {}",
+            summary.needs_pub.len(),
+            pluralize(summary.needs_pub.len(), "item is", "items are"),
+            pluralize(summary.needs_pub.len(), "it", "them"),
+            pluralize(summary.needs_pub.len(), "it", "them"),
+            summary.needs_pub.join(", "),
         );
     }
     if !summary.imports.is_empty() {
@@ -305,9 +334,22 @@ fn cmd_build(
         installed.push(package::load(&package_dir, &locked.name)?);
     }
 
-    let options = CodegenOptions { split_functions };
-    let generated =
-        codegen::generate_with_options(&source, library_block.as_ref(), &installed, &options)?;
+    let options = CodegenOptions {
+        split_functions,
+        ..Default::default()
+    };
+    let generated = pipeline::compile(pipeline::CompileRequest {
+        source: &source,
+        source_name: file
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| file.display().to_string()),
+        installed: &installed,
+        options,
+    })?;
+    for warning in &generated.warnings {
+        eprintln!("{warning}");
+    }
     let output_path = resolve_output_path(file, output);
     let output_dir = output_path
         .parent()

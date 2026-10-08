@@ -26,6 +26,13 @@
 //! ship next to my `.stan` file" answerable by looking at the `library { }`
 //! block alone.
 //!
+//! # Visibility
+//!
+//! In a `.laplacelib` file an item is public only when it is marked
+//! `pub`; in a plain `.stan` package file the manifest's `exports` list
+//! decides, exactly as it always has. Naming a private item from outside
+//! its package is [`CodegenError::ItemIsPrivate`].
+//!
 //! # Encapsulation: imports are private
 //!
 //! A package may call `dep::func()` only for packages *it* declares. The
@@ -43,11 +50,11 @@
 //! package name is a unique prefix. Two versions of one package can never
 //! coexist; see `resolve::graph`.
 //!
-//! A package's *non*-exported functions keep their original names -- they
-//! are internal to a package but share the compiled file's single Stan
-//! namespace, so two packages defining the same private helper are a hard
-//! error ([`CodegenError::PrivateFunctionCollision`]) rather than a silent
-//! clobber.
+//! Private items are mangled too. Visibility is an *access* rule, not a
+//! naming one: `pub` decides who may write `pkg::item`, while the
+//! `pkg__` prefix goes on everything so that two packages defining the
+//! same private helper simply cannot collide in Stan's one flat function
+//! namespace.
 
 pub mod rename;
 
@@ -56,9 +63,16 @@ use std::ops::Range;
 
 use thiserror::Error;
 
+use crate::expand::blocks::{self as expand_blocks, TemplateSource};
+use crate::expand::macros::{self as expand_macros, MacroSource};
+use crate::monomorphize::{self, Unit};
 use crate::parser::brace_match::CodeMask;
 use crate::parser::library_block::{ImportStatement, LibraryBlock};
+use crate::parser::origin::{line_col, PackageOrigin};
 use crate::parser::signatures::FunctionSig;
+use crate::parser::macros::LocatedMacro;
+use crate::parser::template::LocatedTemplate;
+use crate::parser::visibility::Visibility;
 use rename::{find_qualified_calls, mangle, rename_identifier_calls, QualifiedCall};
 
 /// A resolved, installed package ready for codegen: its raw source (every
@@ -76,6 +90,16 @@ pub struct InstalledPackage {
     /// Names of the packages this one imports. Every entry must itself
     /// appear in the `installed` slice handed to codegen.
     pub dependencies: Vec<String>,
+    /// Which file and line each byte of `source` was written on, for
+    /// provenance comments and for error messages that have to name a
+    /// line inside the package rather than in the user's own file.
+    pub origin: PackageOrigin,
+    /// Every `@template` this package defines. Templates are not Stan
+    /// and are not in `source`; a `@use` expands one into the model.
+    pub templates: Vec<LocatedTemplate>,
+    /// Every `@macro` this package defines. Like templates, not Stan
+    /// and not in `source`; an `@expand` expands one in place.
+    pub macros: Vec<LocatedMacro>,
 }
 
 impl InstalledPackage {
@@ -88,25 +112,48 @@ impl InstalledPackage {
         exported: Vec<String>,
     ) -> Self {
         let source = source.into();
+        let name = name.into();
         let signatures = crate::parser::signatures::extract_signatures(&source);
+        let origin = PackageOrigin::single_file(format!("{name}.stan"), source.len());
         InstalledPackage {
-            name: name.into(),
+            name,
             version: version.into(),
             source,
             signatures,
             exported,
             dependencies: Vec::new(),
+            origin,
+            templates: Vec::new(),
+            macros: Vec::new(),
         }
     }
 
     /// The name this package's function `func` ends up with in compiled
-    /// output: mangled if exported, unchanged if private.
+    /// output. Every item of every package is mangled, private ones
+    /// included: the package name is a unique prefix (one version per
+    /// package per build), so mangling everything makes a name collision
+    /// between two packages structurally impossible instead of merely
+    /// detectable.
     fn output_symbol(&self, func: &str) -> String {
+        mangle(&self.name, func)
+    }
+
+    /// Whether `func` is part of this package's public API.
+    fn visibility_of(&self, func: &str) -> Visibility {
         if self.exported.iter().any(|e| e == func) {
-            mangle(&self.name, func)
+            Visibility::Public
         } else {
-            func.to_string()
+            Visibility::Private
         }
+    }
+
+    /// Every distinct function name this package defines, sorted, so the
+    /// renaming pass runs in a deterministic order.
+    fn defined_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.signatures.iter().map(|s| s.name.as_str()).collect();
+        names.sort();
+        names.dedup();
+        names
     }
 }
 
@@ -116,19 +163,35 @@ pub struct CodegenOptions {
     /// Emit `<pkg>.stanfunctions` files and `#include` them, instead of
     /// inlining imported functions into the `functions { }` block.
     pub split_functions: bool,
+    /// How to name the file being compiled in error messages -- the
+    /// `model.laplace` in `--> model.laplace:14:12`. Never affects
+    /// generated output, so it cannot make a build non-reproducible.
+    pub source_name: Option<String>,
 }
 
 impl CodegenOptions {
     pub fn inline() -> Self {
         CodegenOptions {
             split_functions: false,
+            ..Default::default()
         }
     }
 
     pub fn split() -> Self {
         CodegenOptions {
             split_functions: true,
+            ..Default::default()
         }
+    }
+
+    /// Name the file being compiled, for error messages.
+    pub fn named(mut self, name: impl Into<String>) -> Self {
+        self.source_name = Some(name.into());
+        self
+    }
+
+    fn display_name(&self) -> &str {
+        self.source_name.as_deref().unwrap_or("<source>")
     }
 }
 
@@ -177,8 +240,19 @@ pub enum CodegenError {
     )]
     MissingDependency { package: String, dependency: String },
 
-    #[error("`{package}::{func}(` is called, but `{func}` is not in `{package}`'s exports")]
+    #[error("`{package}::{func}(` is called, but `{package}` defines no `{func}`")]
     FunctionNotExported { package: String, func: String },
+
+    #[error(
+        "`{package}::{func}` is private to package `{package}`\n  --> {location}\n  help: only \
+         items marked `pub` can be used outside their package"
+    )]
+    ItemIsPrivate {
+        package: String,
+        func: String,
+        /// Already rendered as `file:line:column`.
+        location: String,
+    },
 
     #[error(
         "`{package}::{func}(` is called, but `{package}` exports `{density}`, not `{func}` -- \
@@ -213,23 +287,19 @@ pub enum CodegenError {
     ExportedFunctionMissing { package: String, func: String },
 
     #[error(
+        "two different packages named `{package}` were handed to codegen -- resolution \
+         guarantees one version of a package per build, so this is a bug in whatever assembled \
+         the package list"
+    )]
+    DuplicatePackage { package: String },
+
+    #[error(
         "packages `{first_package}` and `{second_package}` both mangle to `{mangled}` -- this \
          should be impossible given the package-name prefix and indicates a naming collision \
          between the two packages"
     )]
     DuplicateMangledName {
         mangled: String,
-        first_package: String,
-        second_package: String,
-    },
-
-    #[error(
-        "packages `{first_package}` and `{second_package}` both define a non-exported function \
-         `{func}`, which would collide in the compiled model (Stan has one flat function \
-         namespace) -- export it from one of them so it gets a `pkg__` prefix, or rename it"
-    )]
-    PrivateFunctionCollision {
-        func: String,
         first_package: String,
         second_package: String,
     },
@@ -243,6 +313,53 @@ pub enum CodegenError {
         first_package: String,
         second_package: String,
     },
+
+    #[error(transparent)]
+    Monomorphize(Box<monomorphize::MonomorphizeError>),
+
+    #[error(transparent)]
+    Template(Box<crate::parser::template::TemplateError>),
+
+    #[error(transparent)]
+    Expand(Box<expand_blocks::BlockExpandError>),
+
+    #[error(transparent)]
+    Macro(Box<crate::parser::macros::MacroError>),
+
+    #[error(transparent)]
+    ExpandMacro(Box<expand_macros::MacroExpandError>),
+}
+
+impl From<crate::parser::macros::MacroError> for CodegenError {
+    fn from(err: crate::parser::macros::MacroError) -> Self {
+        CodegenError::Macro(Box::new(err))
+    }
+}
+
+impl From<expand_macros::MacroExpandError> for CodegenError {
+    fn from(err: expand_macros::MacroExpandError) -> Self {
+        CodegenError::ExpandMacro(Box::new(err))
+    }
+}
+
+impl From<crate::parser::template::TemplateError> for CodegenError {
+    fn from(err: crate::parser::template::TemplateError) -> Self {
+        CodegenError::Template(Box::new(err))
+    }
+}
+
+impl From<expand_blocks::BlockExpandError> for CodegenError {
+    fn from(err: expand_blocks::BlockExpandError) -> Self {
+        CodegenError::Expand(Box::new(err))
+    }
+}
+
+// Boxed, so one wide diagnostic does not widen every `Result` in the
+// compiler -- the same reason `CliError` boxes its own large variants.
+impl From<monomorphize::MonomorphizeError> for CodegenError {
+    fn from(err: monomorphize::MonomorphizeError) -> Self {
+        CodegenError::Monomorphize(Box::new(err))
+    }
 }
 
 /// Which imported package (if any) contributed a given range of lines in
@@ -268,6 +385,9 @@ pub struct GeneratedStan {
     pub source: String,
     pub package_line_ranges: Vec<PackageLineRange>,
     pub function_files: Vec<FunctionFile>,
+    /// Things worth telling the user that are not errors -- a template
+    /// declaring a placeholder it never uses, say.
+    pub warnings: Vec<String>,
 }
 
 /// Compile a `.laplace` source file's text into final `.stan` text.
@@ -374,8 +494,17 @@ fn generate_impl(
 ) -> Result<(GeneratedStan, SourceMap), CodegenError> {
     let imports: &[ImportStatement] = library_block.map(|b| b.imports.as_slice()).unwrap_or(&[]);
 
-    let by_name: BTreeMap<&str, &InstalledPackage> =
-        installed.iter().map(|p| (p.name.as_str(), p)).collect();
+    // One version per package name per build is what makes the bare
+    // package name a safe mangling prefix, so two entries sharing a name
+    // is caught here rather than letting one silently shadow the other.
+    let mut by_name: BTreeMap<&str, &InstalledPackage> = BTreeMap::new();
+    for pkg in installed {
+        if by_name.insert(pkg.name.as_str(), pkg).is_some() {
+            return Err(CodegenError::DuplicatePackage {
+                package: pkg.name.clone(),
+            });
+        }
+    }
 
     for import in imports {
         let Some(pkg) = by_name.get(import.name.as_str()) else {
@@ -431,15 +560,116 @@ fn generate_impl(
 
     check_symbol_collisions(&ordered)?;
 
-    // Rewrite each package's own source: first its `dep::func(` call sites
-    // (validated against *its* declared imports -- imports are private),
-    // then its own exported names into `pkg__name`.
-    let mut rewritten: BTreeMap<&str, String> = BTreeMap::new();
-    for pkg in &ordered {
-        let mut text = pkg.source.clone();
+    // Expand templates first: a `@use` contributes declarations that
+    // everything after it has to see, and its pieces are generated from
+    // the defining package's scope. Expressed as edits on the original
+    // source, so every later pass still works in the user's own
+    // coordinates and an error still points at the line they wrote.
+    let use_statements = crate::parser::template::find_use_statements(source)?;
+    let templates: Vec<TemplateSource> = ordered
+        .iter()
+        .flat_map(|pkg| {
+            pkg.templates.iter().map(move |located| TemplateSource {
+                package: pkg.name.clone(),
+                version: pkg.version.clone(),
+                def: located.def.clone(),
+                functions: pkg
+                    .signatures
+                    .iter()
+                    .map(|sig| sig.name.clone())
+                    .collect(),
+                origin: format!(
+                    "{} v{} ({}/{}:{})",
+                    pkg.name, pkg.version, pkg.name, located.file, located.line
+                ),
+            })
+        })
+        .collect();
+    let imported: Vec<String> = direct.iter().map(|name| name.to_string()).collect();
+    let expansion = expand_blocks::expand(
+        options.display_name(),
+        source,
+        &use_statements,
+        &imported,
+        &templates,
+    )?;
 
-        let mut call_edits: Vec<Edit> = Vec::new();
-        for call in find_qualified_calls(&text) {
+    // Then statement macros, which expand in place. After templates,
+    // because a template may declare the variable a macro then uses,
+    // and so that a macro cannot quietly collide with one.
+    let expand_statements = crate::parser::macros::find_expand_statements(source)?;
+    let macros: Vec<MacroSource> = ordered
+        .iter()
+        .flat_map(|pkg| {
+            pkg.macros.iter().map(move |located| MacroSource {
+                package: pkg.name.clone(),
+                version: pkg.version.clone(),
+                def: located.def.clone(),
+                functions: pkg
+                    .signatures
+                    .iter()
+                    .map(|sig| sig.name.clone())
+                    .collect(),
+                origin: format!(
+                    "{} v{} ({}/{}:{})",
+                    pkg.name, pkg.version, pkg.name, located.file, located.line
+                ),
+            })
+        })
+        .collect();
+    let macro_expansion = expand_macros::expand(
+        options.display_name(),
+        source,
+        &expand_statements,
+        &imported,
+        &macros,
+        &expansion.declared,
+    )?;
+
+    // Monomorphize higher-order functions. This runs on source-name
+    // text, before mangling, because that is the text whose line
+    // numbers the origin maps can explain -- see `monomorphize`. The
+    // copies it produces are already in output-name space and are
+    // emitted outside any package's text, so nothing mangles them
+    // again.
+    let mut units: Vec<Unit> = ordered
+        .iter()
+        .map(|pkg| {
+            Unit::package(
+                &pkg.name,
+                &pkg.version,
+                &pkg.source,
+                pkg.origin.clone(),
+                pkg.exported.clone(),
+                pkg.dependencies.clone(),
+            )
+        })
+        .collect();
+    let project_unit = units.len();
+    let mut project = Unit::project(options.display_name(), source, imported.clone());
+    project.reserved = expansion
+        .use_ranges
+        .iter()
+        .chain(&macro_expansion.statement_ranges)
+        .cloned()
+        .collect();
+    units.push(project);
+    let plan = monomorphize::run(&units)?;
+
+    // Rewrite each package's own source: its `dep::func(` call sites
+    // (validated against *its* declared imports -- imports are private),
+    // a provenance comment above every item, and then every name it
+    // defines into `pkg__name`.
+    let mut rewritten: BTreeMap<&str, String> = BTreeMap::new();
+    for (unit_index, pkg) in ordered.iter().enumerate() {
+        let mut edits: Vec<Edit> = Vec::new();
+
+        for call in find_qualified_calls(&pkg.source) {
+            // A call the monomorphizer is replacing wholesale: it emits
+            // the mangled name itself, so renaming here would conflict.
+            if plan.covers(unit_index, &call.range) {
+                continue;
+            }
             if !pkg.dependencies.iter().any(|d| d == &call.package) {
                 return Err(CodegenError::UndeclaredPackageReference {
                     in_package: pkg.name.clone(),
@@ -450,19 +680,48 @@ fn generate_impl(
             let target = by_name
                 .get(call.package.as_str())
                 .expect("dependency presence was checked above");
-            check_exported(target, &call)?;
-            call_edits.push(Edit {
+            check_exported(target, &call, || {
+                package_location(pkg, call.range.start)
+            })?;
+            edits.push(Edit {
                 range: call.range.clone(),
                 replacement: mangle(&call.package, &call.func),
                 splice_offset: None,
             });
         }
-        text = apply_edits(&text, call_edits).0;
 
-        let mut exported_sorted = pkg.exported.clone();
-        exported_sorted.sort();
-        for export in &exported_sorted {
-            text = rename_identifier_calls(&text, export, &mangle(&pkg.name, export));
+        // Provenance: one line per item saying which package, version,
+        // visibility and source line it came from, so a reader of the
+        // compiled `.stan` can trace every function back without
+        // guessing. Inserted in the package's own coordinates, before any
+        // renaming, so the recorded line numbers are the ones a reader
+        // would find in the library's source.
+        for sig in &pkg.signatures {
+            // A higher-order function's definition is about to be
+            // deleted; its specialized copies carry their own
+            // provenance.
+            if sig.is_higher_order() {
+                continue;
+            }
+            edits.push(Edit {
+                range: sig.item_offset..sig.item_offset,
+                replacement: provenance_comment(pkg, sig),
+                splice_offset: None,
+            });
+        }
+
+        for edit in plan.edits_for(unit_index) {
+            edits.push(Edit {
+                range: edit.range.clone(),
+                replacement: edit.replacement.clone(),
+                splice_offset: None,
+            });
+        }
+
+        let mut text = apply_edits(&pkg.source, edits).0;
+
+        for name in pkg.defined_names() {
+            text = rename_identifier_calls(&text, name, &mangle(&pkg.name, name));
         }
 
         rewritten.insert(pkg.name.as_str(), text);
@@ -498,6 +757,13 @@ fn generate_impl(
             }
         }
 
+        if plan.covers(project_unit, &call.range)
+            || expansion.covers(&call.range)
+            || macro_expansion.covers(&call.range)
+        {
+            continue;
+        }
+
         if !direct.contains(call.package.as_str()) {
             return Err(CodegenError::UnknownPackageReference {
                 package: call.package,
@@ -507,11 +773,33 @@ fn generate_impl(
         let target = by_name
             .get(call.package.as_str())
             .expect("direct imports were checked above");
-        check_exported(target, &call)?;
+        check_exported(target, &call, || {
+            let (line, column) = line_col(source, call.range.start);
+            format!("{}:{line}:{column}", options.display_name())
+        })?;
 
         edits.push(Edit {
             range: call.range.clone(),
             replacement: mangle(&call.package, &call.func),
+            splice_offset: None,
+        });
+    }
+
+    // The project's own higher-order call sites, and any size
+    // annotation stripped off a function it declares itself.
+    for edit in plan.edits_for(project_unit) {
+        edits.push(Edit {
+            range: edit.range.clone(),
+            replacement: edit.replacement.clone(),
+            splice_offset: None,
+        });
+    }
+
+    // Template expansions, and the `@use` lines they replace.
+    for edit in expansion.edits.iter().chain(&macro_expansion.edits) {
+        edits.push(Edit {
+            range: edit.range.clone(),
+            replacement: edit.replacement.clone(),
             splice_offset: None,
         });
     }
@@ -528,22 +816,43 @@ fn generate_impl(
         (text, ranges, Vec::new())
     };
 
-    if !ordered.is_empty() {
+    // What goes at the top of the `functions { }` block: the forward
+    // declarations for specialized functions, then the imported
+    // packages' code. And at the bottom: the specialized functions
+    // themselves, after everything they might call.
+    let declarations = plan.declaration_block();
+    let definitions = plan.definition_block();
+    let top = join_blocks(&declarations, &assembled);
+    // Where the package text starts within `top`, so the package line
+    // map still points at the right lines.
+    let package_offset_in_top = top.len() - assembled.len();
+
+    if !ordered.is_empty() || plan.emits_anything() {
         match find_functions_block(source) {
             Some(fb) => {
-                let prefix = "\n";
-                edits.push(Edit {
-                    range: fb.open_brace + 1..fb.open_brace + 1,
-                    replacement: format!("{prefix}{assembled}\n"),
-                    splice_offset: Some(prefix.len()),
-                });
+                if !top.is_empty() {
+                    let prefix = "\n";
+                    edits.push(Edit {
+                        range: fb.open_brace + 1..fb.open_brace + 1,
+                        replacement: format!("{prefix}{top}\n"),
+                        splice_offset: Some(prefix.len() + package_offset_in_top),
+                    });
+                }
+                if !definitions.is_empty() {
+                    edits.push(Edit {
+                        range: fb.close_brace..fb.close_brace,
+                        replacement: format!("\n{definitions}"),
+                        splice_offset: None,
+                    });
+                }
             }
             None => {
                 let prefix = "functions {\n";
+                let body = join_blocks(&top, &definitions);
                 edits.push(Edit {
                     range: 0..0,
-                    replacement: format!("{prefix}{assembled}\n}}\n"),
-                    splice_offset: Some(prefix.len()),
+                    replacement: format!("{prefix}{body}\n}}\n"),
+                    splice_offset: Some(prefix.len() + package_offset_in_top),
                 });
             }
         }
@@ -572,6 +881,11 @@ fn generate_impl(
             source: text,
             package_line_ranges,
             function_files,
+            warnings: expansion
+                .warnings
+                .into_iter()
+                .chain(macro_expansion.warnings)
+                .collect(),
         },
         source_map,
     ))
@@ -581,9 +895,19 @@ fn generate_impl(
 /// keeps the base name (`pkg__dist`), so Stan finds `pkg__dist_lpdf` itself.
 const DENSITY_SUFFIXES: [&str; 2] = ["_lpdf", "_lpmf"];
 
-/// A `pkg::func(` call site is valid if `func` is exported -- or, on the
+/// A `pkg::func(` call site is valid if `func` is public -- or, on the
 /// right of a `~`, if `func_lpdf`/`func_lpmf` is.
-fn check_exported(target: &InstalledPackage, call: &QualifiedCall) -> Result<(), CodegenError> {
+///
+/// `location` renders the call site's `file:line:column`, lazily, so the
+/// common case (a valid call) costs nothing. A name the package defines
+/// but does not export is reported as *private* rather than as missing:
+/// the two have different fixes, and only the author of the library can
+/// apply the first one.
+fn check_exported(
+    target: &InstalledPackage,
+    call: &QualifiedCall,
+    location: impl FnOnce() -> String,
+) -> Result<(), CodegenError> {
     let exports = |name: &str| target.exported.iter().any(|e| e == name);
     if exports(&call.func) {
         return Ok(());
@@ -593,16 +917,72 @@ fn check_exported(target: &InstalledPackage, call: &QualifiedCall) -> Result<(),
         .map(|suffix| format!("{}{suffix}", call.func))
         .find(|name| exports(name));
     match density {
-        Some(_) if call.after_tilde => Ok(()),
-        Some(density) => Err(CodegenError::DensityCalledWithoutTilde {
+        Some(_) if call.after_tilde => return Ok(()),
+        Some(density) => {
+            return Err(CodegenError::DensityCalledWithoutTilde {
+                package: call.package.clone(),
+                func: call.func.clone(),
+                density,
+            })
+        }
+        None => {}
+    }
+
+    let defines = |name: &str| target.signatures.iter().any(|s| s.name == name);
+    let private = defines(&call.func)
+        || (call.after_tilde
+            && DENSITY_SUFFIXES
+                .iter()
+                .any(|suffix| defines(&format!("{}{suffix}", call.func))));
+    if private {
+        return Err(CodegenError::ItemIsPrivate {
             package: call.package.clone(),
             func: call.func.clone(),
-            density,
-        }),
-        None => Err(CodegenError::FunctionNotExported {
-            package: call.package.clone(),
-            func: call.func.clone(),
-        }),
+            location: location(),
+        });
+    }
+    Err(CodegenError::FunctionNotExported {
+        package: call.package.clone(),
+        func: call.func.clone(),
+    })
+}
+
+/// `pkg/file:line:column` for a byte offset in a package's own source.
+fn package_location(pkg: &InstalledPackage, offset: usize) -> String {
+    match pkg.origin.locate(&pkg.source, offset) {
+        Some(at) => {
+            let line_start = pkg.source[..offset].rfind('\n').map_or(0, |i| i + 1);
+            let column = pkg.source[line_start..offset].chars().count() + 1;
+            format!("{}/{}:{}:{}", pkg.name, at.file, at.line, column)
+        }
+        None => format!("{} {}", pkg.name, pkg.version),
+    }
+}
+
+/// The one-line provenance comment that precedes an emitted item.
+///
+/// Deterministic by construction: package name, version, visibility, and
+/// a package-relative file and line. No absolute path and no timestamp,
+/// so the same input and lockfile still produce byte-identical output on
+/// another machine.
+fn provenance_comment(pkg: &InstalledPackage, sig: &FunctionSig) -> String {
+    let indent: String = pkg.source[sig.item_offset..]
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect();
+    let visibility = pkg.visibility_of(&sig.name).label();
+    match pkg.origin.locate(&pkg.source, sig.header_offset) {
+        Some(at) => format!(
+            "{indent}// {} v{} ({visibility}) -- {}/{}:{}\n",
+            pkg.name, pkg.version, pkg.name, at.file, at.line
+        ),
+        // No mapping back to a file: still say where the item came from,
+        // rather than dropping the provenance line and leaving a reader
+        // with nothing.
+        None => format!(
+            "{indent}// {} v{} ({visibility})\n",
+            pkg.name, pkg.version
+        ),
     }
 }
 
@@ -678,10 +1058,11 @@ fn topological_order<'a>(
 }
 
 /// Every top-level function of every package ends up in one flat Stan
-/// namespace. Exported functions are prefixed with their package name and
-/// so can only collide pathologically; non-exported ones keep their source
-/// names and collide easily. Either way, catch it here rather than emitting
-/// a `.stan` file with two definitions of the same function.
+/// namespace. Every one is prefixed with its package name, and resolution
+/// guarantees one version per package name per build, so a collision
+/// needs two packages whose names mangle together pathologically. Catch
+/// it here anyway rather than emitting a `.stan` file with two
+/// definitions of the same function.
 fn check_symbol_collisions(ordered: &[&InstalledPackage]) -> Result<(), CodegenError> {
     let mut owner: BTreeMap<String, &str> = BTreeMap::new();
 
@@ -694,21 +1075,12 @@ fn check_symbol_collisions(ordered: &[&InstalledPackage]) -> Result<(), CodegenE
 
         for name in names {
             let symbol = pkg.output_symbol(name);
-            let exported = symbol != name;
             match owner.get(&symbol) {
                 Some(first) if *first != pkg.name.as_str() => {
-                    return Err(if exported {
-                        CodegenError::DuplicateMangledName {
-                            mangled: symbol,
-                            first_package: first.to_string(),
-                            second_package: pkg.name.clone(),
-                        }
-                    } else {
-                        CodegenError::PrivateFunctionCollision {
-                            func: symbol,
-                            first_package: first.to_string(),
-                            second_package: pkg.name.clone(),
-                        }
+                    return Err(CodegenError::DuplicateMangledName {
+                        mangled: symbol,
+                        first_package: first.to_string(),
+                        second_package: pkg.name.clone(),
                     });
                 }
                 _ => {
@@ -814,6 +1186,20 @@ fn build_function_files(
     }
 
     Ok(files)
+}
+
+/// Concatenate two blocks of generated code, separated by one blank
+/// line, skipping either if it is empty.
+///
+/// A project that uses none of the features that produce these blocks
+/// gets exactly the text it always got, which is what keeps its
+/// compiled `.stan` byte-identical.
+fn join_blocks(first: &str, second: &str) -> String {
+    match (first.is_empty(), second.is_empty()) {
+        (true, _) => second.to_string(),
+        (_, true) => first.to_string(),
+        _ => format!("{first}\n{second}"),
+    }
 }
 
 /// A short, deterministic (no timestamps) provenance header for a generated
@@ -959,6 +1345,9 @@ fn apply_edits(source: &str, mut edits: Vec<Edit>) -> (String, Option<usize>, So
 
 struct FunctionsBlock {
     open_brace: usize,
+    /// Offset of the matching `}`, where specialized functions are
+    /// spliced in -- after everything they might call.
+    close_brace: usize,
 }
 
 /// Find the user's own `functions { }` block, if present, using the same
@@ -980,9 +1369,13 @@ fn find_functions_block(source: &str) -> Option<FunctionsBlock> {
             let trimmed = after.trim_start();
             if trimmed.starts_with('{') {
                 let open_brace = end + (after.len() - trimmed.len());
-                if mask.is_real(open_brace) && mask.match_closing_brace(source, open_brace).is_some()
-                {
-                    return Some(FunctionsBlock { open_brace });
+                if mask.is_real(open_brace) {
+                    if let Some(close_brace) = mask.match_closing_brace(source, open_brace) {
+                        return Some(FunctionsBlock {
+                            open_brace,
+                            close_brace,
+                        });
+                    }
                 }
             }
         }
@@ -1029,6 +1422,12 @@ matrix rbf_cov(vector x, real alpha, real rho) {
             signatures: extract_signatures(source),
             exported: exported.iter().map(|s| s.to_string()).collect(),
             dependencies: dependencies.iter().map(|s| s.to_string()).collect(),
+            origin: crate::parser::origin::PackageOrigin::single_file(
+                format!("{name}.laplacelib"),
+                source.len(),
+            ),
+            templates: Vec::new(),
+            macros: Vec::new(),
         }
     }
 
@@ -1069,7 +1468,7 @@ model {
 
         let byte_range = block.unwrap().byte_range;
         let expected_functions_block = format!(
-            "functions {{\n{}\n}}\n",
+            "functions {{\n// gps v1.0.0 (pub) -- gps/gps.stan:7\n{}\n}}\n",
             GPS_SOURCE.replace("rbf_cov", "gps__rbf_cov")
         );
         // The block's own line goes with it; the blank line after it stays
@@ -1181,8 +1580,22 @@ model {
             let line = lines[line_no - 1];
             assert!(!line.contains("alpha__") && !line.contains("user_fn"), "{line}");
         }
-        assert!(lines[*alpha_range.lines.start() - 1].contains("alpha__a_fn"));
-        assert!(lines[*beta_range.lines.start() - 1].contains("beta__b_fn"));
+        // The first line of a package's range is its provenance comment;
+        // its definition follows.
+        assert!(lines[*alpha_range.lines.start() - 1].starts_with("// alpha v"));
+        assert!(
+            alpha_range
+                .lines
+                .clone()
+                .any(|n| lines[n - 1].contains("alpha__a_fn"))
+        );
+        assert!(lines[*beta_range.lines.start() - 1].starts_with("// beta v"));
+        assert!(
+            beta_range
+                .lines
+                .clone()
+                .any(|n| lines[n - 1].contains("beta__b_fn"))
+        );
     }
 
     #[test]
@@ -1262,6 +1675,205 @@ model {
                 func: "marginal_normal".to_string(),
                 density: "marginal_normal_lpdf".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn a_private_density_in_a_distribution_statement_is_reported_as_private() {
+        // `marginal_normal_lpdf` exists but is not public, so `y ~ ...` is
+        // a visibility problem, not a missing-function one.
+        let gp = InstalledPackage::leaf(
+            "gp",
+            "1.0.0",
+            "real marginal_normal_lpdf(vector y, real sigma) {\n  return 0;\n}\n",
+            vec![],
+        );
+        let source = "library {\n  import gp\n}\nmodel {\n  y ~ gp::marginal_normal(sigma);\n}\n";
+        let block = parse_library_block(source).unwrap();
+        let err = generate(source, block.as_ref(), &[gp]).unwrap_err();
+        assert!(matches!(err, CodegenError::ItemIsPrivate { .. }), "{err:?}");
+        assert!(err.to_string().contains("`gp::marginal_normal` is private"), "{err}");
+    }
+
+    #[test]
+    fn calling_a_name_the_package_does_not_define_is_not_a_visibility_error() {
+        let source = "library {\n  import gps\n}\nmodel {\n  real k = gps::nope(x);\n}\n";
+        let block = parse_library_block(source).unwrap();
+        let err = generate(source, block.as_ref(), &[gps_package()]).unwrap_err();
+        assert_eq!(
+            err,
+            CodegenError::FunctionNotExported {
+                package: "gps".to_string(),
+                func: "nope".to_string(),
+            }
+        );
+    }
+
+    // ---- higher-order functions ---------------------------------------
+
+    #[test]
+    fn a_user_higher_order_function_is_specialized_with_no_imports_at_all() {
+        let source = concat!(
+            "functions {\n",
+            "  real add_one(real x) {\n    return x + 1;\n  }\n",
+            "  real apply_twice(real x, func(real) -> real f) {\n",
+            "    real a = f(x);\n",
+            "    return f(a);\n",
+            "  }\n",
+            "}\n",
+            "model {\n",
+            "  real r = apply_twice(5, add_one);\n",
+            "}\n",
+        );
+        let output = generate(source, None, &[]).unwrap();
+
+        assert!(output.contains("real apply_twice__add_one(real x) {"), "{output}");
+        assert!(output.contains("\nreal apply_twice__add_one(real x) {\n  real a = add_one(x);\n  return add_one(a);\n}\n"), "{output}");
+        assert!(output.contains("  real r = apply_twice__add_one(5);"), "{output}");
+        assert!(!output.contains("func("), "{output}");
+        // Specialized copies go at the end of the functions block, after
+        // everything they might call.
+        let specialized = output.find("apply_twice__add_one(real x)").unwrap();
+        let add_one = output.find("real add_one(real x)").unwrap();
+        let model = output.find("model {").unwrap();
+        assert!(add_one < specialized && specialized < model, "{output}");
+    }
+
+    #[test]
+    fn a_library_higher_order_function_specializes_into_the_models_functions_block() {
+        let transforms = InstalledPackage::leaf(
+            "transforms",
+            "1.0.0",
+            "vector map_each(vector x, func(real) -> real f) {\n  return f(x[1]) * x;\n}\n",
+            vec!["map_each".to_string()],
+        );
+        let source = concat!(
+            "library {\n  import transforms\n}\n",
+            "functions {\n",
+            "  real softplus(real x) {\n    return log1p_exp(x);\n  }\n",
+            "}\n",
+            "model {\n",
+            "  vector[3] s = transforms::map_each(y, softplus);\n",
+            "}\n",
+        );
+        let block = parse_library_block(source).unwrap();
+        let output = generate(source, block.as_ref(), &[transforms]).unwrap();
+
+        assert!(
+            output.contains("vector transforms__map_each__softplus(vector x)"),
+            "{output}"
+        );
+        assert!(output.contains("return softplus(x[1]) * x;"), "{output}");
+        assert!(output.contains("transforms__map_each__softplus(y)"), "{output}");
+        // The copy follows the user function it calls.
+        let softplus = output.find("real softplus(real x)").unwrap();
+        let copy = output.find("vector transforms__map_each__softplus").unwrap();
+        assert!(softplus < copy, "the copy must come after what it calls:\n{output}");
+    }
+
+    #[test]
+    fn a_copy_called_from_a_function_body_is_forward_declared_at_the_top() {
+        let source = concat!(
+            "functions {\n",
+            "  real add_one(real x) {\n    return x + 1;\n  }\n",
+            "  real twice(real x, func(real) -> real f) {\n    return f(f(x));\n  }\n",
+            "  real driver(real x) {\n    return twice(x, add_one);\n  }\n",
+            "}\n",
+            "model {\n}\n",
+        );
+        let output = generate(source, None, &[]).unwrap();
+
+        let declaration = output
+            .find("real twice__add_one(real x);")
+            .expect("forward declaration");
+        let definition = output
+            .find("real twice__add_one(real x) {")
+            .expect("definition");
+        let caller = output.find("real driver(real x)").unwrap();
+        assert!(declaration < caller, "{output}");
+        assert!(caller < definition, "{output}");
+    }
+
+    #[test]
+    fn specialized_copies_land_in_the_stan_file_even_in_split_mode() {
+        // A copy that binds a user function cannot live in a
+        // `.stanfunctions` file: the function it calls is in the model.
+        let transforms = InstalledPackage::leaf(
+            "transforms",
+            "1.0.0",
+            "real apply(real x, func(real) -> real f) {\n  return f(x);\n}\n",
+            vec!["apply".to_string()],
+        );
+        let source = concat!(
+            "library {\n  import transforms\n}\n",
+            "functions {\n  real add_one(real x) {\n    return x + 1;\n  }\n}\n",
+            "model {\n  real r = transforms::apply(1, add_one);\n}\n",
+        );
+        let block = parse_library_block(source).unwrap();
+        let generated =
+            generate_with_options(source, block.as_ref(), &[transforms], &CodegenOptions::split())
+                .unwrap();
+
+        assert!(
+            generated.source.contains("real transforms__apply__add_one(real x)"),
+            "{}",
+            generated.source
+        );
+        let file = &generated.function_files[0];
+        assert!(!file.contents.contains("apply__add_one"), "{}", file.contents);
+        // The generic original is not in the .stanfunctions file either.
+        assert!(!file.contents.contains("func("), "{}", file.contents);
+    }
+
+    #[test]
+    fn a_sized_return_type_is_stripped_from_the_output() {
+        let source = concat!(
+            "functions {\n",
+            "  vector[2] to_pair(real x) {\n    return [x, x * 2]';\n  }\n",
+            "}\n",
+            "model {\n}\n",
+        );
+        let output = generate(source, None, &[]).unwrap();
+        assert!(output.contains("vector to_pair(real x)"), "{output}");
+        assert!(!output.contains("vector[2] to_pair"), "{output}");
+    }
+
+    #[test]
+    fn a_project_with_no_functional_parameters_is_byte_identical_to_before() {
+        // The regression guard for this session: every construct the
+        // compiler already handled, compiled with the monomorphization
+        // pass in the pipeline, must come out exactly as it did.
+        let source = r#"library {
+  import gps
+}
+
+functions {
+  real user_fn(real x) {
+    return x;
+  }
+}
+
+data {
+  int<lower=1> N;
+  vector[N] x;
+}
+
+model {
+  matrix[N, N] K = gps::rbf_cov(x, 1.0, 1.0);
+  x ~ multi_normal(rep_vector(0, N), K);
+}
+"#;
+        let block = parse_library_block(source).unwrap();
+        let installed = vec![gps_package()];
+        let output = generate(source, block.as_ref(), &installed).unwrap();
+
+        // Nothing this session adds appears anywhere.
+        assert!(!output.contains("monomorphized"), "{output}");
+        assert!(!output.contains("laplace: specialized"), "{output}");
+        assert_eq!(
+            output,
+            generate(source, block.as_ref(), &installed).unwrap(),
+            "and it is still deterministic"
         );
     }
 
@@ -1353,8 +1965,11 @@ model {
     #[test]
     fn duplicate_mangled_name_across_packages_is_an_error() {
         // "a" exporting "b__c" and "a__b" exporting "c" both mangle to
-        // "a__b__c" -- a contrived but real collision the sanity check must
-        // catch.
+        // "a__b__c". Nothing can reach this through a source file any
+        // more: `__` is reserved, so neither the package name `a__b` nor
+        // the item name `b__c` would get past the parser. Codegen is a
+        // public entry point, though, so the sanity check stays and is
+        // tested by handing it a library block built by hand.
         let pkg_a = InstalledPackage::leaf(
             "a",
             "1.0.0",
@@ -1369,15 +1984,47 @@ model {
         );
 
         let source = "library {\n  import a\n  import a__b\n}\nmodel {\n}\n";
-        let block = parse_library_block(source).unwrap();
-        let err = generate(source, block.as_ref(), &[pkg_a, pkg_a_b]).unwrap_err();
-        assert!(matches!(err, CodegenError::DuplicateMangledName { .. }));
+        assert!(
+            parse_library_block(source).is_err(),
+            "`import a__b` must not get past the parser"
+        );
+        let block = LibraryBlock {
+            imports: vec![
+                ImportStatement { name: "a".to_string(), version: None },
+                ImportStatement { name: "a__b".to_string(), version: None },
+            ],
+            byte_range: 0..source.find("model").unwrap() - 1,
+        };
+        let err = generate(source, Some(&block), &[pkg_a, pkg_a_b]).unwrap_err();
+        assert!(matches!(err, CodegenError::DuplicateMangledName { .. }), "{err:?}");
     }
 
     #[test]
-    fn two_packages_with_the_same_private_helper_are_a_loud_error() {
-        // Neither `_scale` is exported, so neither gets a `pkg__` prefix and
-        // both would be defined in the one flat Stan namespace.
+    fn two_packages_with_the_same_name_are_rejected() {
+        let first = InstalledPackage::leaf("dup", "1.0.0", "real f() {\n  return 1;\n}\n", vec![]);
+        let second = InstalledPackage::leaf("dup", "2.0.0", "real g() {\n  return 2;\n}\n", vec![]);
+        let source = "library {\n  import dup\n}\nmodel {\n}\n";
+        let block = parse_library_block(source).unwrap();
+        let err = generate(source, block.as_ref(), &[first, second]).unwrap_err();
+        assert_eq!(
+            err,
+            CodegenError::DuplicatePackage {
+                package: "dup".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_package_name_may_not_contain_a_double_underscore() {
+        assert!(!crate::manifest::is_valid_package_name("my__pkg"));
+        assert!(crate::manifest::is_valid_package_name("my_pkg"));
+    }
+
+    #[test]
+    fn two_packages_with_the_same_private_helper_do_not_collide() {
+        // Private items are mangled like public ones, so each package's
+        // `scale_` becomes its own symbol and each package's call to it
+        // resolves to its own.
         let left = InstalledPackage::leaf(
             "left",
             "1.0.0",
@@ -1393,15 +2040,45 @@ model {
 
         let source = "library {\n  import left\n  import right\n}\nmodel {\n}\n";
         let block = parse_library_block(source).unwrap();
-        let err = generate(source, block.as_ref(), &[left, right]).unwrap_err();
-        assert_eq!(
-            err,
-            CodegenError::PrivateFunctionCollision {
-                func: "scale_".to_string(),
-                first_package: "left".to_string(),
-                second_package: "right".to_string(),
-            }
+        let output = generate(source, block.as_ref(), &[left, right]).unwrap();
+
+        assert!(output.contains("real left__scale_(real x)"), "{output}");
+        assert!(output.contains("real right__scale_(real x)"), "{output}");
+        assert!(output.contains("return left__scale_(x);"), "{output}");
+        assert!(output.contains("return right__scale_(x);"), "{output}");
+        // No unprefixed definition survives to collide.
+        assert!(!output.contains("real scale_("), "{output}");
+    }
+
+    #[test]
+    fn an_unqualified_internal_call_resolves_in_its_own_package_down_a_two_level_chain() {
+        // project -> regression -> stats, where both packages define a
+        // private `helper` with an identical signature. Each package's own
+        // unqualified `helper(...)` must resolve to *its* helper.
+        let stats = lib_package(
+            "stats",
+            "real helper(real x) {\n  return x + 1;\n}\nreal mean_(real x) {\n  return helper(x);\n}\n",
+            &["mean_"],
+            &[],
         );
+        let regression = lib_package(
+            "regression",
+            "real helper(real x) {\n  return x * 2;\n}\nreal fit(real x) {\n  return helper(stats::mean_(x));\n}\n",
+            &["fit"],
+            &["stats"],
+        );
+
+        let source = "library {\n  import regression\n}\n\nmodel {\n  real f = regression::fit(1);\n}\n";
+        let block = parse_library_block(source).unwrap();
+        let output = generate(source, block.as_ref(), &[stats, regression]).unwrap();
+
+        assert!(output.contains("return stats__helper(x);"), "{output}");
+        assert!(
+            output.contains("return regression__helper(stats__mean_(x));"),
+            "{output}"
+        );
+        assert!(output.contains("real stats__helper(real x)"), "{output}");
+        assert!(output.contains("real regression__helper(real x)"), "{output}");
     }
 
     #[test]

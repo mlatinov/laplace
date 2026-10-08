@@ -16,7 +16,11 @@ use thiserror::Error;
 use crate::codegen::InstalledPackage;
 use crate::manifest::{self, ManifestError, PackageManifest};
 use crate::parser::laplacelib::{self, LaplaceLibError, LAPLACELIB_EXTENSION};
+use crate::parser::origin::{FileOrigin, LineSegment, PackageOrigin};
 use crate::parser::signatures::extract_signatures;
+use crate::parser::macros::LocatedMacro;
+use crate::parser::template::LocatedTemplate;
+use crate::parser::visibility::{ItemKind, Visibility};
 
 #[derive(Debug, Error)]
 pub enum PackageError {
@@ -42,20 +46,57 @@ pub enum PackageError {
         package: String,
         import: String,
     },
+
+    #[error(
+        "`{package}`'s laplace.toml lists `{item}` under `exports`, but `{item}` is defined in a \
+         `.laplacelib` file, where visibility comes from the `pub` keyword and `exports` is \
+         ignored\n  help: write `pub` in front of `{item}`'s definition and drop it from \
+         `exports` (`exports` still applies to a package's plain `.stan` files)"
+    )]
+    ExportsListsLaplacelibItem { package: String, item: String },
+
+    #[error(
+        "`{package}` marks some definitions of the {kind} `{item}` `pub` and others not -- \
+         visibility applies to the name, because Stan has one flat function namespace\n  help: \
+         mark every definition of `{item}` `pub`, or none of them"
+    )]
+    InconsistentVisibility {
+        package: String,
+        item: String,
+        kind: &'static str,
+    },
 }
 
 /// A package's concatenated source body plus everything it imports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageSources {
     /// Every `.stan` file verbatim and every `.laplacelib` file's body
-    /// (`library { }` stripped, `functions { }` unwrapped), concatenated in
-    /// filename order.
+    /// (`library { }` stripped, `functions { }` unwrapped, `pub` markers
+    /// removed), concatenated in filename order.
     pub body: String,
     /// Package names imported by this package's `.laplacelib` files,
     /// sorted and deduplicated.
     pub imports: Vec<String>,
     /// How many source files went into `body`.
     pub files: usize,
+    /// Which file and line each byte of `body` was written on.
+    pub origin: PackageOrigin,
+    /// Every item name defined in a `.laplacelib` file, sorted and
+    /// deduplicated. These take their visibility from `pub`, never from
+    /// the manifest's `exports`.
+    pub laplacelib_items: Vec<String>,
+    /// The `.laplacelib` item names marked `pub`, sorted and deduplicated.
+    pub public_items: Vec<String>,
+    /// Every `@template` the package defines, with where it was
+    /// written. Kept apart from `public_items`, which is the function
+    /// API: nothing calls a template, a `@use` expands it.
+    pub templates: Vec<LocatedTemplate>,
+    /// Every `@macro` the package defines, with where it was written.
+    pub macros: Vec<LocatedMacro>,
+    /// A `.laplacelib` name with both a `pub` and a non-`pub` definition,
+    /// as `(name, item kind)`. Reported as an error by
+    /// [`load_with_manifest`], which knows the package's name.
+    pub inconsistent: Option<(String, &'static str)>,
 }
 
 /// Read and combine every source file in `package_dir`.
@@ -79,30 +120,107 @@ pub fn read_package_sources(package_dir: &Path) -> Result<PackageSources, Packag
 
     let mut body = String::new();
     let mut imports: Vec<String> = Vec::new();
+    let mut origin = PackageOrigin::default();
+    let mut laplacelib_items: Vec<String> = Vec::new();
+    let mut public_items: Vec<String> = Vec::new();
+    // Every `.laplacelib` item's visibility, to catch a name that is
+    // `pub` in one definition and not in another.
+    let mut seen: Vec<(String, ItemKind, Visibility)> = Vec::new();
+    let mut templates: Vec<LocatedTemplate> = Vec::new();
+    let mut macros: Vec<LocatedMacro> = Vec::new();
 
     for path in &paths {
         let text = fs::read_to_string(path).map_err(|source| PackageError::Io {
             path: path.clone(),
             source,
         })?;
+        // The file name alone: provenance comments and error messages must
+        // not leak the machine-specific cache path, or build output would
+        // stop being reproducible across machines.
+        let file = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let base = body.len();
 
         if path.extension().and_then(|ext| ext.to_str()) == Some(LAPLACELIB_EXTENSION) {
             let parsed = laplacelib::parse(path, &text)?;
-            imports.extend(parsed.imports.into_iter().map(|i| i.name));
+            imports.extend(parsed.imports.iter().map(|i| i.name.clone()));
+            for item in &parsed.items {
+                laplacelib_items.push(item.name.clone());
+                if item.visibility.is_public() {
+                    public_items.push(item.name.clone());
+                }
+                seen.push((item.name.clone(), item.kind, item.visibility));
+            }
+            templates.extend(parsed.located_templates(&file));
+            macros.extend(parsed.located_macros(&file));
+            for template in &parsed.templates {
+                seen.push((
+                    template.name.clone(),
+                    ItemKind::Template,
+                    template.visibility,
+                ));
+            }
+            for definition in &parsed.macros {
+                seen.push((
+                    definition.name.clone(),
+                    ItemKind::Macro,
+                    definition.visibility,
+                ));
+            }
             body.push_str(&parsed.body);
+            origin.files.push(FileOrigin {
+                file,
+                body_range: base..body.len(),
+                segments: parsed.segments,
+            });
         } else {
             body.push_str(&text);
+            origin.files.push(FileOrigin {
+                file,
+                body_range: base..body.len(),
+                segments: vec![LineSegment {
+                    range: 0..text.len(),
+                    original_line: 1,
+                    original_offset: 0,
+                }],
+            });
         }
         body.push('\n');
     }
 
     imports.sort();
     imports.dedup();
+    laplacelib_items.sort();
+    laplacelib_items.dedup();
+    public_items.sort();
+    public_items.dedup();
+
     Ok(PackageSources {
         body,
         imports,
         files: paths.len(),
+        origin,
+        laplacelib_items,
+        public_items,
+        templates,
+        macros,
+        inconsistent: first_inconsistent_visibility(&seen),
     })
+}
+
+/// A name with both a `pub` and a non-`pub` definition, if there is one.
+/// Reported from [`load_with_manifest`], which knows the package name.
+fn first_inconsistent_visibility(
+    seen: &[(String, ItemKind, Visibility)],
+) -> Option<(String, &'static str)> {
+    let mut sorted: Vec<&(String, ItemKind, Visibility)> = seen.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    sorted
+        .windows(2)
+        .find(|pair| pair[0].0 == pair[1].0 && pair[0].2 != pair[1].2)
+        .map(|pair| (pair[0].0.clone(), pair[0].1.describe()))
 }
 
 /// Load `package_dir` into an [`InstalledPackage`] ready for codegen.
@@ -133,15 +251,61 @@ pub fn load_with_manifest(
         }
     }
 
+    let exported = public_names(name, &sources, pkg_manifest)?;
     let signatures = extract_signatures(&sources.body);
     Ok(InstalledPackage {
         name: name.to_string(),
         version: pkg_manifest.version.clone(),
         source: sources.body,
         signatures,
-        exported: pkg_manifest.exports.clone(),
+        exported,
         dependencies: sources.imports,
+        origin: sources.origin,
+        templates: sources.templates,
+        macros: sources.macros,
     })
+}
+
+/// A package's public API: the names a consumer may write as
+/// `pkg::name`.
+///
+/// There are two dialects and one rule each, by design:
+///
+/// - a `.laplacelib` item is public exactly when it is marked `pub`
+/// - a plain `.stan` file's function is public exactly when the manifest's
+///   `exports` lists it, which is how every package worked before `pub`
+///   existed and is why those packages keep compiling unchanged
+///
+/// Listing a `.laplacelib` item in `exports` is therefore a contradiction,
+/// not a second way to say `pub`: it is rejected rather than honoured,
+/// because honouring it would leave two places to look for one answer and
+/// silently ignoring it would un-export the item without saying so.
+fn public_names(
+    package: &str,
+    sources: &PackageSources,
+    pkg_manifest: &PackageManifest,
+) -> Result<Vec<String>, PackageError> {
+    if let Some((item, kind)) = &sources.inconsistent {
+        return Err(PackageError::InconsistentVisibility {
+            package: package.to_string(),
+            item: item.clone(),
+            kind,
+        });
+    }
+
+    let mut public = sources.public_items.clone();
+    for export in &pkg_manifest.exports {
+        if sources.laplacelib_items.contains(export) {
+            return Err(PackageError::ExportsListsLaplacelibItem {
+                package: package.to_string(),
+                item: export.clone(),
+            });
+        }
+        public.push(export.clone());
+    }
+    public.sort();
+    public.dedup();
+    Ok(public)
 }
 
 #[cfg(test)]
@@ -221,7 +385,6 @@ mod tests {
             &manifest_toml(concat!(
                 "name = \"regression\"\n",
                 "version = \"1.2.0\"\n",
-                "exports = [\"fit\"]\n",
                 "[dependencies]\n",
                 "stats = \"^1.0\"\n",
             )),
@@ -229,7 +392,7 @@ mod tests {
         write(
             tmp.path(),
             "regression.laplacelib",
-            "library {\n  import stats\n}\nreal fit() { return stats::mean_(); }\n",
+            "library {\n  import stats\n}\npub real fit() { return stats::mean_(); }\n",
         );
 
         let pkg = load(tmp.path(), "regression").unwrap();
