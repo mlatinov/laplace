@@ -52,6 +52,36 @@ pub fn rename_identifier_calls(source: &str, name: &str, replacement: &str) -> S
     out
 }
 
+/// Apply a package's own mangling to a fragment of its code that is
+/// going to be emitted *outside* the package's text.
+///
+/// Two kinds of generated code need this: a specialized copy of a
+/// higher-order function, and a template expansion. Both are written
+/// from a package's source but land in the model's own text, where the
+/// per-package renaming pass will never see them -- so the fragment has
+/// to arrive already mangled.
+pub fn mangle_fragment(text: &str, package: &str, functions: &[String]) -> String {
+    // `dep::func(` -> `dep__func(`.
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    for call in find_qualified_calls(text) {
+        out.push_str(&text[cursor..call.range.start]);
+        out.push_str(&mangle(&call.package, &call.func));
+        cursor = call.range.end;
+    }
+    out.push_str(&text[cursor..]);
+
+    // Then the package's own names. Sorted, so the result does not
+    // depend on how the caller happened to collect them.
+    let mut names: Vec<&String> = functions.iter().collect();
+    names.sort();
+    names.dedup();
+    for func in names {
+        out = rename_identifier_calls(&out, func, &mangle(package, func));
+    }
+    out
+}
+
 /// One `package::func(` call site found in a source text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QualifiedCall {
@@ -126,6 +156,33 @@ fn preceded_by_tilde(bytes: &[u8], mask: &CodeMask, at: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mangle_fragment_rewrites_own_names_and_dependency_calls() {
+        let fragment = "  real y = helper(1) + dep::other(2);\n";
+        let mangled = mangle_fragment(fragment, "stats", &["helper".to_string()]);
+        assert_eq!(mangled, "  real y = stats__helper(1) + dep__other(2);\n");
+    }
+
+    #[test]
+    fn mangle_fragment_leaves_unknown_names_alone() {
+        // A Stan built-in, or one of the model's own functions: not
+        // this package's to rename.
+        let fragment = "  real y = exp(1);\n";
+        assert_eq!(
+            mangle_fragment(fragment, "stats", &["helper".to_string()]),
+            fragment
+        );
+    }
+
+    #[test]
+    fn mangle_fragment_does_not_rename_inside_an_already_mangled_name() {
+        let fragment = "stats__helper(x)";
+        assert_eq!(
+            mangle_fragment(fragment, "stats", &["helper".to_string()]),
+            fragment
+        );
+    }
 
     #[test]
     fn mangle_joins_with_double_underscore() {

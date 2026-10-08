@@ -1,5 +1,16 @@
 pub mod blocks;
+pub mod body;
 pub mod brace_match;
+pub mod declarations;
+pub mod functional;
+pub mod identifiers;
 pub mod laplacelib;
 pub mod library_block;
+pub mod macros;
+pub mod origin;
+pub mod placeholder;
 pub mod signatures;
+pub mod statements;
+pub mod template;
+pub mod types;
+pub mod visibility;

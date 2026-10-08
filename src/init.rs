@@ -2,6 +2,11 @@
 //! generate a starter `laplace.toml`, guessing `exports` from
 //! `// @laplace`-documented functions -- undocumented functions are assumed
 //! private and left out.
+//!
+//! `exports` only ever names functions from plain `.stan` files. A
+//! `.laplacelib` item's visibility comes from `pub` in the source, and
+//! listing one in `exports` is an error, so `init` reports those items
+//! instead of writing a manifest that would not load.
 
 use std::path::{Path, PathBuf};
 
@@ -43,6 +48,12 @@ pub struct InitSummary {
     /// that guess is wrong. A name with any documented overload is exported,
     /// never listed here.
     pub excluded: Vec<String>,
+    /// `.laplacelib` items already marked `pub`: public, and needing no
+    /// manifest entry at all.
+    pub already_pub: Vec<String>,
+    /// `.laplacelib` items *not* marked `pub`, and so private. Reported
+    /// because `exports` cannot make them public -- only `pub` can.
+    pub needs_pub: Vec<String>,
     /// Packages the `.laplacelib` sources import, which need entries under
     /// `[dependencies]` before the package can be installed.
     pub imports: Vec<String>,
@@ -67,18 +78,29 @@ pub fn init(dir: &Path) -> Result<InitSummary, InitError> {
         package::read_package_sources(dir).map_err(|e| InitError::Package(Box::new(e)))?;
     let signatures = extract_signatures(&sources.body);
 
+    let from_laplacelib = |name: &String| sources.laplacelib_items.contains(name);
+
     let mut included: Vec<String> = Vec::new();
     for sig in signatures.iter().filter(|s| s.doc.is_some()) {
-        if !included.contains(&sig.name) {
+        if !from_laplacelib(&sig.name) && !included.contains(&sig.name) {
             included.push(sig.name.clone());
         }
     }
     let mut excluded: Vec<String> = Vec::new();
     for sig in &signatures {
-        if !included.contains(&sig.name) && !excluded.contains(&sig.name) {
+        if !from_laplacelib(&sig.name)
+            && !included.contains(&sig.name)
+            && !excluded.contains(&sig.name)
+        {
             excluded.push(sig.name.clone());
         }
     }
+    let needs_pub: Vec<String> = sources
+        .laplacelib_items
+        .iter()
+        .filter(|name| !sources.public_items.contains(name))
+        .cloned()
+        .collect();
 
     let package_manifest = PackageManifest::new(name.clone(), "0.1.0", included.clone());
     manifest::write_package_manifest(&manifest_path, &package_manifest)?;
@@ -89,6 +111,8 @@ pub fn init(dir: &Path) -> Result<InitSummary, InitError> {
         source_files: sources.files,
         included,
         excluded,
+        already_pub: sources.public_items.clone(),
+        needs_pub,
         imports: sources.imports,
     })
 }
@@ -112,10 +136,16 @@ fn directory_name(dir: &Path) -> String {
 /// in a Stan identifier becomes `_`, and a name that doesn't start with a
 /// letter gets a `pkg_` prefix.
 fn sanitize_package_name(raw: &str) -> String {
-    let mut name: String = raw
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
+    let mut name = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        if c.is_ascii_alphanumeric() {
+            name.push(c);
+        } else if !name.ends_with('_') {
+            // Runs collapse to one `_`: `__` is reserved for generated
+            // names, so `kernels--2d` must not become `kernels__2d`.
+            name.push('_');
+        }
+    }
     if !name.starts_with(|c: char| c.is_ascii_alphabetic()) {
         name.insert_str(0, "pkg_");
     }
@@ -176,7 +206,86 @@ real jitter(real epsilon) {
 
         let summary = init(&dir).unwrap();
         assert_eq!(summary.source_files, 1);
-        assert_eq!(summary.included, vec!["knots".to_string()]);
+        // `exports` never names a `.laplacelib` item: `pub` does that, and
+        // `knots` has no `pub`, so it is reported as private instead.
+        assert!(summary.included.is_empty(), "{:?}", summary.included);
+        assert_eq!(summary.needs_pub, vec!["knots".to_string()]);
+        assert!(summary.already_pub.is_empty());
+
+        let written =
+            manifest::read_package_manifest(&dir.join("laplace.toml")).unwrap();
+        assert!(written.exports.is_empty(), "{:?}", written.exports);
+    }
+
+    #[test]
+    fn a_pub_laplacelib_item_is_reported_and_stays_out_of_exports() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("splines");
+        fs::create_dir_all(&dir).unwrap();
+        write_stan(
+            &dir,
+            "splines.laplacelib",
+            "// @laplace
+// @brief Knots.
+pub vector knots(int k) {
+  return rep_vector(0, k);
+}
+
+real helper() {
+  return 1;
+}
+",
+        );
+
+        let summary = init(&dir).unwrap();
+        assert_eq!(summary.already_pub, vec!["knots".to_string()]);
+        assert_eq!(summary.needs_pub, vec!["helper".to_string()]);
+        assert!(summary.included.is_empty());
+
+        // The generated manifest loads: nothing in `exports` contradicts
+        // what the source says.
+        let written =
+            manifest::read_package_manifest(&dir.join("laplace.toml")).unwrap();
+        assert!(written.exports.is_empty());
+        assert!(package::load_with_manifest(&dir, "splines", &written).is_ok());
+    }
+
+    #[test]
+    fn a_mixed_package_exports_only_its_stan_functions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("mixed");
+        fs::create_dir_all(&dir).unwrap();
+        write_stan(
+            &dir,
+            "a.stan",
+            "// @laplace
+// @brief From Stan.
+real plain() {
+  return 1;
+}
+",
+        );
+        write_stan(
+            &dir,
+            "b.laplacelib",
+            "// @laplace
+// @brief From laplacelib.
+pub real fancy() {
+  return 2;
+}
+",
+        );
+
+        let summary = init(&dir).unwrap();
+        assert_eq!(summary.included, vec!["plain".to_string()]);
+        assert_eq!(summary.already_pub, vec!["fancy".to_string()]);
+    }
+
+    #[test]
+    fn a_sanitized_name_never_contains_a_double_underscore() {
+        assert_eq!(sanitize_package_name("kernels--2d"), "kernels_2d");
+        assert_eq!(sanitize_package_name("a..b__c"), "a_b_c");
+        assert!(manifest::is_valid_package_name(&sanitize_package_name("kernels--2d")));
     }
 
     #[test]

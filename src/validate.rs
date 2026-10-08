@@ -314,6 +314,7 @@ mod tests {
             source: String::new(),
             package_line_ranges: vec![],
             function_files: vec![],
+                    warnings: Vec::new(),
         };
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let err = validate(

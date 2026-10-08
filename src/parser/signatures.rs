@@ -6,21 +6,107 @@
 //! block content. It never inspects statements *inside* a function body other
 //! than to find where the body ends.
 
+use std::ops::Range;
+
 use serde::{Deserialize, Serialize};
 
 use super::brace_match::CodeMask;
+use super::functional::{parse_functional_param, FunctionalError, FunctionalParam};
+use super::types::{self, TypeCategory};
 
 /// One parameter of a function signature: `(param_name, param_type)`.
 pub type Param = (String, String);
 
 /// A top-level function signature, with its doc comment if one was attached.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FunctionSig {
     pub name: String,
     pub params: Vec<Param>,
     pub return_type: String,
     pub doc: Option<Doc>,
+    /// Byte offset of the first non-whitespace byte of the signature
+    /// header (the return type) within the scanned text. Used to attach a
+    /// `pub` marker to the item that follows it.
+    ///
+    /// Not part of `docs.json`: offsets describe one particular parse of
+    /// one particular text, so persisting them would only let them go
+    /// stale. They are also excluded from equality, so two signatures
+    /// compare equal when they say the same thing about a function.
+    #[serde(skip)]
+    pub header_offset: usize,
+    /// Byte offset of the start of the *line* the item begins on --
+    /// its attached `//` doc-comment block if it has one, otherwise the
+    /// signature header. Provenance comments are inserted here, above
+    /// the doc comment rather than between it and the function.
+    #[serde(skip)]
+    pub item_offset: usize,
+    /// The size expressions stripped off the return type, if it carried
+    /// a laplace size annotation (`vector[2] to_pair(real x)`).
+    /// `return_type` is always the bare type Stan sees.
+    #[serde(skip)]
+    pub return_sizes: Vec<String>,
+    /// Byte range of the return type's `[...]` annotation, so codegen
+    /// can cut it out of the emitted text.
+    #[serde(skip)]
+    pub return_size_span: Option<Range<usize>>,
+    /// Parameters whose type is a `func(...) -> ...` shape. A function
+    /// with any of these is a higher-order function and is specialized
+    /// rather than emitted as written.
+    #[serde(skip)]
+    pub functional_params: Vec<FunctionalParam>,
+    /// Byte range of the function's body, from its opening `{` through
+    /// its closing `}` inclusive. With [`FunctionSig::item_offset`] this
+    /// delimits the whole definition, which is what it takes to move a
+    /// higher-order function's body into a specialized copy and delete
+    /// the original.
+    #[serde(skip)]
+    pub body_span: Option<Range<usize>>,
+    /// Functional parameters that failed to parse. Collected rather than
+    /// returned, so this scanner stays total -- doc extraction must not
+    /// break on a malformed shape. [`crate::monomorphize`] reports them
+    /// with the location of the function they belong to.
+    #[serde(skip)]
+    pub functional_errors: Vec<FunctionalError>,
 }
+
+impl FunctionSig {
+    /// Byte range of the whole definition: doc comment, signature and
+    /// body. `None` only for a signature built by hand rather than
+    /// scanned.
+    pub fn definition_span(&self) -> Option<Range<usize>> {
+        self.body_span
+            .as_ref()
+            .map(|body| self.item_offset..body.end)
+    }
+
+    /// Whether this is a higher-order function: it takes at least one
+    /// functional parameter, so it has no valid Stan form of its own.
+    pub fn is_higher_order(&self) -> bool {
+        !self.functional_params.is_empty() || !self.functional_errors.is_empty()
+    }
+
+    /// The parameters Stan sees, with the functional ones dropped --
+    /// the specialized copy's parameter list.
+    pub fn value_params(&self) -> Vec<&Param> {
+        self.params
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !self.functional_params.iter().any(|f| f.index == *i))
+            .map(|(_, p)| p)
+            .collect()
+    }
+}
+
+impl PartialEq for FunctionSig {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.params == other.params
+            && self.return_type == other.return_type
+            && self.doc == other.doc
+    }
+}
+
+impl Eq for FunctionSig {}
 
 /// Structured content of a `// @laplace` doc comment block.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,7 +139,10 @@ pub fn extract_signatures(source: &str) -> Vec<FunctionSig> {
             break;
         };
 
-        if let Some(sig) = parse_function_header(&source[segment_start..open_brace]) {
+        if let Some(mut sig) =
+            parse_function_header(&source[segment_start..open_brace], segment_start)
+        {
+            sig.body_span = Some(open_brace..close_brace + 1);
             sigs.push(sig);
         }
 
@@ -65,8 +154,17 @@ pub fn extract_signatures(source: &str) -> Vec<FunctionSig> {
 
 /// Parse the text preceding a function body's `{` into a `FunctionSig`.
 /// Returns `None` if it doesn't look like `<return_type> <name>(<params>)`.
-fn parse_function_header(pre: &str) -> Option<FunctionSig> {
-    let (header_lines, comment_lines) = split_header_and_comment(pre.trim_end());
+///
+/// `base` is `pre`'s byte offset within the whole scanned text, so the
+/// offsets recorded on the returned signature are absolute.
+fn parse_function_header(pre: &str, base: usize) -> Option<FunctionSig> {
+    let split = split_header_and_comment(pre.trim_end());
+    let HeaderSplit {
+        header_lines,
+        comment_lines,
+        header_line_start,
+        item_line_start,
+    } = split;
     let header = header_lines.join(" ");
     let header = header.trim();
 
@@ -89,12 +187,67 @@ fn parse_function_header(pre: &str) -> Option<FunctionSig> {
     let params = parse_params(&header[open_paren + 1..close_paren]);
     let doc = parse_doc_block(&comment_lines);
 
+    // The first header line's indentation is not part of the header, so
+    // `header_offset` points at the return type itself.
+    let indent = pre[header_line_start..]
+        .bytes()
+        .take_while(|b| matches!(b, b' ' | b'\t'))
+        .count();
+    let header_start = header_line_start + indent;
+
+    // A laplace size annotation on the return type is read off here and
+    // cut from the output later: `vector[2] f(...)` is laplace source,
+    // `vector f(...)` is what Stan gets.
+    let return_ty = types::parse_type(&return_type);
+    let strip_sizes = return_ty.is_sized() && return_ty.category != TypeCategory::Array;
+    let return_size_span =
+        strip_sizes.then(|| return_size_span(pre, header_start)).flatten();
+    let (return_type, return_sizes) = if strip_sizes {
+        (return_ty.bare.clone(), return_ty.sizes.clone())
+    } else {
+        (return_type, Vec::new())
+    };
+
+    let mut functional_params = Vec::new();
+    let mut functional_errors = Vec::new();
+    for (index, (param_name, param_type)) in params.iter().enumerate() {
+        match parse_functional_param(param_name, param_type, index) {
+            None => {}
+            Some(Ok(param)) => functional_params.push(param),
+            Some(Err(error)) => functional_errors.push(error),
+        }
+    }
+
     Some(FunctionSig {
         name,
         params,
         return_type,
         doc,
+        header_offset: base + header_start,
+        item_offset: base + item_line_start,
+        return_sizes,
+        return_size_span: return_size_span.map(|r| base + r.start..base + r.end),
+        // Filled in by the caller, which is where the body's braces are
+        // already known.
+        body_span: None,
+        functional_params,
+        functional_errors,
     })
+}
+
+/// Byte range, within `pre`, of the `[...]` on a return type whose
+/// header starts at `header_start`.
+///
+/// Located in the source text rather than in the reconstructed header
+/// string, because a header spanning several lines is joined with single
+/// spaces and its offsets no longer line up with the file.
+fn return_size_span(pre: &str, header_start: usize) -> Option<Range<usize>> {
+    let after = &pre[header_start..];
+    // The return type ends where the parameter list begins.
+    let params_at = after.find('(')?;
+    let open = after[..params_at].find('[')?;
+    let close = types::matching_bracket(after, open)?;
+    Some(header_start + open..header_start + close + 1)
 }
 
 fn is_identifier(s: &str) -> bool {
@@ -123,32 +276,12 @@ fn find_matching_paren(s: &str, open: usize) -> Option<usize> {
     None
 }
 
-/// Split a parameter list on top-level commas, ignoring commas inside `[ ]`
-/// array-dimension brackets (e.g. `array[N, M] real x`).
-fn split_top_level_commas(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut depth = 0i32;
-    let mut current = String::new();
-    for c in s.chars() {
-        match c {
-            '[' => {
-                depth += 1;
-                current.push(c);
-            }
-            ']' => {
-                depth -= 1;
-                current.push(c);
-            }
-            ',' if depth == 0 => out.push(std::mem::take(&mut current)),
-            _ => current.push(c),
-        }
-    }
-    out.push(current);
-    out
-}
-
 fn parse_params(params_text: &str) -> Vec<Param> {
-    split_top_level_commas(params_text)
+    // Commas nest inside array dimensions (`array[N, M] real x`) and
+    // inside a functional parameter's argument list
+    // (`func(real, int) -> real f`), so splitting is bracket- and
+    // paren-aware -- see `types::split_top_level_args`.
+    types::split_top_level_args(params_text)
         .into_iter()
         .filter_map(|chunk| {
             let chunk = chunk.trim();
@@ -173,8 +306,13 @@ fn parse_params(params_text: &str) -> Vec<Param> {
 /// A comment block only counts as "directly above" if there is no blank line
 /// between its last line and the header — matching the "immediately
 /// preceded" requirement.
-fn split_header_and_comment(text: &str) -> (Vec<String>, Vec<String>) {
+fn split_header_and_comment(text: &str) -> HeaderSplit {
     let lines: Vec<&str> = text.lines().collect();
+    let starts = line_starts(text);
+    // The offset just past the end: what an empty split points at.
+    let past_end = text.len();
+    let start_of = |idx: usize| starts.get(idx).copied().unwrap_or(past_end);
+
     let mut idx = lines.len();
 
     let mut header_lines = Vec::new();
@@ -187,6 +325,7 @@ fn split_header_and_comment(text: &str) -> (Vec<String>, Vec<String>) {
         idx -= 1;
     }
     header_lines.reverse();
+    let header_line_start = start_of(idx);
 
     let mut comment_lines = Vec::new();
     if idx > 0 && lines[idx - 1].trim().starts_with("//") {
@@ -201,7 +340,37 @@ fn split_header_and_comment(text: &str) -> (Vec<String>, Vec<String>) {
         comment_lines.reverse();
     }
 
-    (header_lines, comment_lines)
+    HeaderSplit {
+        header_lines,
+        comment_lines,
+        header_line_start,
+        item_line_start: start_of(idx),
+    }
+}
+
+/// [`split_header_and_comment`]'s result: the two line groups plus where
+/// each group starts, in bytes, within the text it was split from.
+struct HeaderSplit {
+    header_lines: Vec<String>,
+    comment_lines: Vec<String>,
+    header_line_start: usize,
+    item_line_start: usize,
+}
+
+/// Byte offset of the start of every line in `text`, in order. One entry
+/// per line as `str::lines` counts them, so the two can be indexed
+/// together.
+fn line_starts(text: &str) -> Vec<usize> {
+    let mut starts = Vec::new();
+    if !text.is_empty() {
+        starts.push(0);
+    }
+    for (i, b) in text.bytes().enumerate() {
+        if b == b'\n' && i + 1 < text.len() {
+            starts.push(i + 1);
+        }
+    }
+    starts
 }
 
 /// If `comment_lines` contains a `// @laplace` marker, parse everything after
@@ -525,6 +694,165 @@ real wrapped(real x) {
             doc.params,
             vec![("x".to_string(), "The input, continued on another line.".to_string())]
         );
+    }
+
+    #[test]
+    fn header_offset_points_at_the_return_type_and_item_offset_at_the_doc_block() {
+        let source = "real a() {\n  return 1;\n}\n\n// @laplace\n// @brief B.\nreal b() {\n  return 2;\n}\n";
+        let sigs = extract_signatures(source);
+
+        let a = &sigs[0];
+        assert_eq!(&source[a.header_offset..a.header_offset + 4], "real");
+        assert_eq!(a.item_offset, a.header_offset, "no doc comment attached");
+
+        let b = &sigs[1];
+        assert_eq!(&source[b.header_offset..b.header_offset + 6], "real b");
+        assert!(
+            source[b.item_offset..].starts_with("// @laplace"),
+            "item_offset should point at the start of the attached doc block, got {:?}",
+            &source[b.item_offset..b.item_offset + 12]
+        );
+    }
+
+    #[test]
+    fn header_offset_skips_indentation() {
+        // How a function inside a `functions { }` wrapper looks.
+        let source = "  real indented(real x) {\n    return x;\n  }\n";
+        let sigs = extract_signatures(source);
+        assert_eq!(sigs[0].header_offset, 2);
+        assert_eq!(sigs[0].item_offset, 0, "the line start, indentation included");
+    }
+
+    #[test]
+    fn offsets_are_excluded_from_signature_equality() {
+        let one = extract_signatures("real f(real x) {\n  return x;\n}\n");
+        let two = extract_signatures("\n\nreal f(real x) {\n  return x;\n}\n");
+        assert_ne!(one[0].header_offset, two[0].header_offset);
+        assert_eq!(one[0], two[0], "equality compares what a signature says, not where it is");
+    }
+
+    // ---- sized return types + functional parameters -----------------
+
+    #[test]
+    fn a_sized_return_type_is_split_off_and_its_span_recorded() {
+        let source = "vector[2] to_pair(real x) {\n  return [x, x * 2]';\n}\n";
+        let sigs = extract_signatures(source);
+        assert_eq!(sigs[0].return_type, "vector", "Stan sees the bare type");
+        assert_eq!(sigs[0].return_sizes, vec!["2"]);
+        let span = sigs[0].return_size_span.clone().unwrap();
+        assert_eq!(&source[span], "[2]");
+    }
+
+    #[test]
+    fn a_parameter_dependent_return_size_is_kept_verbatim() {
+        let source = "vector[K] basis(real t, int K) {\n  return rep_vector(t, K);\n}\n";
+        let sigs = extract_signatures(source);
+        assert_eq!(sigs[0].return_sizes, vec!["K"]);
+        assert_eq!(sigs[0].return_type, "vector");
+    }
+
+    #[test]
+    fn a_two_dimensional_return_size_keeps_both() {
+        let source = "matrix[R, C] grid(int R, int C) {\n  return rep_matrix(0, R, C);\n}\n";
+        let sigs = extract_signatures(source);
+        assert_eq!(sigs[0].return_sizes, vec!["R", "C"]);
+    }
+
+    #[test]
+    fn an_unsized_return_type_records_no_sizes_and_no_span() {
+        let sigs = extract_signatures("vector f(real x) {\n  return [x]';\n}\n");
+        assert!(sigs[0].return_sizes.is_empty());
+        assert!(sigs[0].return_size_span.is_none());
+    }
+
+    #[test]
+    fn an_array_return_type_is_left_alone() {
+        // `array[] real` is ordinary Stan: the brackets are the rank, not
+        // a laplace size annotation, and must survive into the output.
+        let sigs = extract_signatures("array[] real f(real x) {\n  return {x};\n}\n");
+        assert_eq!(sigs[0].return_type, "array[] real");
+        assert!(sigs[0].return_size_span.is_none());
+    }
+
+    #[test]
+    fn a_functional_parameter_is_recognised_and_kept_in_order() {
+        let source = "real apply_twice(real x, func(real) -> real f) {\n  return f(f(x));\n}\n";
+        let sigs = extract_signatures(source);
+        let sig = &sigs[0];
+        assert!(sig.is_higher_order());
+        assert_eq!(sig.params.len(), 2, "the functional param is still a param");
+        assert_eq!(sig.functional_params.len(), 1);
+        assert_eq!(sig.functional_params[0].name, "f");
+        assert_eq!(sig.functional_params[0].index, 1);
+        assert_eq!(sig.functional_params[0].shape(), "func(real) -> real");
+        // The specialized copy keeps only the value parameters.
+        assert_eq!(
+            sig.value_params().iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["x"]
+        );
+    }
+
+    #[test]
+    fn a_functional_parameters_own_commas_do_not_split_the_parameter_list() {
+        let source = "real h(real x, func(real, int) -> vector f, int k) {\n  return x;\n}\n";
+        let sigs = extract_signatures(source);
+        assert_eq!(
+            sigs[0].params.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["x", "f", "k"]
+        );
+        assert_eq!(sigs[0].functional_params[0].arg_types.len(), 2);
+        assert_eq!(sigs[0].functional_params[0].index, 1);
+    }
+
+    #[test]
+    fn two_functional_parameters_are_both_recorded_in_order() {
+        let source = "real h(func(real) -> real f, func(real) -> real g) {\n  return f(g(1));\n}\n";
+        let sigs = extract_signatures(source);
+        assert_eq!(
+            sigs[0].functional_params.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            vec!["f", "g"]
+        );
+        assert!(sigs[0].value_params().is_empty());
+    }
+
+    #[test]
+    fn an_ordinary_function_is_not_higher_order() {
+        let sigs = extract_signatures("real f(real x) {\n  return x;\n}\n");
+        assert!(!sigs[0].is_higher_order());
+        assert!(sigs[0].functional_params.is_empty());
+    }
+
+    #[test]
+    fn a_malformed_functional_shape_is_collected_not_fatal() {
+        // The scanner must stay total: doc extraction runs over the same
+        // text and cannot be allowed to fail on a bad shape.
+        let sigs = extract_signatures("real h(real x, func(real) real f) {\n  return x;\n}\n");
+        assert_eq!(sigs.len(), 1);
+        assert!(sigs[0].functional_params.is_empty());
+        assert_eq!(sigs[0].functional_errors.len(), 1);
+        assert!(sigs[0].is_higher_order(), "still not emittable as written");
+    }
+
+    #[test]
+    fn the_definition_span_covers_the_doc_comment_signature_and_body() {
+        let source = "real a() {\n  return 1;\n}\n\n// @laplace\n// @brief B.\nreal b(real x) {\n  return x;\n}\n";
+        let sigs = extract_signatures(source);
+
+        let a = sigs[0].definition_span().unwrap();
+        assert_eq!(&source[a], "real a() {\n  return 1;\n}");
+
+        let b = sigs[1].definition_span().unwrap();
+        assert_eq!(
+            &source[b],
+            "// @laplace\n// @brief B.\nreal b(real x) {\n  return x;\n}"
+        );
+    }
+
+    #[test]
+    fn the_body_span_is_just_the_braces() {
+        let source = "real f(real x) {\n  return x;\n}\n";
+        let span = extract_signatures(source)[0].body_span.clone().unwrap();
+        assert_eq!(&source[span], "{\n  return x;\n}");
     }
 
     #[test]

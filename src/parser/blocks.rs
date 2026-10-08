@@ -25,6 +25,41 @@ pub enum BlockKind {
 }
 
 impl BlockKind {
+    /// The block a keyword names, if it names one.
+    pub fn from_keyword(keyword: &str) -> Option<Self> {
+        // Whitespace inside a two-word name is normalized, so a header
+        // written `in transformed  parameters` still resolves.
+        let normalized = keyword.split_whitespace().collect::<Vec<_>>().join(" ");
+        [
+            BlockKind::Library,
+            BlockKind::Functions,
+            BlockKind::Data,
+            BlockKind::TransformedData,
+            BlockKind::Parameters,
+            BlockKind::TransformedParameters,
+            BlockKind::Model,
+            BlockKind::GeneratedQuantities,
+        ]
+        .into_iter()
+        .find(|kind| kind.keyword() == normalized)
+    }
+
+    /// Where this block belongs in a Stan program. Stan requires the
+    /// blocks in this order, so a block laplace has to create goes at
+    /// the position this gives it.
+    pub fn canonical_order(self) -> usize {
+        match self {
+            BlockKind::Library => 0,
+            BlockKind::Functions => 1,
+            BlockKind::Data => 2,
+            BlockKind::TransformedData => 3,
+            BlockKind::Parameters => 4,
+            BlockKind::TransformedParameters => 5,
+            BlockKind::Model => 6,
+            BlockKind::GeneratedQuantities => 7,
+        }
+    }
+
     /// How the block is spelled in source, for error messages.
     pub fn keyword(self) -> &'static str {
         match self {

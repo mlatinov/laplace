@@ -96,15 +96,19 @@ impl GitDependency {
 /// digits and `_`. Notably no `-`: `laplace-splines::f(` would be read as
 /// `laplace - splines::f(`.
 pub fn is_valid_package_name(name: &str) -> bool {
+    // `__` is reserved for generated names: the whole point of `pkg__func`
+    // is that the two halves can be told apart, which a package name
+    // containing `__` would defeat.
     let mut chars = name.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !name.contains(crate::parser::identifiers::RESERVED_SEPARATOR)
 }
 
 /// Why `name` is not a valid package name, for error messages.
 pub const PACKAGE_NAME_RULE: &str =
-    "a package name must start with a letter and contain only letters, digits and `_` \
-     (it becomes the `pkg__` prefix of Stan identifiers)";
+    "a package name must start with a letter and contain only letters, digits and single `_` \
+     (it becomes the `pkg__` prefix of Stan identifiers, so `__` is reserved)";
 
 /// Reject anything that is not a plain relative path *inside* the clone.
 /// A `subdir` reaches the filesystem straight from `laplace.toml` and from

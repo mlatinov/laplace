@@ -105,6 +105,7 @@ And `build/model.stan`:
 
 ```stan
 functions {
+// mathutils v1.0.0 (pub) -- mathutils/mathutils.stan:7   <- where this came from
 // @laplace
 // @brief Doubles a real value.
 // @param x The value to double.
@@ -188,17 +189,22 @@ version = "1.0.0"
 exports = ["rbf_cov"]
 ```
 
-`exports` is the actual privacy boundary, not the doc comment. A function
-that's present in the `.stan` file but absent from `exports` cannot be called
-as `pkg::func` from outside the package — regardless of whether it has an
-`@laplace` comment. Documentation and visibility are two separate concerns.
+For a package written as plain `.stan` files, `exports` is the privacy
+boundary, not the doc comment. A function that's present in the `.stan` file
+but absent from `exports` cannot be called as `pkg::func` from outside the
+package — regardless of whether it has an `@laplace` comment. Documentation
+and visibility are two separate concerns.
 
-One caveat about non-exported functions: laplace leaves their names alone
-(only exports get the `pkg__` prefix), and Stan has a single flat function
-namespace. If two packages in the same build both define a private helper
-called `softplus`, the build fails with an error naming both packages rather
-than silently emitting two definitions. Give private helpers distinctive
-names, or export them.
+A package written as `.laplacelib` files uses the `pub` keyword instead, and
+leaves `exports` out of the manifest entirely — see
+[Libraries that depend on libraries](#libraries-that-depend-on-libraries) below.
+Listing a `.laplacelib` item in `exports` is an error, so there is never a
+question of which one wins.
+
+Either way, private functions are still *emitted* into the compiled output —
+public ones call them — and every function, public or private, gets the
+`pkg__` prefix. Private is an access rule, not hiding, and two packages can
+safely define a private helper of the same name.
 
 ### Scaffolding the manifest with `laplace init`
 
@@ -206,7 +212,10 @@ Rather than hand-writing `laplace.toml`, run `laplace init` inside a
 directory of `.stan` files to generate a starter manifest. It guesses `name`
 from the directory name, sets `version = "0.1.0"`, and pre-fills `exports`
 with every `@laplace`-documented function — printing which functions were
-included and which were left out so you can adjust either list by hand:
+included and which were left out so you can adjust either list by hand.
+(`exports` only ever names functions from plain `.stan` files; for a
+`.laplacelib` package `init` reports which items are `pub` and which are
+still private, since only the source can say.)
 
 ```
 $ laplace init
@@ -290,7 +299,7 @@ as a project's `laplace.toml`:
 # regression/laplace.toml
 name = "regression"
 version = "1.0.0"
-exports = ["centre"]
+# no `exports`: a .laplacelib file says what's public with `pub`
 
 [dependencies]
 stats = "^1.0"
@@ -309,10 +318,30 @@ library {
 // @brief Centre a vector on its mean.
 // @param x The vector to centre.
 // @return `x` minus its mean.
-vector centre(vector x) {
-  return x - stats::mean_(x);
+pub vector centre(vector x) {
+  return x - stats::mean_(x) / scale(x);
+}
+
+real scale(vector x) {          // private: no `pub`
+  return sd(x);
 }
 ```
+
+**`pub` is how a `.laplacelib` file says what's public.** Items are private to
+their package unless marked `pub`, and the manifest's `exports` is left out —
+in fact naming a `.laplacelib` item in `exports` is an error telling you to
+write `pub` instead. Calling a private item from outside its package is a
+laplace error with a file, line and column:
+
+```
+error: `stats::sum_values` is private to package `stats`
+  --> model.laplace:9:12
+  help: only items marked `pub` can be used outside their package
+```
+
+Visibility belongs to a *name*, not to one definition: if a name has several
+overloads, either all of them are `pub` or none are. `pub` never appears in
+generated output, and `laplace doc` won't show a private item.
 
 `.laplacelib` is a relaxed dialect: bare function definitions, an optional
 `functions { }` wrapper around them, and an optional `library { }` block. The
@@ -397,6 +426,319 @@ error: dependency cycle: alpha -> beta -> alpha
 `laplace add` and `laplace update` only move the package you name. Everything
 else stays at its locked version unless a constraint forces it to move, so
 adding one dependency never silently bumps the rest of your graph.
+
+## Templates: boilerplate that spans blocks
+
+Some Stan patterns aren't a function — they're a handful of declarations and
+statements spread across `parameters`, `transformed parameters` and `model`.
+Non-centred parameterization is the classic one. A template packages that up,
+and `@use` drops it into a model in one line.
+
+In a `.laplacelib`:
+
+```stan
+// @laplace
+// @brief Non-centred parameterization for a vector of coefficients.
+pub @template ncp($name: ident, $N: expr) {
+  parameters {
+    vector[$N] ${name}_raw;
+    real<lower=0> ${name}_sigma;
+  }
+  transformed parameters {
+    vector[$N] $name = ${name}_sigma * ${name}_raw;
+  }
+  model {
+    ${name}_raw ~ std_normal();
+    ${name}_sigma ~ exponential(1);
+  }
+}
+```
+
+In your model:
+
+```stan
+library {
+  import stats
+}
+
+@use stats::ncp(theta, K);
+
+data {
+  int<lower=1> K;
+  vector[K] y;
+}
+model {
+  y ~ normal(theta[1], 1);
+}
+```
+
+and the compiled `.stan`:
+
+```stan
+data {
+  int<lower=1> K;
+  vector[K] y;
+}
+
+parameters {
+  // begin @use stats::ncp(theta, K) -- model.laplace:5
+  vector[K] theta_raw;
+  real<lower=0> theta_sigma;
+  // end @use stats::ncp
+}
+
+transformed parameters {
+  // begin @use stats::ncp(theta, K) -- model.laplace:5
+  vector[K] theta = theta_sigma * theta_raw;
+  // end @use stats::ncp
+}
+
+model {
+  // begin @use stats::ncp(theta, K) -- model.laplace:5
+  theta_raw ~ std_normal();
+  theta_sigma ~ exponential(1);
+  // end @use stats::ncp
+
+  y ~ normal(theta[1], 1);
+}
+```
+
+Blocks you don't have are created, in Stan's own block order. Pieces go
+*before* your own content in each block, in `@use` order — a template makes
+things (`theta`) that your code then uses, and Stan wants declarations first.
+
+### The two placeholder kinds
+
+`$name: ident` takes a **name**. It's what lets you use one template twice
+without the two expansions colliding:
+
+```stan
+@use stats::ncp(theta, K);
+@use stats::ncp(beta, P);
+```
+
+`${name}` is the explicit form, and it's required when you're building a longer
+name out of it (`${name}_raw`). Only `ident` placeholders can do that.
+
+`$mu: expr` takes a whole **expression** — a prior, a linear predictor — and
+carries it through untouched. laplace parenthesizes it when the surrounding
+operators could change its meaning and leaves it alone when they can't, so
+`observation(y, mu + theta, sigma)` gives you `y ~ lognormal((mu + theta),
+sigma)` while a distribution passed as an `expr` still works after a `~`.
+
+### Hygiene: why a template can't collide with your model
+
+**Every variable a template declares has to be named from an `ident`
+placeholder.** A fixed `real tmp;` is refused when the library is written, not
+when you use it — because the second `@use` would redeclare it.
+
+That one rule makes the rest fall out. A template can't quietly reach for one
+of your variables either: once fixed names are gone, the only things a body may
+name are its own placeholders and its own `for` loop variables, so anything
+else is a reference to your model and laplace rejects it. If a template needs
+one of your variables, it has to ask for it as a placeholder.
+
+And if an expansion would declare a name that already exists — yours, or
+another expansion's — the build stops and names both sources:
+
+```
+error: `theta_raw` is declared twice: once by model.laplace:14, and again by
+       `@use stats::ncp(theta, K)` at model.laplace:5:1
+  help: give one of them a different name -- that is what the `ident` placeholder is for
+```
+
+Function calls inside a template body resolve in the **library's** scope, not
+yours, so a template can use its own package's private helpers and you never
+have to know they exist.
+
+## Statement macros: one line, repeated
+
+A template spans blocks. A macro expands **in place, inside one block** — and
+can repeat itself over a list, which is the thing templates can't do.
+
+In a `.laplacelib`:
+
+```stan
+// @laplace
+// @brief Give several parameters the same prior.
+pub @macro priors(each $p: ident, $dist: expr) : stmt in model {
+  $p ~ $dist;
+}
+```
+
+The header says everything: `each $p` is the list parameter, `: stmt` is what
+the body expands to, and `in model` is where it may be used.
+
+In your model:
+
+```stan
+model {
+  @expand stats::priors([alpha, beta, gamma], normal(0, 1));
+  y ~ normal(alpha + beta * x, gamma);
+}
+```
+
+and the compiled `.stan`:
+
+```stan
+model {
+  // begin @expand stats::priors -- model.laplace:15
+  alpha ~ normal(0, 1);
+  beta ~ normal(0, 1);
+  gamma ~ normal(0, 1);
+  // end @expand stats::priors
+  y ~ normal(alpha + beta * x, gamma);
+}
+```
+
+The expansion replaces the `@expand` line and keeps its indentation. Macros
+declare variables too, and the `ident` placeholder keeps the names apart:
+
+```stan
+pub @macro z_scores(each $p: ident, $scale: expr) : stmt in transformed parameters {
+  real ${p}_z = $p / $scale;
+}
+```
+
+over `[alpha, beta]` gives you `alpha_z` and `beta_z`.
+
+### What the header buys you
+
+`in <blocks>` is checked in both directions, which is the point of writing it
+down. Expand a macro somewhere it doesn't belong and laplace says so:
+
+```
+error: macro `stats::priors` cannot be expanded in `generated quantities`
+  --> model.laplace:19:3
+  help: it declares `in model`
+```
+
+And a macro that claims a block its own body couldn't legally go in is caught
+when the *library* is written, not when you use it — Stan won't take `y ~ ...`
+in `generated quantities`, so a `~` body claiming that block is wrong before
+anyone touches it. Same for calling an `_rng` function outside `transformed
+data` and `generated quantities`.
+
+Macros get the same hygiene rules as templates: declared names must come from
+an `ident` placeholder, no reaching for your variables, and collisions are
+refused — including a list that repeats an element, and including names a
+template expansion in the same model would introduce.
+
+An empty list is an error rather than a silent no-op: an `@expand` line that
+produces nothing looks like it does something.
+
+## Passing functions to functions
+
+Stan can't take a function as an argument. laplace can, by generating one
+specialized copy of your function per distinct function you pass in — the
+same idea as a C++ template or a Rust generic. Nothing generic reaches the
+`.stan` file.
+
+Declare the shape in the parameter list:
+
+```stan
+functions {
+  real add_one(real x) {
+    return x + 1;
+  }
+
+  real apply_twice(real x, func(real) -> real f) {
+    real a = f(x);
+    return f(a);
+  }
+}
+
+transformed data {
+  real r = apply_twice(5, add_one);
+}
+```
+
+compiles to:
+
+```stan
+functions {
+  real add_one(real x) {
+    return x + 1;
+  }
+
+// monomorphized: apply_twice with f = add_one -- model.laplace:5
+real apply_twice__add_one(real x) {
+  real a = add_one(x);
+  return add_one(a);
+}
+}
+
+transformed data {
+  real r = apply_twice__add_one(5);
+}
+```
+
+The argument is a bare function **name** — one of yours, or a `pub` library
+function written `pkg::func`. There are no lambdas. Passing the same
+function twice produces one copy; a higher-order function you never call is
+not emitted at all, since it has no Stan form.
+
+Copies are emitted at the end of the `functions { }` block, after everything
+they might call, with a forward declaration at the top for any copy another
+function calls.
+
+### Sized return types and `@wait`
+
+A library author writing a higher-order function often needs a local
+variable for `f`'s result — and Stan needs local declarations to be
+*sized*, which the author can't know in advance. `@wait(f)` stands for
+"whatever type ends up bound to `f`":
+
+```stan
+pub matrix expand_rows(vector x, func(real) -> vector f) {
+  matrix[num_elements(x), @wait(f).size] out;
+  for (i in 1:num_elements(x)) {
+    @wait(f) row = f(x[i]);
+    out[i] = row';
+  }
+  return out;
+}
+```
+
+The size has to come from somewhere, and a Stan signature carries none. So
+laplace lets you annotate a return type, and strips the annotation from the
+output:
+
+```stan
+vector[2] to_pair(real x) {        // laplace source
+  return [x, x * 2]';
+}
+```
+
+```stan
+vector to_pair(real x) {           // Stan output
+  return [x, x * 2]';
+}
+```
+
+Bind that into `expand_rows` and `@wait(f).size` becomes `2`, `@wait(f)`
+becomes `vector[2]`. Use `.rows` and `.cols` for a matrix return. If the
+bound function has no annotation, laplace says so at the call site rather
+than letting stanc complain about generated code.
+
+A size may also be an expression over the function's own `int` parameters
+(`vector[K] basis(real t, int K)`). Those are only known per call, so
+`@wait(f)` is then allowed just where the declaration is initialized by a
+direct call — `@wait(f) r = f(t, K);` — and the arguments get substituted
+into the size.
+
+### What isn't supported yet
+
+Each of these is a laplace error with a `help:` line, not a surprise from
+stanc:
+
+- a `func` inside a `func`, or passing a higher-order function as an argument
+- using a functional parameter for anything but calling it (so it can't be
+  stored, returned, or forwarded to another function)
+- one higher-order function calling another
+- a recursive higher-order function
+- binding a Stan built-in — wrap it first: `real exp_(real x) { return exp(x); }`
+- an array as a functional parameter's return type
 
 ## Using a library in a model
 
@@ -484,12 +826,14 @@ model {
 // Generated by laplace from package `regression` 1.0.0. Do not edit.
 // Bundled dependencies of `regression`: stats 1.0.0.
 
+// stats v1.0.0 (pub) -- stats/stats.laplacelib:5
 // @laplace
 // @brief Arithmetic mean of a vector.
 real stats__mean_(vector x) {
   return sum(x) / num_elements(x);
 }
 
+// regression v1.0.0 (pub) -- regression/regression.laplacelib:9
 // @laplace
 // @brief Centre a vector on its mean.
 vector regression__centre(vector x) {
@@ -601,12 +945,37 @@ one-version-per-build rule, which makes a package name a unique prefix, and it
 keeps `--split-functions` output readable. If single-version unification is
 ever relaxed, the mangling scheme has to be revisited in the same change.
 
-**Non-exported functions keep their names.** Only exports get the `pkg__`
-prefix. Since Stan has one flat function namespace, two packages defining the
-same private helper is a hard error naming both, rather than a silent double
-definition. Auto-mangling private names would be tidier but would change the
-compiled output of every existing project, and byte-identical output is worth
-more.
+**Every function is mangled, private ones included.** Stan has one flat
+function namespace, so prefixing everything with its package name is what
+makes two packages' same-named private helpers unable to collide. Visibility
+(`pub`, or `exports` for `.stan` files) decides only who may *name* an item
+as `pkg::item`; it has nothing to do with how the item is named in the output.
+
+**Generated code says where it came from.** Every item spliced in from a
+library carries a one-line provenance comment — package, version, visibility,
+and the file and line in the library's own source. It's a package-relative
+path with no timestamp, so the same input and lockfile still produce
+byte-identical output on another machine.
+
+**Templates are the one place laplace parses Stan.** A template body is
+laplace's own construct — delimited, small, and written against laplace — so it
+is fully parsed, and a mistake in one is a loud error on the library author's
+code. Everywhere else, block contents stay opaque text. Even inside a template,
+laplace knows only Stan's *declaration* shape and whether an identifier is
+followed by `(`; it has no expression parser and no type checker.
+
+**`__` is reserved.** Since `pkg::func` becomes `pkg__func`, a hand-written
+identifier containing `__` is rejected in `.laplace` and `.laplacelib`
+sources, and in package names. Generated and hand-written names are then
+provably disjoint rather than merely unlikely to clash. (Plain `.stan` package
+files are exempt — they're ordinary Stan and predate the rule.)
+
+**Functions as arguments are compiled away, not emulated.** One specialized
+copy per distinct function bound, named `<hof>__<bound>`, with the generic
+original never emitted. Copies go at the end of the `functions { }` block so
+each one follows everything it calls — Stan wants a function declared before
+it's used, and a library function bound to one of yours would otherwise be
+emitted before the function it calls.
 
 **Imports are private, and there are no re-exports.** A package may call only
 the packages in its own `[dependencies]`; your model may call only the
