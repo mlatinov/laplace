@@ -287,6 +287,7 @@ fn cmd_build(
     validate: bool,
     split_functions: bool,
 ) -> Result<(), CliError> {
+    manifest::check_project_compiler_requirement(Path::new("laplace.toml"))?;
     let source = fs::read_to_string(file)?;
     let library_block = parse_library_block(&source)?;
     let imports: &[ImportStatement] = library_block
@@ -473,6 +474,7 @@ fn pluralize(count: usize, singular: &'static str, plural: &'static str) -> &'st
 }
 
 fn cmd_install() -> Result<(), CliError> {
+    manifest::check_project_compiler_requirement(Path::new("laplace.toml"))?;
     let lockfile_path = PathBuf::from("laplace.lock");
     let registry = Registry::new(registry_root());
     let cache_root = default_cache_root();
@@ -560,6 +562,7 @@ fn cmd_update(package: &str) -> Result<(), CliError> {
 }
 
 fn cmd_doc(spec: &str, html: bool, output: Option<PathBuf>) -> Result<(), CliError> {
+    manifest::check_project_compiler_requirement(Path::new("laplace.toml"))?;
     let Some((package, func)) = spec.split_once("::") else {
         return Err(CliError::Message(format!(
             "expected `<package>::<function>`, got `{spec}`"

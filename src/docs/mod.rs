@@ -86,6 +86,9 @@ pub enum DocsError {
 
     #[error(transparent)]
     Package(Box<crate::package::PackageError>),
+
+    #[error(transparent)]
+    Manifest(#[from] crate::manifest::ManifestError),
 }
 
 /// Extract every function signature from `package_dir`'s `.stan` file(s)
@@ -166,6 +169,11 @@ pub fn lookup(
             package: package.to_string(),
             path: package_dir,
         });
+    }
+
+    let manifest_path = package_dir.join("laplace.toml");
+    if manifest_path.is_file() {
+        crate::manifest::read_package_manifest(&manifest_path)?;
     }
 
     let mut docs = read_docs_json(&docs_path)?;

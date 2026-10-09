@@ -806,6 +806,11 @@ fn install_one(
     cache_root: &Path,
     pkg: &LockedPackage,
 ) -> Result<(), ResolveError> {
+    // Refuse a package written for a newer compiler before copying it
+    // anywhere: parsing its sources for docs.json would otherwise fail on
+    // syntax this compiler does not know, with a far less useful message.
+    manifest::read_package_manifest(&package_dir.join("laplace.toml"))?;
+
     let dest = cache_root.join(&pkg.name).join(&pkg.version);
     if dest.is_dir() {
         fs::remove_dir_all(&dest).map_err(|source| ResolveError::Io {

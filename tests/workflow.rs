@@ -132,3 +132,98 @@ fn version_verbose_names_commit_target_and_directories() {
         "{text}"
     );
 }
+
+// -- Phase 2: minimum compiler version in manifests -------------------------
+
+const RBF_STAN: &str = "// @laplace\n// @brief RBF covariance.\nmatrix rbf_cov(vector x, real alpha, real rho) {\n  return gp_exp_quad_cov(x, alpha, rho);\n}\n";
+
+const MODEL: &str = "library {\n  import gps\n}\n\ndata {\n  int N;\n  vector[N] x;\n}\nmodel {\n  matrix[N, N] K = gps::rbf_cov(x, 1.0, 1.0);\n}\n";
+
+/// A registry package `gps@<version>` exporting `rbf_cov`, with optional
+/// extra manifest lines (e.g. a `laplace = ...` requirement).
+fn registry_gps(env: &Env, version: &str, extra_manifest: &str) -> PathBuf {
+    let dir = env.registry().join("gps").join(version);
+    write(
+        &dir.join("laplace.toml"),
+        &format!(
+            "name = \"gps\"\nversion = \"{version}\"\n{extra_manifest}exports = [\"rbf_cov\"]\n"
+        ),
+    );
+    write(&dir.join("gps.stan"), RBF_STAN);
+    dir
+}
+
+#[test]
+fn a_package_requiring_a_newer_compiler_is_refused_with_the_update_hint() {
+    let env = setup();
+    registry_gps(&env, "1.0.0", "laplace = \">=99.0\"\n");
+    let project = env.dir("project");
+
+    let out = env.run_in(&project, &["add", "gps"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("requires laplace >=99.0"), "{err}");
+    assert!(
+        err.contains(&format!("this is laplace {}", env!("CARGO_PKG_VERSION"))),
+        "{err}"
+    );
+    assert!(err.contains("laplace self-update"), "{err}");
+}
+
+#[test]
+fn a_satisfied_package_requirement_builds() {
+    let env = setup();
+    registry_gps(&env, "1.0.0", "laplace = \">=0.2\"\n");
+    let project = env.dir("project");
+    write(&project.join("model.laplace"), MODEL);
+
+    let out = env.run_in(&project, &["add", "gps"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = env.run_in(&project, &["build", "model.laplace"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = env.run_in(&project, &["doc", "gps::rbf_cov"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+#[test]
+fn a_project_requiring_a_newer_compiler_refuses_build_install_and_doc() {
+    let env = setup();
+    registry_gps(&env, "1.0.0", "");
+    let project = env.dir("project");
+    write(&project.join("model.laplace"), MODEL);
+    assert!(env.run_in(&project, &["add", "gps"]).status.success());
+
+    // Raise the bar after the fact: the gate applies to every command,
+    // including the lock-only ones.
+    let manifest = read(&project.join("laplace.toml"));
+    write(
+        &project.join("laplace.toml"),
+        &format!("laplace = \">=99\"\n{manifest}"),
+    );
+    for args in [
+        &["build", "model.laplace"][..],
+        &["install"][..],
+        &["doc", "gps::rbf_cov"][..],
+        &["add", "gps"][..],
+    ] {
+        let out = env.run_in(&project, args);
+        assert!(!out.status.success(), "{args:?} should fail");
+        assert!(
+            stderr(&out).contains("requires laplace >=99"),
+            "{args:?}: {}",
+            stderr(&out)
+        );
+    }
+}
+
+#[test]
+fn a_manifest_without_the_laplace_key_imposes_nothing() {
+    let env = setup();
+    registry_gps(&env, "1.0.0", "");
+    let project = env.dir("project");
+    write(&project.join("model.laplace"), MODEL);
+    assert!(env.run_in(&project, &["add", "gps"]).status.success());
+    assert!(!read(&project.join("laplace.toml")).contains("laplace ="));
+    let out = env.run_in(&project, &["build", "model.laplace"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+}
