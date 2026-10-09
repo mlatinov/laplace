@@ -726,3 +726,237 @@ fn a_registry_package_may_not_declare_a_path_dependency() {
         stderr(&out)
     );
 }
+
+// -- Phase 6: `laplace release` -----------------------------------------------
+
+const GPS_LAPLACELIB: &str =
+    "// @laplace\n// @brief RBF.\npub real rbf(real x) {\n  return x;\n}\n";
+
+fn release_repo(env: &Env) -> (PathBuf, PathBuf) {
+    git_repo(
+        env,
+        "gps",
+        &[
+            ("laplace.toml", "name = \"gps\"\nversion = \"0.1.0\"\n"),
+            ("gps.laplacelib", GPS_LAPLACELIB),
+        ],
+    )
+}
+
+fn remote_tags(bare: &Path) -> String {
+    git(bare, &["tag", "--list"])
+}
+
+#[test]
+fn release_dry_run_changes_nothing() {
+    let env = setup();
+    let (work, bare) = release_repo(&env);
+    let head = git(&work, &["rev-parse", "HEAD"]);
+
+    let out = env.run_in(&work, &["release", "minor", "--dry-run"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains("releasing gps 0.1.0 -> 0.2.0 (tag `0.2.0`"),
+        "{text}"
+    );
+    assert!(text.contains("would set version = \"0.2.0\""), "{text}");
+    assert!(
+        text.contains("would push tag `0.2.0` to `origin`"),
+        "{text}"
+    );
+    assert!(text.contains("nothing was changed"), "{text}");
+
+    assert!(read(&work.join("laplace.toml")).contains("version = \"0.1.0\""));
+    assert_eq!(git(&work, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git(&work, &["tag", "--list"]), "");
+    assert_eq!(remote_tags(&bare), "");
+}
+
+#[test]
+fn release_bumps_commits_tags_and_pushes() {
+    let env = setup();
+    let (work, bare) = release_repo(&env);
+
+    let out = env.run_in(&work, &["release", "patch"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("released gps 0.1.1"),
+        "{}",
+        stdout(&out)
+    );
+
+    assert!(read(&work.join("laplace.toml")).contains("version = \"0.1.1\""));
+    assert_eq!(git(&work, &["log", "-1", "--format=%s"]), "release 0.1.1");
+    assert_eq!(git(&work, &["status", "--porcelain"]), "");
+    assert_eq!(remote_tags(&bare), "0.1.1");
+    assert_eq!(
+        git(&bare, &["rev-parse", "main"]),
+        git(&work, &["rev-parse", "HEAD"])
+    );
+    // The tag points at the release commit.
+    assert_eq!(
+        git(&bare, &["rev-parse", "0.1.1^{commit}"]),
+        git(&work, &["rev-parse", "HEAD"])
+    );
+
+    // And the result is installable as a git dependency at that tag.
+    let project = env.dir("project");
+    let out = env.run_in(
+        &project,
+        &[
+            "add",
+            "gps",
+            "--git",
+            bare.to_str().unwrap(),
+            "--tag",
+            "0.1.1",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(!stderr(&out).contains("warning"), "{}", stderr(&out));
+}
+
+#[test]
+fn release_refuses_a_dirty_tree() {
+    let env = setup();
+    let (work, bare) = release_repo(&env);
+    write(
+        &work.join("gps.laplacelib"),
+        &format!("{GPS_LAPLACELIB}\n// wip\n"),
+    );
+
+    let out = env.run_in(&work, &["release", "patch"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("uncommitted changes"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(stderr(&out).contains("gps.laplacelib"), "{}", stderr(&out));
+    assert_eq!(remote_tags(&bare), "");
+}
+
+#[test]
+fn release_refuses_an_existing_tag_locally_or_on_the_remote() {
+    let env = setup();
+    let (work, bare) = release_repo(&env);
+    git(&work, &["tag", "0.2.0"]);
+    let out = env.run_in(&work, &["release", "0.2.0"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("tag `0.2.0` already exists locally"),
+        "{}",
+        stderr(&out)
+    );
+
+    // Someone else pushed 0.3.0 from another clone.
+    let other = env.root.join("other");
+    git(
+        &env.root,
+        &[
+            "clone",
+            "--quiet",
+            bare.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    git(&other, &["tag", "0.3.0"]);
+    git(&other, &["push", "--quiet", "origin", "0.3.0"]);
+    // `release` fetches tags first, so this is caught as a local tag after
+    // the fetch; either way it is refused.
+    let out = env.run_in(&work, &["release", "0.3.0"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("tag `0.3.0` already exists"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn release_refuses_a_branch_behind_its_remote() {
+    let env = setup();
+    let (work, bare) = release_repo(&env);
+    let other = env.root.join("other");
+    git(
+        &env.root,
+        &[
+            "clone",
+            "--quiet",
+            bare.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    write(&other.join("NOTES.md"), "newer\n");
+    git(&other, &["add", "."]);
+    git(&other, &["commit", "--quiet", "-m", "newer"]);
+    git(&other, &["push", "--quiet", "origin", "main"]);
+
+    let out = env.run_in(&work, &["release", "patch"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("behind"), "{}", stderr(&out));
+}
+
+#[test]
+fn release_works_for_a_package_in_a_subdirectory_and_matches_a_v_prefix() {
+    let env = setup();
+    let (work, bare) = git_repo(
+        &env,
+        "mono",
+        &[
+            ("README.md", "# repo\n"),
+            (
+                "laplace/laplace.toml",
+                "name = \"gps\"\nversion = \"1.0.0\"\n",
+            ),
+            ("laplace/gps.laplacelib", GPS_LAPLACELIB),
+        ],
+    );
+    git(&work, &["tag", "v1.0.0"]);
+    git(&work, &["push", "--quiet", "origin", "v1.0.0"]);
+
+    // Run from the repository root: the package directory is found below it.
+    let out = env.run_in(&work, &["release", "minor"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains("tag `v1.1.0`: existing tags use the `v` prefix"),
+        "{text}"
+    );
+    assert!(text.contains("laplace/laplace.toml"), "{text}");
+    assert!(read(&work.join("laplace/laplace.toml")).contains("version = \"1.1.0\""));
+    assert!(remote_tags(&bare).contains("v1.1.0"));
+}
+
+#[test]
+fn release_refuses_a_package_that_is_not_ready() {
+    let env = setup();
+    let (work, bare) = git_repo(
+        &env,
+        "gps",
+        &[
+            (
+                "laplace.toml",
+                "name = \"gps\"\nversion = \"0.1.0\"\n\n[dependencies]\nstats = { path = \"../stats\" }\n",
+            ),
+            (
+                "gps.laplacelib",
+                "// @laplace\n// @brief Orphaned.\n\nreal helper() {\n  return 1;\n}\n",
+            ),
+        ],
+    );
+    let out = env.run_in(&work, &["release", "patch", "--dry-run"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(
+        err.contains("no `.laplacelib` item is marked `pub`"),
+        "{err}"
+    );
+    assert!(
+        err.contains("gps.laplacelib:1: this `// @laplace` block"),
+        "{err}"
+    );
+    assert!(err.contains("`stats` is a path dependency"), "{err}");
+    assert_eq!(remote_tags(&bare), "");
+}

@@ -13,7 +13,7 @@ use laplace::codegen::CodegenOptions;
 use laplace::parser::library_block::{parse_library_block, ImportStatement};
 use laplace::pipeline;
 use laplace::resolve::{self, Registry};
-use laplace::{docs, init, manifest, package, validate};
+use laplace::{docs, init, manifest, package, release, validate};
 
 #[derive(Parser)]
 #[command(
@@ -112,6 +112,21 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Release a package: bump `version` in its laplace.toml, commit,
+    /// tag, and push the branch and the tag. Run inside the package's git
+    /// repository. (This is a *package* release; the laplace compiler
+    /// itself is released separately.)
+    Release {
+        /// An explicit version (`1.4.0`), or `patch`, `minor` or `major`
+        version: String,
+        /// Print every step and check everything, but change nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// The package directory (default: the current directory, or its
+        /// only subdirectory holding a laplace.toml)
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
     /// Print the compiler version (`--verbose` adds the commit, build date,
     /// target and the directories laplace reads and writes)
     Version {
@@ -158,6 +173,11 @@ fn run() -> Result<(), CliError> {
         ),
         Command::Update { package } => cmd_update(&package),
         Command::Doc { spec, html, output } => cmd_doc(&spec, html, output),
+        Command::Release {
+            version,
+            dry_run,
+            path,
+        } => cmd_release(&version, dry_run, path),
         Command::Version { verbose } => {
             cmd_version(verbose);
             Ok(())
@@ -187,6 +207,8 @@ enum CliError {
     Docs(Box<docs::DocsError>),
     #[error(transparent)]
     Validate(Box<validate::ValidateError>),
+    #[error(transparent)]
+    Release(Box<release::ReleaseError>),
     #[error("{0}")]
     Message(String),
     #[error(
@@ -222,6 +244,12 @@ impl From<package::PackageError> for CliError {
 impl From<docs::DocsError> for CliError {
     fn from(err: docs::DocsError) -> Self {
         CliError::Docs(Box::new(err))
+    }
+}
+
+impl From<release::ReleaseError> for CliError {
+    fn from(err: release::ReleaseError) -> Self {
+        CliError::Release(Box::new(err))
     }
 }
 
@@ -735,6 +763,37 @@ fn cmd_doc(spec: &str, html: bool, output: Option<PathBuf>) -> Result<(), CliErr
     } else {
         print!("{}", docs::render_overloads(package, &overloads));
     }
+    Ok(())
+}
+
+fn cmd_release(bump: &str, dry_run: bool, path: Option<PathBuf>) -> Result<(), CliError> {
+    let start = match path {
+        Some(path) => path,
+        None => env::current_dir()?,
+    };
+    let package_dir = release::find_package_dir(&start)?;
+    let plan = release::plan(&package_dir, bump)?;
+
+    for warning in &plan.warnings {
+        eprintln!("warning: {warning}");
+    }
+    println!(
+        "releasing {} {} -> {} (tag `{}`: {})",
+        plan.package, plan.current, plan.new, plan.tag, plan.tag_reason
+    );
+    let verb = if dry_run { "would" } else { "will" };
+    for (i, step) in plan.steps.iter().enumerate() {
+        println!("  {}. {verb} {step}", i + 1);
+    }
+    if dry_run {
+        println!("dry run: nothing was changed");
+        return Ok(());
+    }
+    release::execute(&plan)?;
+    println!(
+        "released {} {} -- depend on it with `laplace add {} --git <url> --tag {}`",
+        plan.package, plan.new, plan.package, plan.tag
+    );
     Ok(())
 }
 

@@ -15,6 +15,7 @@ pub mod monomorphize;
 pub mod package;
 pub mod parser;
 pub mod pipeline;
+pub mod release;
 pub mod resolve;
 pub mod validate;
 pub mod version;
