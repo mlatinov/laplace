@@ -13,7 +13,7 @@ use laplace::codegen::CodegenOptions;
 use laplace::parser::library_block::{parse_library_block, ImportStatement};
 use laplace::pipeline;
 use laplace::resolve::{self, Registry};
-use laplace::{docs, init, manifest, package, release, validate};
+use laplace::{docs, init, manifest, package, release, self_update, validate};
 
 #[derive(Parser)]
 #[command(
@@ -127,6 +127,22 @@ enum Command {
         #[arg(long)]
         path: Option<PathBuf>,
     },
+    /// Update the laplace compiler itself to the latest release (or
+    /// `--version X`). Explicit only: laplace never checks for updates on
+    /// its own.
+    SelfUpdate {
+        /// Only report whether an update exists: exit 0 when up to date,
+        /// 10 when an update is available
+        #[arg(long)]
+        check: bool,
+        /// Install this release instead of the latest (downgrades allowed)
+        #[arg(long = "version", value_name = "VERSION")]
+        target_version: Option<String>,
+        /// For a `cargo install`ed laplace: run the `cargo install` command
+        /// instead of only printing it
+        #[arg(long)]
+        yes: bool,
+    },
     /// Print the compiler version (`--verbose` adds the commit, build date,
     /// target and the directories laplace reads and writes)
     Version {
@@ -137,7 +153,7 @@ enum Command {
 
 fn main() -> ExitCode {
     match run() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(err) => {
             eprintln!("error: {err}");
             ExitCode::FAILURE
@@ -145,8 +161,24 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), CliError> {
-    match Cli::parse().command {
+/// `self-update --check`'s exit status when a newer release exists.
+const EXIT_UPDATE_AVAILABLE: u8 = 10;
+
+fn run() -> Result<ExitCode, CliError> {
+    let command = Cli::parse().command;
+    if let Command::SelfUpdate {
+        check,
+        target_version,
+        yes,
+    } = command
+    {
+        return cmd_self_update(check, target_version.as_deref(), yes);
+    }
+    run_command(command).map(|()| ExitCode::SUCCESS)
+}
+
+fn run_command(command: Command) -> Result<(), CliError> {
+    match command {
         Command::Init { update, prune } => cmd_init(update, prune),
         Command::Build {
             file,
@@ -182,6 +214,7 @@ fn run() -> Result<(), CliError> {
             cmd_version(verbose);
             Ok(())
         }
+        Command::SelfUpdate { .. } => unreachable!("handled in run()"),
     }
 }
 
@@ -209,6 +242,8 @@ enum CliError {
     Validate(Box<validate::ValidateError>),
     #[error(transparent)]
     Release(Box<release::ReleaseError>),
+    #[error(transparent)]
+    SelfUpdate(Box<self_update::SelfUpdateError>),
     #[error("{0}")]
     Message(String),
     #[error(
@@ -244,6 +279,12 @@ impl From<package::PackageError> for CliError {
 impl From<docs::DocsError> for CliError {
     fn from(err: docs::DocsError) -> Self {
         CliError::Docs(Box::new(err))
+    }
+}
+
+impl From<self_update::SelfUpdateError> for CliError {
+    fn from(err: self_update::SelfUpdateError) -> Self {
+        CliError::SelfUpdate(Box::new(err))
     }
 }
 
@@ -795,6 +836,98 @@ fn cmd_release(bump: &str, dry_run: bool, path: Option<PathBuf>) -> Result<(), C
         plan.package, plan.new, plan.package, plan.tag
     );
     Ok(())
+}
+
+fn cmd_self_update(
+    check: bool,
+    target_version: Option<&str>,
+    yes: bool,
+) -> Result<ExitCode, CliError> {
+    use laplace::version;
+    use self_update::InstallMethod;
+
+    let base = env::var("LAPLACE_RELEASES_URL")
+        .unwrap_or_else(|_| self_update::DEFAULT_RELEASES_URL.to_string());
+    let release = self_update::fetch_release(&base, target_version)?;
+    let running = version::current();
+    let Some(available) = release.version() else {
+        return Err(CliError::Message(format!(
+            "release `{}` is not tagged with a version",
+            release.tag_name
+        )));
+    };
+
+    let wanted = match target_version {
+        // An explicit version is taken as asked, downgrades included.
+        Some(_) => available != running,
+        None => available > running,
+    };
+    if !wanted {
+        println!("laplace {running} is up to date (latest release: {available})");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    println!("laplace {running} -> {available}");
+    if let Some(notes) = release
+        .body
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+    {
+        println!("\nwhat changed in {}:", release.tag_name);
+        for line in notes.lines() {
+            println!("  {line}");
+        }
+        println!();
+    }
+    if check {
+        println!("run `laplace self-update` to install it");
+        return Ok(ExitCode::from(EXIT_UPDATE_AVAILABLE));
+    }
+
+    // Overridable so tests can aim the replacement at a scratch file
+    // instead of the test binary itself.
+    let exe = match env::var_os("LAPLACE_SELF_UPDATE_EXE") {
+        Some(path) => PathBuf::from(path),
+        None => env::current_exe()?,
+    };
+    let exe = exe.canonicalize().unwrap_or(exe);
+    let cargo_home = env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")));
+    let has = |program: &str| {
+        env::var_os("PATH")
+            .is_some_and(|paths| env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
+    };
+
+    match self_update::install_method(&exe, cargo_home.as_deref(), has) {
+        InstallMethod::PackageManager { manager, command } => {
+            Err(self_update::SelfUpdateError::PackageManaged {
+                exe,
+                manager,
+                command,
+            }
+            .into())
+        }
+        InstallMethod::Cargo { command } => {
+            if !yes {
+                println!(
+                    "laplace was installed with cargo ({}); update it with:\n  {command}\n\
+                     (or run `laplace self-update --yes` to do that now)",
+                    exe.display()
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
+            println!("running: {command}");
+            self_update::cargo_install(&command)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        InstallMethod::Standalone => {
+            self_update::replace_binary(&release, version::TARGET, &exe)?;
+            println!("updated {} to laplace {available}", exe.display());
+            Ok(ExitCode::SUCCESS)
+        }
+    }
 }
 
 fn cmd_version(verbose: bool) {

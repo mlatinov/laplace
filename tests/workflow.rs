@@ -6,9 +6,6 @@
 //! directories with `HOME` pointed at a fake home. Git remotes are local bare
 //! repositories; nothing here touches the network.
 
-// TODO(phase 7): drop once every helper has a caller.
-#![allow(dead_code)]
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -959,4 +956,258 @@ fn release_refuses_a_package_that_is_not_ready() {
     );
     assert!(err.contains("`stats` is a path dependency"), "{err}");
     assert_eq!(remote_tags(&bare), "");
+}
+
+// -- Phase 7: `laplace self-update` -------------------------------------------
+
+/// A tiny HTTP/1.1 server on 127.0.0.1 serving fixed bodies by path, so
+/// `self-update` is tested without the network. `routes` receives the
+/// server's own base URL, since release metadata links back to it. Lives
+/// until the test process exits.
+fn fake_server(routes: impl FnOnce(&str) -> Vec<(String, Vec<u8>)>) -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let routes = routes(&base);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request_line = String::new();
+            if reader.read_line(&mut request_line).is_err() {
+                continue;
+            }
+            // Drain the request headers.
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok() && !line.trim().is_empty() {
+                line.clear();
+            }
+            let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+            let (status, body): (&str, &[u8]) = match routes.iter().find(|(p, _)| p == path) {
+                Some((_, body)) => ("200 OK", body),
+                None => ("404 Not Found", b""),
+            };
+            let head = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(body);
+        }
+    });
+    base
+}
+
+fn running_target(env: &Env) -> String {
+    let out = env.run_in(&env.root, &["version", "--verbose"]);
+    stdout(&out)
+        .lines()
+        .find_map(|l| l.strip_prefix("target:"))
+        .expect("version --verbose prints the target")
+        .trim()
+        .to_string()
+}
+
+/// Serve a release `tag` (latest, and by tag) whose archive holds a fake
+/// `laplace` script printing `laplace <version>`. With `corrupt_checksum`
+/// the published `.sha256` is wrong. Returns the base URL.
+fn serve_release(env: &Env, tag: &str, corrupt_checksum: bool) -> String {
+    use sha2::Digest;
+    let target = running_target(env);
+    let version = tag.trim_start_matches('v');
+    let staging = env.dir(&format!("staging-{tag}"));
+    let inner = format!("laplace-{target}");
+    let script = staging.join(&inner).join("laplace");
+    write(&script, &format!("#!/bin/sh\necho \"laplace {version}\"\n"));
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    fs::set_permissions(&script, perms).unwrap();
+
+    let archive_name = format!("laplace-{target}.tar.gz");
+    let archive = staging.join(&archive_name);
+    let out = Command::new("tar")
+        .arg("-czf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&staging)
+        .arg(&inner)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let bytes = fs::read(&archive).unwrap();
+    let checksum = if corrupt_checksum {
+        "0".repeat(64)
+    } else {
+        format!("{:x}", sha2::Sha256::digest(&bytes))
+    };
+
+    fake_server(|base| {
+        let metadata = format!(
+            r#"{{"tag_name":"{tag}","body":"- faster builds\n- new `laplace release`","assets":[
+                {{"name":"{archive_name}","browser_download_url":"{base}/dl/{archive_name}"}},
+                {{"name":"{archive_name}.sha256","browser_download_url":"{base}/dl/{archive_name}.sha256"}},
+                {{"name":"laplace-other-target.tar.gz","browser_download_url":"{base}/dl/nope"}}
+            ]}}"#
+        );
+        vec![
+            (
+                "/releases/latest".to_string(),
+                metadata.clone().into_bytes(),
+            ),
+            (format!("/releases/tags/{tag}"), metadata.into_bytes()),
+            (format!("/dl/{archive_name}"), bytes),
+            (
+                format!("/dl/{archive_name}.sha256"),
+                format!("{checksum}  {archive_name}\n").into_bytes(),
+            ),
+        ]
+    })
+}
+
+/// A scratch "installed laplace" to be replaced, outside any package
+/// manager or cargo directory.
+fn scratch_exe(env: &Env) -> PathBuf {
+    let exe = env.dir("bin").join("laplace");
+    write(&exe, "#!/bin/sh\necho \"laplace 0.0.0-old\"\n");
+    exe
+}
+
+fn self_update_env(env: &mut Env, base: &str, exe: &Path) {
+    env.extra_env
+        .push(("LAPLACE_RELEASES_URL".to_string(), base.to_string()));
+    env.extra_env.push((
+        "LAPLACE_SELF_UPDATE_EXE".to_string(),
+        exe.display().to_string(),
+    ));
+}
+
+#[test]
+fn self_update_reports_up_to_date_against_an_older_release() {
+    let mut env = setup();
+    let base = serve_release(&env, "v0.0.1", false);
+    let exe = scratch_exe(&env);
+    self_update_env(&mut env, &base, &exe);
+
+    for args in [&["self-update", "--check"][..], &["self-update"][..]] {
+        let out = env.run_in(&env.root, args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {}", stderr(&out));
+        assert!(stdout(&out).contains("is up to date"), "{}", stdout(&out));
+    }
+    assert!(read(&exe).contains("0.0.0-old"));
+}
+
+#[test]
+fn self_update_check_exits_10_and_shows_what_changed() {
+    let mut env = setup();
+    let base = serve_release(&env, "v99.0.0", false);
+    let exe = scratch_exe(&env);
+    self_update_env(&mut env, &base, &exe);
+
+    let out = env.run_in(&env.root, &["self-update", "--check"]);
+    assert_eq!(out.status.code(), Some(10), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("-> 99.0.0"), "{text}");
+    assert!(text.contains("faster builds"), "{text}");
+    assert!(read(&exe).contains("0.0.0-old"), "--check must not install");
+}
+
+#[test]
+fn self_update_replaces_a_standalone_binary() {
+    let mut env = setup();
+    let base = serve_release(&env, "v99.0.0", false);
+    let exe = scratch_exe(&env);
+    self_update_env(&mut env, &base, &exe);
+
+    let out = env.run_in(&env.root, &["self-update"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("to laplace 99.0.0"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(read(&exe).contains("laplace 99.0.0"));
+    // Nothing staged is left behind beside it.
+    let leftovers: Vec<_> = fs::read_dir(exe.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name() != "laplace")
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[test]
+fn self_update_with_an_explicit_version_fetches_that_tag() {
+    let mut env = setup();
+    let base = serve_release(&env, "v0.0.1", false);
+    let exe = scratch_exe(&env);
+    self_update_env(&mut env, &base, &exe);
+
+    // A downgrade is allowed when asked for explicitly.
+    let out = env.run_in(&env.root, &["self-update", "--version", "0.0.1"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(read(&exe).contains("laplace 0.0.1"));
+}
+
+#[test]
+fn self_update_aborts_on_a_checksum_mismatch_leaving_the_binary_alone() {
+    let mut env = setup();
+    let base = serve_release(&env, "v99.0.0", true);
+    let exe = scratch_exe(&env);
+    let before = read(&exe);
+    self_update_env(&mut env, &base, &exe);
+
+    let out = env.run_in(&env.root, &["self-update"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("checksum mismatch"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("nothing was changed"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(read(&exe), before);
+    assert_eq!(fs::read_dir(exe.parent().unwrap()).unwrap().count(), 1);
+}
+
+#[test]
+fn self_update_refuses_to_overwrite_a_package_managed_binary() {
+    let mut env = setup();
+    let base = serve_release(&env, "v99.0.0", false);
+    // Never written to: the classification alone must stop it.
+    let exe = PathBuf::from("/usr/bin/laplace-test-never-written");
+    self_update_env(&mut env, &base, &exe);
+
+    let out = env.run_in(&env.root, &["self-update"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("which owns that file"), "{err}");
+    assert!(!exe.exists());
+}
+
+#[test]
+fn self_update_under_cargo_bin_prints_the_cargo_command() {
+    let mut env = setup();
+    let base = serve_release(&env, "v99.0.0", false);
+    let cargo_home = env.dir("cargo-home");
+    let exe = cargo_home.join("bin").join("laplace");
+    write(&exe, "old");
+    self_update_env(&mut env, &base, &exe);
+    env.extra_env
+        .push(("CARGO_HOME".to_string(), cargo_home.display().to_string()));
+
+    let out = env.run_in(&env.root, &["self-update"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("cargo install --locked --force --git"),
+        "{}",
+        stdout(&out)
+    );
+    assert_eq!(read(&exe), "old");
 }
