@@ -32,7 +32,17 @@ enum Command {
     /// generate a starter laplace.toml. `exports` is guessed from
     /// @laplace-documented .stan functions; .laplacelib items are public
     /// when marked `pub` and need no manifest entry
-    Init,
+    Init {
+        /// Sync an existing laplace.toml with the sources instead: add
+        /// newly documented .stan functions to `exports`, never remove or
+        /// reorder anything, and warn about stale entries
+        #[arg(long)]
+        update: bool,
+        /// With --update: also delete `exports` entries whose function no
+        /// longer exists
+        #[arg(long, requires = "update")]
+        prune: bool,
+    },
     /// Compile a .laplace file to .stan
     Build {
         file: PathBuf,
@@ -112,7 +122,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), CliError> {
     match Cli::parse().command {
-        Command::Init => cmd_init(),
+        Command::Init { update, prune } => cmd_init(update, prune),
         Command::Build {
             file,
             output,
@@ -209,9 +219,13 @@ impl From<validate::ValidateError> for CliError {
     }
 }
 
-fn cmd_init() -> Result<(), CliError> {
+fn cmd_init(update: bool, prune: bool) -> Result<(), CliError> {
     let dir = env::current_dir()?;
+    if update {
+        return cmd_init_update(&dir, prune);
+    }
     let summary = init::init(&dir)?;
+    let scan = &summary.scan;
 
     println!("wrote laplace.toml for `{}`", summary.name);
     if let Some(dir_name) = &summary.renamed_from {
@@ -222,62 +236,141 @@ fn cmd_init() -> Result<(), CliError> {
             manifest::PACKAGE_NAME_RULE,
         );
     }
-    if summary.source_files == 0 {
+    if scan.source_files == 0 {
         println!(
             "no .stan or .laplacelib files found in this directory -- exports is empty, add \
              entries by hand"
         );
-    } else if summary.included.is_empty() {
-        println!(
-            "none of the functions in the {} source {} has a `// @laplace` doc comment -- \
-             exports is empty, add entries by hand",
-            summary.source_files,
-            pluralize(summary.source_files, "file", "files"),
-        );
+    } else if summary.wrote_exports {
+        if scan.included.is_empty() {
+            println!(
+                "none of the {} {} in the .stan sources has a `// @laplace` doc comment -- \
+                 exports is empty, add entries by hand",
+                scan.stan_functions.len(),
+                pluralize(scan.stan_functions.len(), "function", "functions"),
+            );
+        } else {
+            println!(
+                "included {} exported {}: {}",
+                scan.included.len(),
+                pluralize(scan.included.len(), "function", "functions"),
+                scan.included.join(", "),
+            );
+        }
+        if !scan.excluded.is_empty() {
+            println!(
+                "note: {} undocumented {} left out of exports (add manually if this guess is \
+                 wrong): {}",
+                scan.excluded.len(),
+                pluralize(scan.excluded.len(), "function", "functions"),
+                scan.excluded.join(", "),
+            );
+        }
     } else {
         println!(
-            "included {} exported {}: {}",
-            summary.included.len(),
-            pluralize(summary.included.len(), "function", "functions"),
-            summary.included.join(", "),
+            "no `exports` key written: every source is .laplacelib, where `pub` decides what is \
+             public"
         );
     }
-    if !summary.excluded.is_empty() {
+    report_laplacelib_visibility(scan);
+    report_undeclared_imports(scan, &[]);
+    Ok(())
+}
+
+fn cmd_init_update(dir: &Path, prune: bool) -> Result<(), CliError> {
+    let summary = init::update(dir, prune)?;
+
+    for key in &summary.added_keys {
+        println!("added missing `{key}`");
+    }
+    if !summary.added_exports.is_empty() {
         println!(
-            "note: {} undocumented {} left out of exports (add manually if this guess is wrong): {}",
-            summary.excluded.len(),
-            pluralize(summary.excluded.len(), "function", "functions"),
-            summary.excluded.join(", "),
+            "added {} newly documented {} to exports: {}",
+            summary.added_exports.len(),
+            pluralize(summary.added_exports.len(), "function", "functions"),
+            summary.added_exports.join(", "),
         );
     }
-    if !summary.already_pub.is_empty() {
+    for (name, reason) in &summary.stale_exports {
+        let why = match reason {
+            init::StaleReason::Missing => "no .stan file defines it any more",
+            init::StaleReason::LaplacelibItem => {
+                "it is a .laplacelib item -- write `pub` in front of it instead"
+            }
+        };
+        if summary.pruned {
+            println!("removed `{name}` from exports: {why}");
+        } else {
+            eprintln!(
+                "warning: exports lists `{name}`, but {why} (run `laplace init --update --prune` \
+                 to remove it)"
+            );
+        }
+    }
+    if summary.changed {
+        println!("updated laplace.toml for `{}`", summary.name);
+    } else {
+        println!("laplace.toml is up to date");
+    }
+    report_laplacelib_visibility(&summary.scan);
+    let declared = manifest::read_package_manifest(&dir.join("laplace.toml"))
+        .map(|m| m.dependencies.into_keys().collect::<Vec<_>>())
+        .unwrap_or_default();
+    report_undeclared_imports(&summary.scan, &declared);
+    Ok(())
+}
+
+/// The pub/private summary for `.laplacelib` items, shared by `init` and
+/// `init --update`.
+fn report_laplacelib_visibility(scan: &init::SourceScan) {
+    let documented: Vec<&String> = scan
+        .already_pub
+        .iter()
+        .filter(|name| !scan.pub_undocumented.contains(name))
+        .collect();
+    if !documented.is_empty() {
         println!(
-            "note: {} `.laplacelib` {} already marked `pub` and need no manifest entry: {}",
-            summary.already_pub.len(),
-            pluralize(summary.already_pub.len(), "item is", "items are"),
-            summary.already_pub.join(", "),
+            "public (`pub`, documented): {}",
+            documented
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
         );
     }
-    if !summary.needs_pub.is_empty() {
+    if !scan.pub_undocumented.is_empty() {
         println!(
-            "note: {} `.laplacelib` {} private; write `pub` in front of {} in the source to \
-             publish {} (`exports` does not apply to `.laplacelib` items): {}",
-            summary.needs_pub.len(),
-            pluralize(summary.needs_pub.len(), "item is", "items are"),
-            pluralize(summary.needs_pub.len(), "it", "them"),
-            pluralize(summary.needs_pub.len(), "it", "them"),
-            summary.needs_pub.join(", "),
+            "public (`pub`) but undocumented -- `laplace doc` will have nothing to show until \
+             you add a `// @laplace` comment: {}",
+            scan.pub_undocumented.join(", "),
         );
     }
-    if !summary.imports.is_empty() {
+    if !scan.needs_pub.is_empty() {
+        println!(
+            "private (no `pub`; write `pub` in front of an item to publish it -- `exports` does \
+             not apply to .laplacelib items): {}",
+            scan.needs_pub.join(", "),
+        );
+    }
+}
+
+fn report_undeclared_imports(scan: &init::SourceScan, declared: &[String]) {
+    let missing: Vec<&String> = scan
+        .imports
+        .iter()
+        .filter(|i| !declared.contains(i))
+        .collect();
+    if !missing.is_empty() {
         println!(
             "note: the sources import {} -- add {} under [dependencies] in laplace.toml",
-            summary.imports.join(", "),
-            pluralize(summary.imports.len(), "it", "them"),
+            missing
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            pluralize(missing.len(), "it", "them"),
         );
     }
-
-    Ok(())
 }
 
 fn cmd_build(

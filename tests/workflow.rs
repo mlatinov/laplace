@@ -227,3 +227,89 @@ fn a_manifest_without_the_laplace_key_imposes_nothing() {
     let out = env.run_in(&project, &["build", "model.laplace"]);
     assert!(out.status.success(), "{}", stderr(&out));
 }
+
+// -- Phase 3: `laplace init` fixes -------------------------------------------
+
+#[test]
+fn init_on_a_laplacelib_only_package_has_no_misleading_doc_warning() {
+    let env = setup();
+    let pkg = env.dir("splines");
+    write(
+        &pkg.join("splines.laplacelib"),
+        "// @laplace\n// @brief Knots.\npub vector knots(int k) {\n  return rep_vector(0, k);\n}\n\nreal helper() {\n  return 1;\n}\n",
+    );
+    let out = env.run_in(&pkg, &["init"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = all_output(&out);
+    assert!(!text.contains("doc comment -- exports is empty"), "{text}");
+    assert!(!text.contains("none of the"), "{text}");
+    assert!(text.contains("public (`pub`, documented): knots"), "{text}");
+    assert!(text.contains("private (no `pub`"), "{text}");
+    assert!(text.contains("helper"), "{text}");
+    assert!(!read(&pkg.join("laplace.toml")).contains("exports"));
+}
+
+#[test]
+fn init_still_warns_when_stan_sources_lack_doc_comments() {
+    let env = setup();
+    let pkg = env.dir("gps");
+    write(
+        &pkg.join("gps.stan"),
+        "real jitter(real e) {\n  return e;\n}\n",
+    );
+    let out = env.run_in(&pkg, &["init"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("has a `// @laplace` doc comment"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn init_on_an_existing_manifest_points_at_update() {
+    let env = setup();
+    let pkg = env.dir("gps");
+    write(
+        &pkg.join("laplace.toml"),
+        "name = \"gps\"\nversion = \"9.9.9\"\n",
+    );
+    let out = env.run_in(&pkg, &["init"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("already exists -- run `laplace init --update` to sync it"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(read(&pkg.join("laplace.toml")).contains("9.9.9"));
+}
+
+#[test]
+fn init_update_adds_new_exports_once_and_warns_about_stale_ones() {
+    let env = setup();
+    let pkg = env.dir("gps");
+    write(&pkg.join("gps.stan"), RBF_STAN);
+    write(
+        &pkg.join("laplace.toml"),
+        "name = \"gps_custom\"\nversion = \"2.0.0\"\nexports = [\"removed_fn\"]\n",
+    );
+
+    let out = env.run_in(&pkg, &["init", "--update"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("rbf_cov"), "{}", stdout(&out));
+    assert!(stderr(&out).contains("`removed_fn`"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("--prune"), "{}", stderr(&out));
+    let manifest = read(&pkg.join("laplace.toml"));
+    assert!(
+        manifest.contains("gps_custom") && manifest.contains("2.0.0"),
+        "{manifest}"
+    );
+
+    let again = env.run_in(&pkg, &["init", "--update"]);
+    assert!(stdout(&again).contains("up to date"), "{}", stdout(&again));
+    assert_eq!(read(&pkg.join("laplace.toml")), manifest);
+
+    let pruned = env.run_in(&pkg, &["init", "--update", "--prune"]);
+    assert!(pruned.status.success(), "{}", stderr(&pruned));
+    assert!(!read(&pkg.join("laplace.toml")).contains("removed_fn"));
+}
