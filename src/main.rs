@@ -11,8 +11,8 @@ use clap::{Parser, Subcommand};
 
 use laplace::codegen::CodegenOptions;
 use laplace::parser::library_block::{parse_library_block, ImportStatement};
-use laplace::resolve::{self, Registry};
 use laplace::pipeline;
+use laplace::resolve::{self, Registry};
 use laplace::{docs, init, manifest, package, validate};
 
 #[derive(Parser)]
@@ -394,11 +394,7 @@ fn cmd_build(
 
     for file in &generated.function_files {
         let path = output_dir.join(&file.file_name);
-        println!(
-            "wrote {} ({})",
-            path.display(),
-            file.packages.join(", "),
-        );
+        println!("wrote {} ({})", path.display(), file.packages.join(", "),);
     }
     if !generated.function_files.is_empty() {
         println!(
@@ -609,10 +605,7 @@ mod tests {
     #[test]
     fn parses_bare_and_pinned_package_specs() {
         assert_eq!(parse_package_spec("gps"), ("gps", None));
-        assert_eq!(
-            parse_package_spec("gps@1.0.0"),
-            ("gps", Some("1.0.0"))
-        );
+        assert_eq!(parse_package_spec("gps@1.0.0"), ("gps", Some("1.0.0")));
     }
 
     #[test]

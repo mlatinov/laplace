@@ -272,7 +272,8 @@ mod tests {
 
     #[test]
     fn items_are_private_unless_marked_pub() {
-        let source = "pub real a(real x) {\n  return b(x);\n}\n\nreal b(real x) {\n  return x;\n}\n";
+        let source =
+            "pub real a(real x) {\n  return b(x);\n}\n\nreal b(real x) {\n  return x;\n}\n";
         let items = items_of(source);
         assert_eq!(
             items
@@ -347,7 +348,10 @@ mod tests {
     fn pub_with_nothing_after_it_is_an_error() {
         let source = "real a() {\n  return 1;\n}\npub\n";
         let err = find_pub_markers(source, &whole(source)).unwrap_err();
-        assert!(matches!(err, VisibilityError::DanglingPub { .. }), "{err:?}");
+        assert!(
+            matches!(err, VisibilityError::DanglingPub { .. }),
+            "{err:?}"
+        );
         assert_eq!(&source[err.offset()..err.offset() + 3], "pub");
     }
 
@@ -361,7 +365,10 @@ mod tests {
         let starts: Vec<usize> = markers.iter().map(|m| m.item_start).collect();
         let cut = apply_cuts(source, &cuts, &starts);
         let err = resolve_items(&extract_signatures(&cut.text), &cut.markers).unwrap_err();
-        assert!(matches!(err, VisibilityError::DanglingPub { .. }), "{err:?}");
+        assert!(
+            matches!(err, VisibilityError::DanglingPub { .. }),
+            "{err:?}"
+        );
     }
 
     #[test]

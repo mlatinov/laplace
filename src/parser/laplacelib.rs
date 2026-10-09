@@ -28,9 +28,9 @@ use thiserror::Error;
 use crate::parser::blocks::{find_top_level_blocks, BlockKind};
 use crate::parser::identifiers::{check_identifiers, ReservedIdentifier};
 use crate::parser::library_block::{parse_import_statements, ImportStatement, LibraryBlockError};
+use crate::parser::macros::{find_macros, LocatedMacro, MacroDef, MacroError};
 use crate::parser::origin::{apply_cuts, line_col, LineSegment};
 use crate::parser::signatures::extract_signatures;
-use crate::parser::macros::{find_macros, LocatedMacro, MacroDef, MacroError};
 use crate::parser::template::{find_templates, LocatedTemplate, TemplateDef, TemplateError};
 use crate::parser::visibility::{
     find_pub_markers, resolve_items, LibraryItem, Visibility, VisibilityError,
@@ -236,9 +236,9 @@ pub fn parse(path: &Path, source: &str) -> Result<LaplaceLibFile, LaplaceLibErro
     let blocks: Vec<_> = find_top_level_blocks(source)
         .into_iter()
         .filter(|block| {
-            !definition_ranges
-                .iter()
-                .any(|range| range.start <= block.byte_range.start && block.byte_range.start < range.end)
+            !definition_ranges.iter().any(|range| {
+                range.start <= block.byte_range.start && block.byte_range.start < range.end
+            })
         })
         .collect();
 
@@ -324,11 +324,7 @@ pub fn parse(path: &Path, source: &str) -> Result<LaplaceLibFile, LaplaceLibErro
     let item_starts: Vec<usize> = markers
         .iter()
         .map(|m| m.item_start)
-        .filter(|start| {
-            !definition_ranges
-                .iter()
-                .any(|range| range.contains(start))
-        })
+        .filter(|start| !definition_ranges.iter().any(|range| range.contains(start)))
         .collect();
 
     // Two passes: the blank lines a stripped block leaves behind can only
@@ -383,7 +379,6 @@ pub fn parse(path: &Path, source: &str) -> Result<LaplaceLibFile, LaplaceLibErro
     })
 }
 
-
 /// The leading and trailing runs of whitespace-only lines in `body`.
 ///
 /// Removing a `library { }` block or unwrapping a `functions { }` wrapper
@@ -404,11 +399,17 @@ fn blank_edge_ranges(body: &str) -> Vec<Range<usize>> {
         body[start..end].trim().is_empty()
     };
 
-    let Some(&first) = line_starts.iter().find(|&&start| start < body.len() && !is_blank(start))
+    let Some(&first) = line_starts
+        .iter()
+        .find(|&&start| start < body.len() && !is_blank(start))
     else {
         // Nothing but blank lines: the whole body goes.
         let whole = 0..body.len();
-        return if body.is_empty() { Vec::new() } else { vec![whole] };
+        return if body.is_empty() {
+            Vec::new()
+        } else {
+            vec![whole]
+        };
     };
     let last = line_starts
         .iter()
@@ -416,9 +417,7 @@ fn blank_edge_ranges(body: &str) -> Vec<Range<usize>> {
         .find(|&&start| start < body.len() && !is_blank(start))
         .copied()
         .expect("a non-blank line exists");
-    let last_end = body[last..]
-        .find('\n')
-        .map_or(body.len(), |i| last + i + 1);
+    let last_end = body[last..].find('\n').map_or(body.len(), |i| last + i + 1);
 
     let mut ranges = Vec::new();
     if first > 0 {
@@ -441,7 +440,8 @@ mod tests {
 
     #[test]
     fn bare_function_definitions_with_no_blocks_pass_straight_through() {
-        let source = "// @laplace\n// @brief Adds one.\nreal add_one(real x) {\n  return x + 1;\n}\n";
+        let source =
+            "// @laplace\n// @brief Adds one.\nreal add_one(real x) {\n  return x + 1;\n}\n";
         let parsed = parse_str(source).unwrap();
         assert!(parsed.imports.is_empty());
         assert_eq!(parsed.body, source);
@@ -478,7 +478,10 @@ mod tests {
                 version: Some("1.0.0".to_string()),
             }]
         );
-        assert_eq!(parsed.body, "real f(real x) {\n  return stats::mean_(x);\n}\n");
+        assert_eq!(
+            parsed.body,
+            "real f(real x) {\n  return stats::mean_(x);\n}\n"
+        );
     }
 
     #[test]
@@ -490,7 +493,8 @@ mod tests {
 
     #[test]
     fn a_library_block_plus_a_functions_wrapper_works() {
-        let source = "library {\n  import stats\n}\nfunctions {\n  real f() { return stats::m(); }\n}\n";
+        let source =
+            "library {\n  import stats\n}\nfunctions {\n  real f() { return stats::m(); }\n}\n";
         let parsed = parse_str(source).unwrap();
         assert_eq!(parsed.imports.len(), 1);
         assert_eq!(parsed.body, "  real f() { return stats::m(); }\n");
@@ -560,7 +564,11 @@ mod tests {
 
         assert_eq!(parsed.public_names(), vec!["mean_"]);
         assert_eq!(
-            parsed.items.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(),
+            parsed
+                .items
+                .iter()
+                .map(|i| i.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["mean_", "sum_values"],
         );
         assert!(!parsed.body.contains("pub"), "{}", parsed.body);
@@ -616,11 +624,13 @@ mod tests {
 
     #[test]
     fn a_template_is_parsed_and_cut_entirely_out_of_the_body() {
-        let source = format!("{NCP}
+        let source = format!(
+            "{NCP}
 real helper(real x) {{
   return x;
 }}
-");
+"
+        );
         let parsed = parse_str(&source).unwrap();
 
         assert_eq!(parsed.templates.len(), 1);
@@ -642,24 +652,32 @@ real helper(real x) {{
 
     #[test]
     fn a_templates_pub_marker_does_not_leak_onto_the_next_function() {
-        let source = format!("{NCP}
+        let source = format!(
+            "{NCP}
 real helper(real x) {{
   return x;
 }}
-");
+"
+        );
         let parsed = parse_str(&source).unwrap();
         // `helper` has no `pub` of its own, and the template's must not
         // be mistaken for one.
-        assert!(parsed.public_names().is_empty(), "{:?}", parsed.public_names());
+        assert!(
+            parsed.public_names().is_empty(),
+            "{:?}",
+            parsed.public_names()
+        );
     }
 
     #[test]
     fn templates_and_pub_functions_coexist() {
-        let source = format!("{NCP}
+        let source = format!(
+            "{NCP}
 pub real helper(real x) {{
   return x;
 }}
-");
+"
+        );
         let parsed = parse_str(&source).unwrap();
         assert_eq!(parsed.public_templates(), vec!["ncp"]);
         assert_eq!(parsed.public_names(), vec!["helper"]);
@@ -692,11 +710,13 @@ pub real helper(real x) {{
 
     #[test]
     fn a_template_and_a_library_block_together_work() {
-        let source = format!("library {{
+        let source = format!(
+            "library {{
   import other
 }}
 
-{NCP}");
+{NCP}"
+        );
         let parsed = parse_str(&source).unwrap();
         assert_eq!(parsed.imports.len(), 1);
         assert_eq!(parsed.templates.len(), 1);
@@ -708,13 +728,13 @@ pub real helper(real x) {{
     #[test]
     fn body_offsets_map_back_to_the_lines_they_were_written_on() {
         let source = concat!(
-            "library {\n",      // 1
-            "  import stats\n", // 2
-            "}\n",              // 3
-            "\n",               // 4
-            "pub real fit() {\n",  // 5
-            "  return 1;\n",    // 6
-            "}\n",              // 7
+            "library {\n",        // 1
+            "  import stats\n",   // 2
+            "}\n",                // 3
+            "\n",                 // 4
+            "pub real fit() {\n", // 5
+            "  return 1;\n",      // 6
+            "}\n",                // 7
         );
         let parsed = parse_str(source).unwrap();
         let origin = PackageOrigin {
@@ -753,7 +773,10 @@ pub real helper(real x) {{
     fn a_double_underscore_identifier_is_rejected_with_a_location() {
         let source = "real my__helper(real x) {\n  return x;\n}\n";
         let err = parse_str(source).unwrap_err();
-        assert!(matches!(err, LaplaceLibError::ReservedIdentifier { .. }), "{err:?}");
+        assert!(
+            matches!(err, LaplaceLibError::ReservedIdentifier { .. }),
+            "{err:?}"
+        );
         let rendered = err.to_string();
         assert!(rendered.contains("my__helper"), "{rendered}");
         assert!(rendered.contains("stats.laplacelib:1:6"), "{rendered}");

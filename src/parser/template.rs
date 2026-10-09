@@ -193,7 +193,9 @@ pub enum TemplateError {
         offset: usize,
     },
 
-    #[error("template `{name}`: a template body holds only Stan block pieces, and `{text}` is not one")]
+    #[error(
+        "template `{name}`: a template body holds only Stan block pieces, and `{text}` is not one"
+    )]
     StrayText {
         name: String,
         text: String,
@@ -310,13 +312,14 @@ pub fn find_templates(
             return Err(malformed());
         }
         let close_paren = matching_paren(source, open_paren).ok_or_else(malformed)?;
-        let params = parse_declarations(&source[open_paren + 1..close_paren]).map_err(|source| {
-            TemplateError::Placeholder {
-                name: name.clone(),
-                offset: open_paren,
-                source,
-            }
-        })?;
+        let params =
+            parse_declarations(&source[open_paren + 1..close_paren]).map_err(|source| {
+                TemplateError::Placeholder {
+                    name: name.clone(),
+                    offset: open_paren,
+                    source,
+                }
+            })?;
 
         // body
         let open_brace = skip_space(source, close_paren + 1);
@@ -597,7 +600,11 @@ mod tests {
         let template = parse_one(NCP);
         assert_eq!(template.name, "ncp");
         assert_eq!(
-            template.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            template
+                .params
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["name", "N"]
         );
         assert_eq!(
@@ -608,7 +615,11 @@ mod tests {
                 BlockKind::Model
             ]
         );
-        assert!(template.piece(BlockKind::Parameters).unwrap().body.contains("${name}_raw"));
+        assert!(template
+            .piece(BlockKind::Parameters)
+            .unwrap()
+            .body
+            .contains("${name}_raw"));
         assert!(template.unused.is_empty());
     }
 
@@ -664,12 +675,16 @@ mod tests {
 
     #[test]
     fn a_template_in_a_comment_is_not_a_template() {
-        assert!(parse("// @template ncp($n: ident) { }\n").unwrap().is_empty());
+        assert!(parse("// @template ncp($n: ident) { }\n")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn a_source_with_no_templates_yields_none() {
-        assert!(parse("real f(real x) {\n  return x;\n}\n").unwrap().is_empty());
+        assert!(parse("real f(real x) {\n  return x;\n}\n")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -688,9 +703,14 @@ mod tests {
 
     #[test]
     fn a_functions_block_in_a_template_is_rejected() {
-        let err = error("@template t($n: ident) {\n  functions {\n    real f() { return 1; }\n  }\n}\n");
+        let err =
+            error("@template t($n: ident) {\n  functions {\n    real f() { return 1; }\n  }\n}\n");
         assert!(matches!(err, TemplateError::BadBlock { .. }), "{err:?}");
-        assert!(err.help().contains("functions` is not one"), "{}", err.help());
+        assert!(
+            err.help().contains("functions` is not one"),
+            "{}",
+            err.help()
+        );
     }
 
     #[test]
@@ -704,7 +724,10 @@ mod tests {
         let err = error(
             "@template t($n: ident) {\n  model {\n    $n ~ std_normal();\n  }\n  model {\n    $n ~ std_normal();\n  }\n}\n",
         );
-        assert!(matches!(err, TemplateError::DuplicateBlock { .. }), "{err:?}");
+        assert!(
+            matches!(err, TemplateError::DuplicateBlock { .. }),
+            "{err:?}"
+        );
         assert!(err.help().contains("merge"), "{}", err.help());
     }
 
@@ -726,9 +749,7 @@ mod tests {
 
     #[test]
     fn declaring_a_variable_from_an_expr_placeholder_is_rejected() {
-        let err = error(
-            "@template t($n: expr) {\n  parameters {\n    real ${n}_raw;\n  }\n}\n",
-        );
+        let err = error("@template t($n: expr) {\n  parameters {\n    real ${n}_raw;\n  }\n}\n");
         assert!(matches!(err, TemplateError::Body(_)), "{err:?}");
         assert!(err.help().contains("ident"), "{}", err.help());
     }
@@ -745,7 +766,11 @@ mod tests {
         let err = error("@template t($n: ident) {\n  model {\n    $n ~ normal(mu, 1);\n  }\n}\n");
         assert!(matches!(err, TemplateError::Body(_)), "{err:?}");
         assert!(err.to_string().contains("`mu`"), "{err}");
-        assert!(err.help().contains("pass `mu` in as a placeholder"), "{}", err.help());
+        assert!(
+            err.help().contains("pass `mu` in as a placeholder"),
+            "{}",
+            err.help()
+        );
     }
 
     #[test]
@@ -764,9 +789,8 @@ mod tests {
 
     #[test]
     fn a_nested_use_is_rejected() {
-        let err = error(
-            "@template t($n: ident) {\n  model {\n    @use other::thing($n);\n  }\n}\n",
-        );
+        let err =
+            error("@template t($n: ident) {\n  model {\n    @use other::thing($n);\n  }\n}\n");
         assert!(matches!(err, TemplateError::Body(_)), "{err:?}");
     }
 
@@ -813,12 +837,16 @@ mod tests {
     fn a_use_statement_takes_its_whole_line_with_it() {
         let source = "@use stats::ncp(theta, K);\ndata {\n}\n";
         let found = find_use_statements(source).unwrap();
-        assert_eq!(&source[found[0].range.clone()], "@use stats::ncp(theta, K);\n");
+        assert_eq!(
+            &source[found[0].range.clone()],
+            "@use stats::ncp(theta, K);\n"
+        );
     }
 
     #[test]
     fn an_argument_may_be_a_whole_expression() {
-        let found = find_use_statements("@use stats::observation(y, mu + theta, sigma);\n").unwrap();
+        let found =
+            find_use_statements("@use stats::observation(y, mu + theta, sigma);\n").unwrap();
         assert_eq!(found[0].args, vec!["y", "mu + theta", "sigma"]);
     }
 
@@ -836,23 +864,30 @@ mod tests {
 
     #[test]
     fn several_use_statements_are_found_in_source_order() {
-        let found =
-            find_use_statements("@use s::a(x);\n@use s::b(y);\n").unwrap();
+        let found = find_use_statements("@use s::a(x);\n@use s::b(y);\n").unwrap();
         assert_eq!(
-            found.iter().map(|u| u.template.as_str()).collect::<Vec<_>>(),
+            found
+                .iter()
+                .map(|u| u.template.as_str())
+                .collect::<Vec<_>>(),
             vec!["a", "b"]
         );
     }
 
     #[test]
     fn a_use_in_a_comment_is_ignored() {
-        assert!(find_use_statements("// @use s::t(x);\n").unwrap().is_empty());
+        assert!(find_use_statements("// @use s::t(x);\n")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn an_unqualified_use_says_to_name_the_package() {
         let err = find_use_statements("@use ncp(theta, K);\n").unwrap_err();
-        assert!(matches!(err, TemplateError::UnqualifiedUse { .. }), "{err:?}");
+        assert!(
+            matches!(err, TemplateError::UnqualifiedUse { .. }),
+            "{err:?}"
+        );
         assert!(err.help().contains("pkg::ncp"), "{}", err.help());
     }
 

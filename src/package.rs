@@ -16,9 +16,9 @@ use thiserror::Error;
 use crate::codegen::InstalledPackage;
 use crate::manifest::{self, ManifestError, PackageManifest};
 use crate::parser::laplacelib::{self, LaplaceLibError, LAPLACELIB_EXTENSION};
+use crate::parser::macros::LocatedMacro;
 use crate::parser::origin::{FileOrigin, LineSegment, PackageOrigin};
 use crate::parser::signatures::extract_signatures;
-use crate::parser::macros::LocatedMacro;
 use crate::parser::template::LocatedTemplate;
 use crate::parser::visibility::{ItemKind, Visibility};
 
@@ -418,7 +418,10 @@ mod tests {
         );
 
         let err = load(tmp.path(), "regression").unwrap_err();
-        assert!(matches!(err, PackageError::UndeclaredImport { .. }), "{err:?}");
+        assert!(
+            matches!(err, PackageError::UndeclaredImport { .. }),
+            "{err:?}"
+        );
         let rendered = err.to_string();
         assert!(rendered.contains("stats"), "{rendered}");
         assert!(rendered.contains("[dependencies]"), "{rendered}");
@@ -432,7 +435,11 @@ mod tests {
             "laplace.toml",
             "name = \"bad\"\nversion = \"1.0.0\"\nexports = []\n",
         );
-        write(tmp.path(), "bad.laplacelib", "model {\n  y ~ normal(0, 1);\n}\n");
+        write(
+            tmp.path(),
+            "bad.laplacelib",
+            "model {\n  y ~ normal(0, 1);\n}\n",
+        );
 
         let err = load(tmp.path(), "bad").unwrap_err();
         assert!(matches!(err, PackageError::LaplaceLib(_)), "{err:?}");

@@ -315,13 +315,10 @@ fn collect_constraints(
 
     for (name, version) in selected {
         for (dep_name, requirement) in provider.dependencies_of(name, version)? {
-            constraints
-                .entry(dep_name)
-                .or_default()
-                .push(Constraint {
-                    requirer: format!("`{name}@{version}`"),
-                    requirement,
-                });
+            constraints.entry(dep_name).or_default().push(Constraint {
+                requirer: format!("`{name}@{version}`"),
+                requirement,
+            });
         }
     }
 
@@ -394,8 +391,7 @@ fn pick_version(
         });
     }
 
-    let satisfies =
-        |version: &Version| ranges.iter().all(|(req, _)| req.matches(version));
+    let satisfies = |version: &Version| ranges.iter().all(|(req, _)| req.matches(version));
 
     // A still-valid preference wins over the newest match, so a lock stays
     // put unless something actually forces it to move.
@@ -739,15 +735,20 @@ mod tests {
 
     #[test]
     fn detects_an_indirect_two_package_cycle() {
-        let provider = TestProvider::new()
-            .add("a", "1.0.0", &[("b", "^1.0")])
-            .add("b", "1.0.0", &[("a", "^1.0")]);
+        let provider = TestProvider::new().add("a", "1.0.0", &[("b", "^1.0")]).add(
+            "b",
+            "1.0.0",
+            &[("a", "^1.0")],
+        );
 
         let err = resolve_graph(&[root("a", "^1.0")], &provider).unwrap_err();
         let GraphError::Cycle { path } = &err else {
             panic!("expected a cycle, got {err:?}");
         };
-        assert_eq!(path, &vec!["a".to_string(), "b".to_string(), "a".to_string()]);
+        assert_eq!(
+            path,
+            &vec!["a".to_string(), "b".to_string(), "a".to_string()]
+        );
         assert_eq!(err.to_string(), "dependency cycle: a -> b -> a");
     }
 
@@ -865,7 +866,10 @@ mod tests {
             ),
         ];
         let err = resolve_graph(&roots, &provider).unwrap_err();
-        assert!(matches!(err, GraphError::GitSourceConflict { .. }), "{err:?}");
+        assert!(
+            matches!(err, GraphError::GitSourceConflict { .. }),
+            "{err:?}"
+        );
     }
 
     #[test]

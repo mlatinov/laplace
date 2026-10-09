@@ -118,12 +118,18 @@ impl Project {
     /// `--validate` tests never depend on a real stanc install.
     fn fake_stanc(&mut self, exit_code: i32, output: &str) {
         let script = self.dir.join("fake_stanc.sh");
-        fs::write(&script, format!("#!/bin/sh\ncat <<'EOF' 1>&2\n{output}\nEOF\nexit {exit_code}\n")).unwrap();
+        fs::write(
+            &script,
+            format!("#!/bin/sh\ncat <<'EOF' 1>&2\n{output}\nEOF\nexit {exit_code}\n"),
+        )
+        .unwrap();
         let mut perms = fs::metadata(&script).unwrap().permissions();
         std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
         fs::set_permissions(&script, perms).unwrap();
-        self.extra_env
-            .push(("LAPLACE_STANC".to_string(), script.to_string_lossy().to_string()));
+        self.extra_env.push((
+            "LAPLACE_STANC".to_string(),
+            script.to_string_lossy().to_string(),
+        ));
     }
 }
 
@@ -218,7 +224,10 @@ real jitter(real epsilon) {
 #[test]
 fn init_does_not_overwrite_an_existing_manifest() {
     let project = setup();
-    project.write_project_file("laplace.toml", "name = \"gps\"\nversion = \"9.9.9\"\nexports = []\n");
+    project.write_project_file(
+        "laplace.toml",
+        "name = \"gps\"\nversion = \"9.9.9\"\nexports = []\n",
+    );
     project.write_project_file(
         "gps.stan",
         "real jitter(real epsilon) {\n  return epsilon;\n}\n",
@@ -283,7 +292,11 @@ fn add_install_build_end_to_end() {
     fs::write(project.dir.join("build/model.stan"), "stale\n").unwrap();
     let stale_check = project.run(&["build", "model.laplace", "--check"]);
     assert!(!stale_check.status.success());
-    assert!(stderr(&stale_check).contains("out of date"), "{}", stderr(&stale_check));
+    assert!(
+        stderr(&stale_check).contains("out of date"),
+        "{}",
+        stderr(&stale_check)
+    );
 
     // The stale file on disk must be untouched by --check.
     assert_eq!(project.read_project_file("build/model.stan"), "stale\n");
@@ -526,7 +539,10 @@ fn build_validate_reports_stanc_errors_annotated_with_the_culprit_package() {
         .unwrap()
         + 1;
 
-    project.fake_stanc(1, &format!("Semantic error at 'model.stan', line {gps_line}, column 1"));
+    project.fake_stanc(
+        1,
+        &format!("Semantic error at 'model.stan', line {gps_line}, column 1"),
+    );
     let out = project.run(&["build", "model.laplace", "--validate"]);
     assert!(!out.status.success());
     let err = stderr(&out);
@@ -539,9 +555,10 @@ fn build_validate_without_stanc_installed_fails_clearly() {
     let mut project = setup();
     let source = "data {\n  int n;\n}\nmodel {\n}\n";
     project.write_project_file("model.laplace", source);
-    project
-        .extra_env
-        .push(("LAPLACE_STANC".to_string(), "laplace-test-no-such-command".to_string()));
+    project.extra_env.push((
+        "LAPLACE_STANC".to_string(),
+        "laplace-test-no-such-command".to_string(),
+    ));
 
     let out = project.run(&["build", "model.laplace", "--validate"]);
     assert!(!out.status.success());
@@ -559,9 +576,10 @@ fn build_check_never_invokes_validate() {
 
     // If --validate ran here it would fail (bogus command); --check must
     // short-circuit before ever reaching it.
-    project
-        .extra_env
-        .push(("LAPLACE_STANC".to_string(), "laplace-test-no-such-command".to_string()));
+    project.extra_env.push((
+        "LAPLACE_STANC".to_string(),
+        "laplace-test-no-such-command".to_string(),
+    ));
     let out = project.run(&["build", "model.laplace", "--check", "--validate"]);
     assert!(out.status.success(), "{}", stderr(&out));
 }
@@ -581,7 +599,11 @@ fn split_functions_emits_an_include_and_a_stanfunctions_file() {
 
     let out = p.run(&["build", "model.laplace", "--split-functions"]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("gps.stanfunctions"), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("gps.stanfunctions"),
+        "{}",
+        stdout(&out)
+    );
     assert!(stdout(&out).contains("--include-paths"), "{}", stdout(&out));
 
     let stan = p.read_project_file("build/model.stan");
@@ -639,7 +661,12 @@ fn split_functions_is_a_no_op_for_a_project_with_no_imports() {
 #[test]
 fn a_multi_file_package_concatenates_into_one_stanfunctions_file() {
     let p = setup();
-    p.write_package("multi", "1.0.0", &["one", "two"], "real one() {\n  return 1;\n}\n");
+    p.write_package(
+        "multi",
+        "1.0.0",
+        &["one", "two"],
+        "real one() {\n  return 1;\n}\n",
+    );
     p.write_package_file(
         "multi",
         "1.0.0",
@@ -682,7 +709,11 @@ fn split_functions_check_flags_a_stale_stanfunctions_file() {
     p.write_project_file("build/gps.stanfunctions", "// tampered\n");
     let out = p.run(&["build", "model.laplace", "--split-functions", "--check"]);
     assert!(!out.status.success());
-    assert!(stderr(&out).contains("gps.stanfunctions"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("gps.stanfunctions"),
+        "{}",
+        stderr(&out)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -774,7 +805,10 @@ fn a_three_package_chain_builds_with_every_level_mangled() {
     let stan = p.read_project_file("build/model.stan");
     // The transitive package is present and callable from its dependent.
     assert!(stan.contains("real stats__mean_(vector x)"), "{stan}");
-    assert!(stan.contains("vector regression__centre(vector x)"), "{stan}");
+    assert!(
+        stan.contains("vector regression__centre(vector x)"),
+        "{stan}"
+    );
     assert!(stan.contains("return x - stats__mean_(x);"), "{stan}");
     assert!(stan.contains("regression__centre(y)"), "{stan}");
     // No unresolved `::` and no leftover `library { }` block survive.
@@ -889,10 +923,7 @@ fn a_diamond_with_incompatible_ranges_names_both_requirers() {
     );
 
     // Pin the project to stats ^1.0, which regression's ^2.0 contradicts.
-    p.write_project_file(
-        "laplace.toml",
-        "[dependencies]\nstats = \"^1.0\"\n",
-    );
+    p.write_project_file("laplace.toml", "[dependencies]\nstats = \"^1.0\"\n");
 
     let out = p.run(&["add", "regression"]);
     assert!(!out.status.success());
@@ -967,15 +998,24 @@ fn a_transitive_dependency_is_flattened_into_its_parents_stanfunctions_file() {
     assert!(out.status.success(), "{}", stderr(&out));
 
     let stan = p.read_project_file("build/model.stan");
-    assert!(stan.contains("#include \"regression.stanfunctions\""), "{stan}");
+    assert!(
+        stan.contains("#include \"regression.stanfunctions\""),
+        "{stan}"
+    );
     // `stats` is private to `regression`, so it gets no file of its own.
     assert!(!stan.contains("stats.stanfunctions"), "{stan}");
     assert!(!p.project_file_exists("build/stats.stanfunctions"));
 
     let funcs = p.read_project_file("build/regression.stanfunctions");
     assert!(funcs.contains("real stats__mean_(vector x)"), "{funcs}");
-    assert!(funcs.contains("vector regression__centre(vector x)"), "{funcs}");
-    assert!(funcs.contains("Bundled dependencies of `regression`: stats 1.0.0"), "{funcs}");
+    assert!(
+        funcs.contains("vector regression__centre(vector x)"),
+        "{funcs}"
+    );
+    assert!(
+        funcs.contains("Bundled dependencies of `regression`: stats 1.0.0"),
+        "{funcs}"
+    );
     assert!(funcs.find("stats__mean_").unwrap() < funcs.find("regression__centre").unwrap());
     assert!(!funcs.contains("functions {"), "{funcs}");
 }
@@ -1013,7 +1053,10 @@ model {
 
     let stats_funcs = p.read_project_file("build/stats.stanfunctions");
     let reg_funcs = p.read_project_file("build/regression.stanfunctions");
-    assert!(stats_funcs.contains("real stats__mean_(vector x)"), "{stats_funcs}");
+    assert!(
+        stats_funcs.contains("real stats__mean_(vector x)"),
+        "{stats_funcs}"
+    );
     assert!(
         !reg_funcs.contains("real stats__mean_(vector x)"),
         "the shared package must not be duplicated:\n{reg_funcs}"
@@ -1054,7 +1097,13 @@ fn a_laplacelib_importing_something_its_manifest_omits_fails_clearly() {
     let p = setup();
     p.write_package("stats", "1.0.0", &["mean_"], STATS_STAN);
     // No `[dependencies]` in the manifest, but the source imports `stats`.
-    p.write_laplacelib_package("sneaky", "1.0.0", &["c"], &[], REGRESSION_LIB.replace("centre", "c").as_str());
+    p.write_laplacelib_package(
+        "sneaky",
+        "1.0.0",
+        &["c"],
+        &[],
+        REGRESSION_LIB.replace("centre", "c").as_str(),
+    );
     p.write_project_file(
         "model.laplace",
         "library {\n  import sneaky\n}\nmodel {\n}\n",
@@ -1216,7 +1265,11 @@ fn update_moves_only_the_named_package() {
 
     let out = p.run(&["update", "stats"]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("updated stats to 1.5.0"), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("updated stats to 1.5.0"),
+        "{}",
+        stdout(&out)
+    );
 
     let lock = p.read_project_file("laplace.lock");
     assert!(lock.contains("version = \"1.5.0\""), "{lock}");
@@ -1252,9 +1305,10 @@ fn build_validate_passes_the_include_path_and_keeps_stancs_cpp_out_of_build() {
     let mut perms = fs::metadata(&script).unwrap().permissions();
     std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
     fs::set_permissions(&script, perms).unwrap();
-    project
-        .extra_env
-        .push(("LAPLACE_STANC".to_string(), script.to_string_lossy().to_string()));
+    project.extra_env.push((
+        "LAPLACE_STANC".to_string(),
+        script.to_string_lossy().to_string(),
+    ));
 
     let out = project.run(&["build", "model.laplace", "--split-functions", "--validate"]);
     assert!(out.status.success(), "{}", stderr(&out));
@@ -1291,7 +1345,11 @@ fn add_rejects_a_hyphenated_package_name() {
     let project = setup();
     let out = project.run(&["add", "laplace-splines"]);
     assert!(!out.status.success());
-    assert!(stderr(&out).contains("invalid package name `laplace-splines`"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("invalid package name `laplace-splines`"),
+        "{}",
+        stderr(&out)
+    );
     assert!(!project.project_file_exists("laplace.toml"));
 }
 
@@ -1308,7 +1366,10 @@ fn build_rejects_an_import_pinned_to_a_version_the_lock_does_not_hold() {
     let out = project.run(&["build", "model.laplace"]);
     assert!(!out.status.success());
     let err = stderr(&out);
-    assert!(err.contains("imports `gps@9.9.9`, but laplace.lock pins `gps` at 1.0.0"), "{err}");
+    assert!(
+        err.contains("imports `gps@9.9.9`, but laplace.lock pins `gps` at 1.0.0"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -1327,7 +1388,10 @@ fn doc_prints_every_overload() {
     let text = stdout(&out);
     assert!(text.contains("kinetics::hill has 2 overloads"), "{text}");
     assert!(text.contains("kinetics::hill(x: real) -> real"), "{text}");
-    assert!(text.contains("kinetics::hill(x: vector) -> vector"), "{text}");
+    assert!(
+        text.contains("kinetics::hill(x: vector) -> vector"),
+        "{text}"
+    );
     assert!(text.contains("Hill curve."), "{text}");
 }
 
@@ -1375,7 +1439,12 @@ fn stanc_accepts(p: &Project, file: &str) {
 
 fn stats_lib_project() -> Project {
     let p = setup();
-    p.write_package_file("stats", "1.0.0", "laplace.toml", "name = \"stats\"\nversion = \"1.0.0\"\n");
+    p.write_package_file(
+        "stats",
+        "1.0.0",
+        "laplace.toml",
+        "name = \"stats\"\nversion = \"1.0.0\"\n",
+    );
     p.write_package_file("stats", "1.0.0", "stats.laplacelib", STATS_LIB);
     p
 }
@@ -1405,7 +1474,10 @@ fn a_pub_item_is_callable_and_a_private_one_is_not() {
     let out = p.run(&["build", "model.laplace"]);
     assert!(!out.status.success());
     let err = stderr(&out);
-    assert!(err.contains("`stats::sum_values` is private to package `stats`"), "{err}");
+    assert!(
+        err.contains("`stats::sum_values` is private to package `stats`"),
+        "{err}"
+    );
     assert!(err.contains("model.laplace:9:12"), "{err}");
     assert!(
         err.contains("only items marked `pub` can be used outside their package"),
@@ -1429,7 +1501,10 @@ fn a_private_item_called_from_a_pub_item_in_the_same_package_builds_and_both_are
     assert!(stan.contains("real stats__mean_(vector x)"), "{stan}");
     assert!(stan.contains("real stats__sum_values(vector x)"), "{stan}");
     // And the internal unqualified call was mangled to its own package.
-    assert!(stan.contains("return stats__sum_values(x) / num_elements(x);"), "{stan}");
+    assert!(
+        stan.contains("return stats__sum_values(x) / num_elements(x);"),
+        "{stan}"
+    );
     // `pub` never reaches the output.
     assert!(!stan.contains("pub "), "{stan}");
     stanc_accepts(&p, "build/model.stan");
@@ -1461,10 +1536,16 @@ fn a_library_calling_another_librarys_private_item_is_an_error() {
     let out = p.run(&["build", "model.laplace"]);
     assert!(!out.status.success());
     let err = stderr(&out);
-    assert!(err.contains("`stats::sum_values` is private to package `stats`"), "{err}");
+    assert!(
+        err.contains("`stats::sum_values` is private to package `stats`"),
+        "{err}"
+    );
     // The location is inside the library, named the way its author would
     // open it -- not a line in the user's own model.
-    assert!(err.contains("regression/regression.laplacelib:6:10"), "{err}");
+    assert!(
+        err.contains("regression/regression.laplacelib:6:10"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -1482,7 +1563,10 @@ fn an_old_style_plain_stan_library_keeps_working_with_exports() {
     assert!(out.status.success(), "{}", stderr(&out));
     let stan = p.read_project_file("build/model.stan");
     assert!(stan.contains("real stats__mean_(vector x)"), "{stan}");
-    assert!(stan.contains("// stats v1.0.0 (pub) -- stats/stats.stan:5"), "{stan}");
+    assert!(
+        stan.contains("// stats v1.0.0 (pub) -- stats/stats.stan:5"),
+        "{stan}"
+    );
     stanc_accepts(&p, "build/model.stan");
 }
 
@@ -1516,17 +1600,19 @@ fn listing_a_laplacelib_item_in_exports_says_to_use_pub_instead() {
 #[test]
 fn marking_only_one_overload_pub_is_an_error() {
     let p = setup();
-    p.write_package_file("over", "1.0.0", "laplace.toml", "name = \"over\"\nversion = \"1.0.0\"\n");
+    p.write_package_file(
+        "over",
+        "1.0.0",
+        "laplace.toml",
+        "name = \"over\"\nversion = \"1.0.0\"\n",
+    );
     p.write_package_file(
         "over",
         "1.0.0",
         "over.laplacelib",
         "pub real h(real x) {\n  return x;\n}\n\nreal h(vector x) {\n  return x[1];\n}\n",
     );
-    p.write_project_file(
-        "model.laplace",
-        "library {\n  import over\n}\nmodel {\n}\n",
-    );
+    p.write_project_file("model.laplace", "library {\n  import over\n}\nmodel {\n}\n");
     assert!(p.run(&["add", "over"]).status.success());
     assert!(p.run(&["install"]).status.success());
 
@@ -1556,7 +1642,12 @@ fn a_double_underscore_identifier_in_a_laplace_file_is_rejected() {
 #[test]
 fn a_double_underscore_identifier_in_a_laplacelib_is_rejected() {
     let p = setup();
-    p.write_package_file("bad", "1.0.0", "laplace.toml", "name = \"bad\"\nversion = \"1.0.0\"\n");
+    p.write_package_file(
+        "bad",
+        "1.0.0",
+        "laplace.toml",
+        "name = \"bad\"\nversion = \"1.0.0\"\n",
+    );
     p.write_package_file(
         "bad",
         "1.0.0",
@@ -1578,12 +1669,19 @@ fn doc_hides_a_private_laplacelib_item_but_shows_a_pub_one() {
 
     let out = p.run(&["doc", "stats::mean_"]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("Arithmetic mean of a vector."), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("Arithmetic mean of a vector."),
+        "{}",
+        stdout(&out)
+    );
 
     let out = p.run(&["doc", "stats::sum_values"]);
     assert!(!out.status.success());
     let err = stderr(&out);
-    assert!(err.contains("`stats::sum_values` is private to package `stats`"), "{err}");
+    assert!(
+        err.contains("`stats::sum_values` is private to package `stats`"),
+        "{err}"
+    );
     assert!(err.contains("only items marked `pub`"), "{err}");
 }
 
@@ -1601,7 +1699,10 @@ fn provenance_comments_name_the_package_version_visibility_file_and_line() {
     let stan = p.read_project_file("build/model.stan");
     // `mean_`'s definition is on line 5 of stats.laplacelib, `sum_values`
     // on line 9 -- the lines in the *source*, not in the stripped body.
-    assert!(stan.contains("// stats v1.0.0 (pub) -- stats/stats.laplacelib:5"), "{stan}");
+    assert!(
+        stan.contains("// stats v1.0.0 (pub) -- stats/stats.laplacelib:5"),
+        "{stan}"
+    );
     assert!(
         stan.contains("// stats v1.0.0 (private) -- stats/stats.laplacelib:9"),
         "{stan}"
@@ -1625,7 +1726,10 @@ fn a_build_is_byte_identical_when_repeated_and_check_agrees() {
     let first = p.read_project_file("build/model.stan");
     assert!(p.run(&["build", "model.laplace"]).status.success());
     assert_eq!(first, p.read_project_file("build/model.stan"));
-    assert!(p.run(&["build", "model.laplace", "--check"]).status.success());
+    assert!(p
+        .run(&["build", "model.laplace", "--check"])
+        .status
+        .success());
 }
 
 #[test]
@@ -1644,7 +1748,12 @@ fn each_package_in_a_chain_resolves_its_own_private_helper_of_the_same_name() {
     let p = setup();
     // Both `stats` and `regression` define a private `helper` with an
     // identical signature. Each must call its own.
-    p.write_package_file("stats", "1.0.0", "laplace.toml", "name = \"stats\"\nversion = \"1.0.0\"\n");
+    p.write_package_file(
+        "stats",
+        "1.0.0",
+        "laplace.toml",
+        "name = \"stats\"\nversion = \"1.0.0\"\n",
+    );
     p.write_package_file(
         "stats",
         "1.0.0",
@@ -1728,7 +1837,12 @@ fn transforms_project() -> Project {
         "laplace.toml",
         "name = \"transforms\"\nversion = \"1.0.0\"\n",
     );
-    p.write_package_file("transforms", "1.0.0", "transforms.laplacelib", TRANSFORMS_LIB);
+    p.write_package_file(
+        "transforms",
+        "1.0.0",
+        "transforms.laplacelib",
+        TRANSFORMS_LIB,
+    );
     p
 }
 
@@ -1757,11 +1871,16 @@ fn a_user_higher_order_function_is_specialized_and_nothing_generic_survives() {
     let stan = p.read_project_file("build/model.stan");
 
     assert!(
-        stan.contains("real apply_twice__add_one(real x) {\n  real a = add_one(x);\n  return add_one(a);\n}"),
+        stan.contains(
+            "real apply_twice__add_one(real x) {\n  real a = add_one(x);\n  return add_one(a);\n}"
+        ),
         "{stan}"
     );
     assert!(stan.contains("real r = apply_twice__add_one(5);"), "{stan}");
-    assert!(stan.contains("// monomorphized: apply_twice with f = add_one"), "{stan}");
+    assert!(
+        stan.contains("// monomorphized: apply_twice with f = add_one"),
+        "{stan}"
+    );
     // No laplace-only syntax reaches the output.
     assert!(!stan.contains("func("), "{stan}");
     assert!(!stan.contains("@wait"), "{stan}");
@@ -1795,14 +1914,20 @@ fn a_library_hof_binds_a_user_function_a_library_function_and_a_private_one() {
     let stan = p.read_project_file("build/model.stan");
 
     // A user function bound into a library HOF.
-    assert!(stan.contains("vector transforms__map_each__softplus(vector x)"), "{stan}");
+    assert!(
+        stan.contains("vector transforms__map_each__softplus(vector x)"),
+        "{stan}"
+    );
     assert!(stan.contains("out[i] = softplus(x[i]);"), "{stan}");
     // The library's own private function bound into its own HOF.
     assert!(
         stan.contains("vector transforms__map_each__transforms__scale_(vector x)"),
         "{stan}"
     );
-    assert!(stan.contains("out[i] = transforms__scale_(x[i]);"), "{stan}");
+    assert!(
+        stan.contains("out[i] = transforms__scale_(x[i]);"),
+        "{stan}"
+    );
     // That one is called from inside a function body, so it is declared first.
     let declaration = stan
         .find("vector transforms__map_each__transforms__scale_(vector x);")
@@ -1844,8 +1969,16 @@ fn the_same_binding_twice_emits_one_copy_and_two_bindings_emit_two() {
     assert!(p.run(&["build", "model.laplace"]).status.success());
     let stan = p.read_project_file("build/model.stan");
 
-    assert_eq!(stan.matches("real twice__inc(real x) {").count(), 1, "{stan}");
-    assert_eq!(stan.matches("real twice__dbl(real x) {").count(), 1, "{stan}");
+    assert_eq!(
+        stan.matches("real twice__inc(real x) {").count(),
+        1,
+        "{stan}"
+    );
+    assert_eq!(
+        stan.matches("real twice__dbl(real x) {").count(),
+        1,
+        "{stan}"
+    );
     assert!(stan.contains("real a = twice__inc(1);"), "{stan}");
     assert!(stan.contains("real b = twice__inc(2);"), "{stan}");
     assert!(stan.contains("real c = twice__dbl(3);"), "{stan}");
@@ -1989,7 +2122,10 @@ fn binding_a_stan_builtin_suggests_writing_a_wrapper() {
     assert!(!out.status.success());
     let err = stderr(&out);
     assert!(err.contains("`exp` is a Stan built-in"), "{err}");
-    assert!(err.contains("real exp_(real x) { return exp(x); }"), "{err}");
+    assert!(
+        err.contains("real exp_(real x) { return exp(x); }"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -2028,7 +2164,10 @@ fn a_project_using_no_functional_parameters_is_unchanged_by_this_feature() {
     assert!(!stan.contains("monomorphized"), "{stan}");
     assert!(!stan.contains("laplace: specialized"), "{stan}");
     // And a second build agrees byte for byte.
-    assert!(p.run(&["build", "model.laplace", "--check"]).status.success());
+    assert!(p
+        .run(&["build", "model.laplace", "--check"])
+        .status
+        .success());
 }
 
 #[test]
@@ -2057,7 +2196,10 @@ fn specialized_functions_stay_in_the_stan_file_in_split_mode() {
     let functions = p.read_project_file("build/transforms.stanfunctions");
     // The copy calls a function defined in the model, so it has to live
     // there, not in the package's own file.
-    assert!(stan.contains("vector transforms__map_each__softplus(vector x)"), "{stan}");
+    assert!(
+        stan.contains("vector transforms__map_each__softplus(vector x)"),
+        "{stan}"
+    );
     assert!(!functions.contains("map_each__softplus"), "{functions}");
     assert!(!functions.contains("func("), "{functions}");
     stanc_accepts(&p, "build/model.stan");
@@ -2158,13 +2300,21 @@ fn a_template_expands_into_its_blocks_and_creates_the_ones_that_are_missing() {
     let params = stan.find("parameters {").unwrap();
     let tparams = stan.find("transformed parameters {").unwrap();
     let model = stan.find("model {").unwrap();
-    assert!(data < params && params < tparams && tparams < model, "{stan}");
-    assert!(stan.contains("vector[K] theta = theta_sigma * theta_raw;"), "{stan}");
+    assert!(
+        data < params && params < tparams && tparams < model,
+        "{stan}"
+    );
+    assert!(
+        stan.contains("vector[K] theta = theta_sigma * theta_raw;"),
+        "{stan}"
+    );
 
     // No laplace syntax survives. `@use` still appears inside the
     // provenance comments, which is exactly what they are for.
     assert!(
-        !stan.lines().any(|line| line.trim_start().starts_with("@use")),
+        !stan
+            .lines()
+            .any(|line| line.trim_start().starts_with("@use")),
         "{stan}"
     );
     assert!(!stan.contains("@template"), "{stan}");
@@ -2194,7 +2344,10 @@ fn two_uses_write_into_the_same_blocks_in_use_order_before_the_users_content() {
     let observation = stan.find("y ~ lognormal(").unwrap();
     let user = stan.find("mu ~ normal(0, 1);").unwrap();
     assert!(ncp < observation, "`@use` order decides: {stan}");
-    assert!(observation < user, "pieces come before the model's own: {stan}");
+    assert!(
+        observation < user,
+        "pieces come before the model's own: {stan}"
+    );
 
     // The model's own `parameters` content stays after the expansion.
     let theta_raw = stan.find("vector[K] theta_raw;").unwrap();
@@ -2217,7 +2370,10 @@ fn an_expr_argument_is_parenthesized_and_a_plain_one_is_not() {
     );
     assert!(p.run(&["build", "model.laplace"]).status.success());
     let stan = p.read_project_file("build/model.stan");
-    assert!(stan.contains("y ~ lognormal((mu + theta), sigma);"), "{stan}");
+    assert!(
+        stan.contains("y ~ lognormal((mu + theta), sigma);"),
+        "{stan}"
+    );
     assert!(
         stan.contains("real y_rep = lognormal_rng((mu + theta), sigma);"),
         "{stan}"
@@ -2241,8 +2397,14 @@ fn one_template_used_twice_with_different_names_expands_twice() {
     assert!(out.status.success(), "{}", stderr(&out));
     let stan = p.read_project_file("build/model.stan");
     for name in ["theta", "beta"] {
-        assert!(stan.contains(&format!("{name}_raw ~ std_normal();")), "{stan}");
-        assert!(stan.contains(&format!("real<lower=0> {name}_sigma;")), "{stan}");
+        assert!(
+            stan.contains(&format!("{name}_raw ~ std_normal();")),
+            "{stan}"
+        );
+        assert!(
+            stan.contains(&format!("real<lower=0> {name}_sigma;")),
+            "{stan}"
+        );
     }
     stanc_accepts(&p, "build/model.stan");
 }
@@ -2290,7 +2452,11 @@ fn two_uses_declaring_the_same_name_collide_and_so_does_one_with_the_model() {
     );
     let out = p.run(&["build", "model.laplace"]);
     assert!(!out.status.success());
-    assert!(stderr(&out).contains("`theta_raw` is declared twice"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("`theta_raw` is declared twice"),
+        "{}",
+        stderr(&out)
+    );
 }
 
 #[test]
@@ -2354,14 +2520,25 @@ fn every_definition_time_template_error_has_its_own_message() {
 
     for (what, library, expected) in cases {
         let p = setup();
-        p.write_package_file("bad", "1.0.0", "laplace.toml", "name = \"bad\"\nversion = \"1.0.0\"\n");
+        p.write_package_file(
+            "bad",
+            "1.0.0",
+            "laplace.toml",
+            "name = \"bad\"\nversion = \"1.0.0\"\n",
+        );
         p.write_package_file("bad", "1.0.0", "bad.laplacelib", library);
 
         let out = p.run(&["add", "bad"]);
         assert!(!out.status.success(), "{what} should not be accepted");
         let err = stderr(&out);
-        assert!(err.contains(expected), "{what}: expected {expected:?} in\n{err}");
-        assert!(err.contains("bad.laplacelib:"), "{what} needs a location: {err}");
+        assert!(
+            err.contains(expected),
+            "{what}: expected {expected:?} in\n{err}"
+        );
+        assert!(
+            err.contains("bad.laplacelib:"),
+            "{what} needs a location: {err}"
+        );
         assert!(err.contains("help: "), "{what} needs a help line: {err}");
     }
 }
@@ -2369,7 +2546,12 @@ fn every_definition_time_template_error_has_its_own_message() {
 #[test]
 fn an_unused_placeholder_warns_without_failing_the_build() {
     let p = setup();
-    p.write_package_file("stats", "1.0.0", "laplace.toml", "name = \"stats\"\nversion = \"1.0.0\"\n");
+    p.write_package_file(
+        "stats",
+        "1.0.0",
+        "laplace.toml",
+        "name = \"stats\"\nversion = \"1.0.0\"\n",
+    );
     p.write_package_file(
         "stats",
         "1.0.0",
@@ -2386,7 +2568,9 @@ fn an_unused_placeholder_warns_without_failing_the_build() {
     let err = stderr(&out);
     assert!(err.contains("warning:"), "{err}");
     assert!(err.contains("$spare"), "{err}");
-    assert!(p.read_project_file("build/model.stan").contains("real theta;"));
+    assert!(p
+        .read_project_file("build/model.stan")
+        .contains("real theta;"));
 }
 
 #[test]
@@ -2414,7 +2598,12 @@ fn a_use_argument_may_not_call_a_higher_order_function() {
 fn a_project_with_no_use_statements_is_unaffected_by_templates() {
     // `stats` defines templates this model never uses.
     let p = setup();
-    p.write_package_file("stats", "1.0.0", "laplace.toml", "name = \"stats\"\nversion = \"1.0.0\"\n");
+    p.write_package_file(
+        "stats",
+        "1.0.0",
+        "laplace.toml",
+        "name = \"stats\"\nversion = \"1.0.0\"\n",
+    );
     p.write_package_file(
         "stats",
         "1.0.0",
@@ -2434,7 +2623,10 @@ fn a_project_with_no_use_statements_is_unaffected_by_templates() {
     assert!(!stan.contains('$'), "{stan}");
     assert!(stan.contains("real stats__mean_(vector x)"), "{stan}");
     // Deterministic, and `--check` agrees.
-    assert!(p.run(&["build", "model.laplace", "--check"]).status.success());
+    assert!(p
+        .run(&["build", "model.laplace", "--check"])
+        .status
+        .success());
     stanc_accepts(&p, "build/model.stan");
 }
 
@@ -2523,7 +2715,9 @@ fn a_macro_expands_in_place_once_per_list_element() {
     // A distribution passed as an `expr` must not be parenthesized.
     assert!(!stan.contains("~ (normal"), "{stan}");
     assert!(
-        !stan.lines().any(|line| line.trim_start().starts_with("@expand")),
+        !stan
+            .lines()
+            .any(|line| line.trim_start().starts_with("@expand")),
         "{stan}"
     );
     assert!(!stan.contains("@macro"), "{stan}");
@@ -2549,8 +2743,14 @@ fn a_declaring_macro_builds_one_name_per_element_and_calls_its_own_helper() {
     assert!(out.status.success(), "{}", stderr(&out));
     let stan = p.read_project_file("build/model.stan");
 
-    assert!(stan.contains("  real alpha_z = alpha / stats__half(4.0);"), "{stan}");
-    assert!(stan.contains("  real beta_z = beta / stats__half(4.0);"), "{stan}");
+    assert!(
+        stan.contains("  real alpha_z = alpha / stats__half(4.0);"),
+        "{stan}"
+    );
+    assert!(
+        stan.contains("  real beta_z = beta / stats__half(4.0);"),
+        "{stan}"
+    );
     // The helper is private to `stats` and resolved in its scope.
     assert!(stan.contains("real stats__half(real x)"), "{stan}");
     stanc_accepts(&p, "build/model.stan");
@@ -2581,7 +2781,9 @@ fn templates_and_macros_compose_in_one_model() {
 
     // The template's piece comes first in `transformed parameters`,
     // then the macro expands where it was written.
-    let theta = stan.find("vector[K] theta = theta_sigma * theta_raw;").unwrap();
+    let theta = stan
+        .find("vector[K] theta = theta_sigma * theta_raw;")
+        .unwrap();
     let alpha_z = stan.find("real alpha_z = alpha /").unwrap();
     assert!(theta < alpha_z, "{stan}");
     assert!(stan.contains("alpha ~ normal(0, 1);"), "{stan}");
@@ -2666,14 +2868,25 @@ fn a_macro_whose_body_cannot_go_where_it_claims_is_rejected_at_the_definition() 
 
     for (what, library, expected) in cases {
         let p = setup();
-        p.write_package_file("bad", "1.0.0", "laplace.toml", "name = \"bad\"\nversion = \"1.0.0\"\n");
+        p.write_package_file(
+            "bad",
+            "1.0.0",
+            "laplace.toml",
+            "name = \"bad\"\nversion = \"1.0.0\"\n",
+        );
         p.write_package_file("bad", "1.0.0", "bad.laplacelib", library);
 
         let out = p.run(&["add", "bad"]);
         assert!(!out.status.success(), "{what} should not be accepted");
         let err = stderr(&out);
-        assert!(err.contains(expected), "{what}: expected {expected:?} in\n{err}");
-        assert!(err.contains("bad.laplacelib:"), "{what} needs a location: {err}");
+        assert!(
+            err.contains(expected),
+            "{what}: expected {expected:?} in\n{err}"
+        );
+        assert!(
+            err.contains("bad.laplacelib:"),
+            "{what} needs a location: {err}"
+        );
         assert!(err.contains("help: "), "{what} needs a help line: {err}");
     }
 }
@@ -2741,19 +2954,29 @@ fn an_each_parameter_needs_a_list_and_says_so() {
     let out = p.run(&["build", "model.laplace"]);
     assert!(!out.status.success());
     let err = stderr(&out);
-    assert!(err.contains("is an `each` parameter, so it needs a list"), "{err}");
+    assert!(
+        err.contains("is an `each` parameter, so it needs a list"),
+        "{err}"
+    );
     assert!(err.contains("[a, b, c]"), "{err}");
 }
 
 #[test]
 fn a_project_with_no_expand_statements_is_unaffected_by_macros() {
     let p = setup();
-    p.write_package_file("stats", "1.0.0", "laplace.toml", "name = \"stats\"\nversion = \"1.0.0\"\n");
+    p.write_package_file(
+        "stats",
+        "1.0.0",
+        "laplace.toml",
+        "name = \"stats\"\nversion = \"1.0.0\"\n",
+    );
     p.write_package_file(
         "stats",
         "1.0.0",
         "stats.laplacelib",
-        &format!("{MACROS_LIB}\npub real mean_(vector x) {{\n  return sum(x) / num_elements(x);\n}}\n"),
+        &format!(
+            "{MACROS_LIB}\npub real mean_(vector x) {{\n  return sum(x) / num_elements(x);\n}}\n"
+        ),
     );
     with_model(
         &p,
@@ -2767,6 +2990,9 @@ fn a_project_with_no_expand_statements_is_unaffected_by_macros() {
     assert!(!stan.contains("@macro"), "{stan}");
     assert!(!stan.contains('$'), "{stan}");
     assert!(stan.contains("real stats__mean_(vector x)"), "{stan}");
-    assert!(p.run(&["build", "model.laplace", "--check"]).status.success());
+    assert!(p
+        .run(&["build", "model.laplace", "--check"])
+        .status
+        .success());
     stanc_accepts(&p, "build/model.stan");
 }

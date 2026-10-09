@@ -258,14 +258,17 @@ pub fn expand(
         for value in &each_values {
             let mut bindings = Vec::with_capacity(def.params.len());
             for (param, argument) in def.params.iter().zip(&statement.args) {
-                let text = if param.each { value.as_str() } else { argument.as_str() };
-                let binding = check_argument(param, text).map_err(|error| {
-                    MacroExpandError::Argument {
+                let text = if param.each {
+                    value.as_str()
+                } else {
+                    argument.as_str()
+                };
+                let binding =
+                    check_argument(param, text).map_err(|error| MacroExpandError::Argument {
                         location: location.clone(),
                         help: error.help(),
                         error: Box::new(error),
-                    }
-                })?;
+                    })?;
                 bindings.push((param.name.clone(), binding));
             }
 
@@ -275,11 +278,8 @@ pub fn expand(
                     help: error.help(),
                     error: Box::new(error),
                 })?;
-            let mangled = mangle_fragment(
-                &substituted,
-                &source_macro.package,
-                &source_macro.functions,
-            );
+            let mangled =
+                mangle_fragment(&substituted, &source_macro.package, &source_macro.functions);
             repetitions.push_str(&reindent(trim_blank_lines(&mangled), statement.indent));
         }
 
@@ -411,7 +411,11 @@ fn trim_blank_lines(text: &str) -> &str {
             starts.push(i + 1);
         }
     }
-    let line_end = |start: usize| text[start..].find('\n').map_or(text.len(), |i| start + i + 1);
+    let line_end = |start: usize| {
+        text[start..]
+            .find('\n')
+            .map_or(text.len(), |i| start + i + 1)
+    };
     let blank = |start: usize| text[start..line_end(start)].trim().is_empty();
 
     let Some(first) = starts.iter().copied().find(|&s| !blank(s)) else {
@@ -599,9 +603,15 @@ mod tests {
             "generated quantities {\n  @expand stats::priors([alpha], normal(0, 1));\n}\n",
             &[macro_source(PRIORS, &[])],
         );
-        assert!(matches!(err, MacroExpandError::WrongBlock { .. }), "{err:?}");
+        assert!(
+            matches!(err, MacroExpandError::WrongBlock { .. }),
+            "{err:?}"
+        );
         let rendered = err.to_string();
-        assert!(rendered.contains("cannot be expanded in `generated quantities`"), "{rendered}");
+        assert!(
+            rendered.contains("cannot be expanded in `generated quantities`"),
+            "{rendered}"
+        );
         assert!(rendered.contains("declares `in model`"), "{rendered}");
     }
 
@@ -611,7 +621,10 @@ mod tests {
             "@expand stats::priors([alpha], normal(0, 1));\nmodel {\n}\n",
             &[macro_source(PRIORS, &[])],
         );
-        assert!(matches!(err, MacroExpandError::OutsideAnyBlock { .. }), "{err:?}");
+        assert!(
+            matches!(err, MacroExpandError::OutsideAnyBlock { .. }),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -668,7 +681,10 @@ mod tests {
             "model {\n  @expand stats::priors([alpha]);\n}\n",
             &[macro_source(PRIORS, &[])],
         );
-        assert!(matches!(err, MacroExpandError::ArgumentCount { .. }), "{err:?}");
+        assert!(
+            matches!(err, MacroExpandError::ArgumentCount { .. }),
+            "{err:?}"
+        );
         assert!(err.to_string().contains("each $p: ident"), "{err}");
     }
 
@@ -678,7 +694,10 @@ mod tests {
             "model {\n  @expand stats::nope([a], 1);\n}\n",
             &[macro_source(PRIORS, &[])],
         );
-        assert!(matches!(err, MacroExpandError::UnknownMacro { .. }), "{err:?}");
+        assert!(
+            matches!(err, MacroExpandError::UnknownMacro { .. }),
+            "{err:?}"
+        );
         assert!(err.to_string().contains("defines priors"), "{err}");
     }
 
@@ -690,7 +709,10 @@ mod tests {
             "model {\n  @expand stats::priors([a], normal(0, 1));\n}\n",
             &[private],
         );
-        assert!(matches!(err, MacroExpandError::MacroIsPrivate { .. }), "{err:?}");
+        assert!(
+            matches!(err, MacroExpandError::MacroIsPrivate { .. }),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -727,6 +749,9 @@ mod tests {
     fn expansion_is_deterministic() {
         let source = "model {\n  @expand stats::priors([a, b], normal(0, 1));\n}\n";
         let available = [macro_source(PRIORS, &[])];
-        assert_eq!(run(source, &available).unwrap(), run(source, &available).unwrap());
+        assert_eq!(
+            run(source, &available).unwrap(),
+            run(source, &available).unwrap()
+        );
     }
 }

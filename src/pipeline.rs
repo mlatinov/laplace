@@ -244,7 +244,10 @@ mod tests {
         let source = "parameters {\n  real my__theta;\n}\n";
         let err = compile(request(source, &[])).unwrap_err();
         let rendered = err.to_string();
-        assert!(matches!(err, PipelineError::ReservedIdentifier { .. }), "{err:?}");
+        assert!(
+            matches!(err, PipelineError::ReservedIdentifier { .. }),
+            "{err:?}"
+        );
         assert!(rendered.contains("model.laplace:2:8"), "{rendered}");
         assert!(rendered.contains("my__theta"), "{rendered}");
         assert!(rendered.contains("help:"), "{rendered}");
@@ -262,7 +265,10 @@ mod tests {
         let installed = vec![stats];
         let err = compile(request(source, &installed)).unwrap_err();
         let rendered = err.to_string();
-        assert!(rendered.contains("is private to package `stats`"), "{rendered}");
+        assert!(
+            rendered.contains("is private to package `stats`"),
+            "{rendered}"
+        );
         assert!(rendered.contains("model.laplace:6:12"), "{rendered}");
     }
 
@@ -295,11 +301,15 @@ mod tests {
         );
         let generated = compile(request(source, &[])).unwrap();
         assert!(
-            generated.source.contains("real apply_twice__add_one(real x)"),
+            generated
+                .source
+                .contains("real apply_twice__add_one(real x)"),
             "{}",
             generated.source
         );
-        assert!(generated.source.contains("real r = apply_twice__add_one(5);"));
+        assert!(generated
+            .source
+            .contains("real r = apply_twice__add_one(5);"));
         assert!(!generated.source.contains("func("), "{}", generated.source);
     }
 
@@ -315,7 +325,10 @@ mod tests {
         );
         let err = compile(request(source, &[])).unwrap_err();
         let rendered = err.to_string();
-        assert!(rendered.contains("no such function is in scope"), "{rendered}");
+        assert!(
+            rendered.contains("no such function is in scope"),
+            "{rendered}"
+        );
         assert!(rendered.contains("model.laplace:7"), "{rendered}");
     }
 

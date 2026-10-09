@@ -251,7 +251,10 @@ mod tests {
         // lock never churns just from being rewritten.
         let again = path.with_extension("lock2");
         write_lockfile(&again, &read_back).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), fs::read_to_string(&again).unwrap());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            fs::read_to_string(&again).unwrap()
+        );
     }
 
     #[test]

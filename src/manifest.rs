@@ -122,8 +122,10 @@ pub(crate) fn validate_subdir(subdir: &str) -> Result<(), &'static str> {
         return Err("it is empty -- omit `subdir` for a package at the repository root");
     }
     if subdir.contains('#') {
-        return Err("it contains `#`, which laplace.lock uses to separate the subdirectory \
-                    from the git ref");
+        return Err(
+            "it contains `#`, which laplace.lock uses to separate the subdirectory \
+                    from the git ref",
+        );
     }
     for component in Path::new(subdir).components() {
         match component {
@@ -322,14 +324,7 @@ mod tests {
                 subdir: None,
             })
         );
-        assert_eq!(
-            manifest
-                .dependencies
-                .get("gps")
-                .unwrap()
-                .as_range(),
-            None
-        );
+        assert_eq!(manifest.dependencies.get("gps").unwrap().as_range(), None);
         assert_eq!(
             manifest.dependencies.get("gps2").unwrap(),
             &Dependency::Git(GitDependency {

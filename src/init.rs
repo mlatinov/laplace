@@ -212,8 +212,7 @@ real jitter(real epsilon) {
         assert_eq!(summary.needs_pub, vec!["knots".to_string()]);
         assert!(summary.already_pub.is_empty());
 
-        let written =
-            manifest::read_package_manifest(&dir.join("laplace.toml")).unwrap();
+        let written = manifest::read_package_manifest(&dir.join("laplace.toml")).unwrap();
         assert!(written.exports.is_empty(), "{:?}", written.exports);
     }
 
@@ -244,8 +243,7 @@ real helper() {
 
         // The generated manifest loads: nothing in `exports` contradicts
         // what the source says.
-        let written =
-            manifest::read_package_manifest(&dir.join("laplace.toml")).unwrap();
+        let written = manifest::read_package_manifest(&dir.join("laplace.toml")).unwrap();
         assert!(written.exports.is_empty());
         assert!(package::load_with_manifest(&dir, "splines", &written).is_ok());
     }
@@ -285,7 +283,9 @@ pub real fancy() {
     fn a_sanitized_name_never_contains_a_double_underscore() {
         assert_eq!(sanitize_package_name("kernels--2d"), "kernels_2d");
         assert_eq!(sanitize_package_name("a..b__c"), "a_b_c");
-        assert!(manifest::is_valid_package_name(&sanitize_package_name("kernels--2d")));
+        assert!(manifest::is_valid_package_name(&sanitize_package_name(
+            "kernels--2d"
+        )));
     }
 
     #[test]

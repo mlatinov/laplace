@@ -36,7 +36,10 @@ pub enum LibraryBlockError {
     #[error("import statement `{statement}` has no package name")]
     EmptyPackageName { statement: String },
 
-    #[error("invalid package name in `{statement}`: {}", crate::manifest::PACKAGE_NAME_RULE)]
+    #[error(
+        "invalid package name in `{statement}`: {}",
+        crate::manifest::PACKAGE_NAME_RULE
+    )]
     InvalidPackageName { statement: String },
 
     #[error(
@@ -56,11 +59,10 @@ pub fn parse_library_block(source: &str) -> Result<Option<LibraryBlock>, Library
         return Ok(None);
     };
 
-    let close_brace = find_matching_brace(source, open_brace).ok_or(
-        LibraryBlockError::UnclosedBlock {
+    let close_brace =
+        find_matching_brace(source, open_brace).ok_or(LibraryBlockError::UnclosedBlock {
             start: keyword_start,
-        },
-    )?;
+        })?;
 
     let body = &source[open_brace + 1..close_brace];
     let imports = parse_import_statements(body)?;
@@ -184,7 +186,10 @@ fn parse_one_import(statement: &str) -> Result<ImportStatement, LibraryBlockErro
             statement: statement.to_string(),
         });
     }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
         return Err(LibraryBlockError::MalformedImport {
             statement: statement.to_string(),
         });
@@ -269,8 +274,7 @@ mod tests {
 
     #[test]
     fn pinned_and_unpinned_mixed() {
-        let source =
-            "library {\n  import gps@1.0.0\n  import utils\n  import splines@0.3.1\n}\n";
+        let source = "library {\n  import gps@1.0.0\n  import utils\n  import splines@0.3.1\n}\n";
         let block = parse_library_block(source).unwrap().unwrap();
         assert_eq!(
             block.imports,

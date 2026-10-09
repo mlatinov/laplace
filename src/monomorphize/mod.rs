@@ -71,12 +71,59 @@ use wait::{ReturnShape, WaitError};
 /// table, which is deliberately left for later; until then this list
 /// exists so the most likely mistake explains itself.
 const COMMON_BUILTINS: &[&str] = &[
-    "Phi", "Phi_approx", "abs", "acos", "asin", "atan", "cbrt", "ceil", "cos", "cosh",
-    "cumulative_sum", "digamma", "erf", "erfc", "exp", "exp2", "expm1", "fabs", "floor", "inv",
-    "inv_cloglog", "inv_logit", "inv_sqrt", "inv_square", "lgamma", "log", "log10", "log1m",
-    "log1m_exp", "log1p", "log1p_exp", "log2", "log_softmax", "logit", "max", "mean", "min",
-    "prod", "round", "sd", "sin", "sinh", "softmax", "sqrt", "square", "step", "sum", "tan",
-    "tanh", "tgamma", "trigamma", "trunc", "variance",
+    "Phi",
+    "Phi_approx",
+    "abs",
+    "acos",
+    "asin",
+    "atan",
+    "cbrt",
+    "ceil",
+    "cos",
+    "cosh",
+    "cumulative_sum",
+    "digamma",
+    "erf",
+    "erfc",
+    "exp",
+    "exp2",
+    "expm1",
+    "fabs",
+    "floor",
+    "inv",
+    "inv_cloglog",
+    "inv_logit",
+    "inv_sqrt",
+    "inv_square",
+    "lgamma",
+    "log",
+    "log10",
+    "log1m",
+    "log1m_exp",
+    "log1p",
+    "log1p_exp",
+    "log2",
+    "log_softmax",
+    "logit",
+    "max",
+    "mean",
+    "min",
+    "prod",
+    "round",
+    "sd",
+    "sin",
+    "sinh",
+    "softmax",
+    "sqrt",
+    "square",
+    "step",
+    "sum",
+    "tan",
+    "tanh",
+    "tgamma",
+    "trigamma",
+    "trunc",
+    "variance",
 ];
 
 /// Where a unit's code comes from.
@@ -941,14 +988,13 @@ impl SymbolTable {
             .zip(&instance.bound)
             .map(|(param, bound)| (param.name.clone(), bound.return_shape()))
             .collect();
-        let mut body =
-            wait::substitute(&hof.source_name, body, &shapes).map_err(|error| {
-                MonomorphizeError::Wait {
-                    location: instance.location.clone(),
-                    help: error.help(),
-                    error: Box::new(error),
-                }
-            })?;
+        let mut body = wait::substitute(&hof.source_name, body, &shapes).map_err(|error| {
+            MonomorphizeError::Wait {
+                location: instance.location.clone(),
+                help: error.help(),
+                error: Box::new(error),
+            }
+        })?;
 
         for (param, bound) in hof.functional_params.iter().zip(&instance.bound) {
             body = rename_identifier_calls(&body, &param.name, &bound.output_name);
@@ -1014,14 +1060,13 @@ impl SymbolTable {
             let argument = call
                 .arg(&unit.text, param.index)
                 .expect("arity was checked above");
-            let reference = Reference::parse(argument).ok_or_else(|| {
-                MonomorphizeError::ArgumentNotAName {
+            let reference =
+                Reference::parse(argument).ok_or_else(|| MonomorphizeError::ArgumentNotAName {
                     hof: hof.source_name.clone(),
                     param: param.name.clone(),
                     argument: argument.to_string(),
                     location: at.clone(),
-                }
-            })?;
+                })?;
             bound.push(self.resolve_binding(units, index, hof, param, &reference, &at)?);
         }
         Ok(bound)
@@ -1283,16 +1328,23 @@ mod tests {
 
         assert_eq!(plan.definitions.len(), 1);
         let definition = &plan.definitions[0];
-        assert!(definition.contains("real apply_twice__add_one(real x)"), "{definition}");
+        assert!(
+            definition.contains("real apply_twice__add_one(real x)"),
+            "{definition}"
+        );
         assert!(definition.contains("real a = add_one(x);"), "{definition}");
         assert!(definition.contains("return add_one(a);"), "{definition}");
         assert!(
-            definition.starts_with("// monomorphized: apply_twice with f = add_one -- model.laplace:5"),
+            definition
+                .starts_with("// monomorphized: apply_twice with f = add_one -- model.laplace:5"),
             "{definition}"
         );
 
         let rewritten = plan.apply(0, &units[0].text);
-        assert!(rewritten.contains("real r = apply_twice__add_one(5);"), "{rewritten}");
+        assert!(
+            rewritten.contains("real r = apply_twice__add_one(5);"),
+            "{rewritten}"
+        );
         // The generic definition is gone; nothing `func` survives.
         assert!(!rewritten.contains("func("), "{rewritten}");
         assert!(!rewritten.contains("apply_twice(real x"), "{rewritten}");
@@ -1326,7 +1378,9 @@ mod tests {
             plan.declarations,
             vec!["real apply_twice__add_one(real x);".to_string()]
         );
-        assert!(plan.declaration_block().contains("defined at the end of this block"));
+        assert!(plan
+            .declaration_block()
+            .contains("defined at the end of this block"));
     }
 
     #[test]
@@ -1415,7 +1469,11 @@ mod tests {
             "}\n",
         );
         let plan = run(&[project(source, &[])]).unwrap();
-        assert!(plan.definitions[0].contains("real h__f_fn(real a, int b)"), "{:?}", plan.definitions);
+        assert!(
+            plan.definitions[0].contains("real h__f_fn(real a, int b)"),
+            "{:?}",
+            plan.definitions
+        );
         assert!(plan.apply(0, source).contains("h__f_fn(1, 2)"));
     }
 
@@ -1459,7 +1517,10 @@ mod tests {
         let plan = run(&units).unwrap();
 
         let definition = &plan.definitions[0];
-        assert!(definition.contains("real stats__apply__add_one(real x)"), "{definition}");
+        assert!(
+            definition.contains("real stats__apply__add_one(real x)"),
+            "{definition}"
+        );
         assert!(definition.contains("return add_one(x);"), "{definition}");
         assert!(plan.apply(1, source).contains("stats__apply__add_one(1)"));
         // The library's generic definition is gone from its own text.
@@ -1489,10 +1550,15 @@ mod tests {
         );
         // The private helper is called by its mangled name, because the
         // copy lives outside the package's text.
-        assert!(definition.contains("return stats__helper(x);"), "{definition}");
+        assert!(
+            definition.contains("return stats__helper(x);"),
+            "{definition}"
+        );
         // Called from inside `driver`, so it needs declaring first.
         assert_eq!(plan.declarations.len(), 1);
-        assert!(plan.apply(0, &units[0].text).contains("apply__stats__helper(x)"));
+        assert!(plan
+            .apply(0, &units[0].text)
+            .contains("apply__stats__helper(x)"));
     }
 
     #[test]
@@ -1513,7 +1579,10 @@ mod tests {
             definition.contains("real apply_mean__stats__mean_(vector v)"),
             "{definition}"
         );
-        assert!(definition.contains("return stats__mean_(v);"), "{definition}");
+        assert!(
+            definition.contains("return stats__mean_(v);"),
+            "{definition}"
+        );
     }
 
     #[test]
@@ -1528,8 +1597,14 @@ mod tests {
             "}\n",
         );
         let err = run(&[stats_unit(), project(source, &["stats"])]).unwrap_err();
-        assert!(matches!(err, MonomorphizeError::BoundFunctionPrivate { .. }), "{err:?}");
-        assert!(err.to_string().contains("private to package `stats`"), "{err}");
+        assert!(
+            matches!(err, MonomorphizeError::BoundFunctionPrivate { .. }),
+            "{err:?}"
+        );
+        assert!(
+            err.to_string().contains("private to package `stats`"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1558,7 +1633,8 @@ mod tests {
 
     #[test]
     fn storing_a_functional_parameter_is_rejected() {
-        let err = hof_error("  real h(func(real) -> real f) {\n    real g = f;\n    return g;\n  }\n");
+        let err =
+            hof_error("  real h(func(real) -> real f) {\n    real g = f;\n    return g;\n  }\n");
         assert!(
             matches!(err, MonomorphizeError::FunctionalParamNotCalled { .. }),
             "{err:?}"
@@ -1581,7 +1657,10 @@ mod tests {
     #[test]
     fn calling_a_functional_parameter_with_the_wrong_arity_is_rejected() {
         let err = hof_error("  real h(real x, func(real) -> real f) {\n    return f(x, x);\n  }\n");
-        assert!(matches!(err, MonomorphizeError::FunctionalArity { .. }), "{err:?}");
+        assert!(
+            matches!(err, MonomorphizeError::FunctionalArity { .. }),
+            "{err:?}"
+        );
         assert!(err.to_string().contains("2 argument(s)"), "{err}");
     }
 
@@ -1601,7 +1680,10 @@ mod tests {
     #[test]
     fn a_nested_functional_shape_is_rejected() {
         let err = hof_error("  real h(func(func(real) -> real) -> real f) {\n    return 1;\n  }\n");
-        assert!(matches!(err, MonomorphizeError::FunctionalShape { .. }), "{err:?}");
+        assert!(
+            matches!(err, MonomorphizeError::FunctionalShape { .. }),
+            "{err:?}"
+        );
         assert!(err.to_string().contains("has a `func` inside it"), "{err}");
     }
 
@@ -1614,7 +1696,10 @@ mod tests {
     #[test]
     fn a_malformed_functional_shape_is_rejected_with_its_help() {
         let err = hof_error("  real h(real x, func(real) real f) {\n    return x;\n  }\n");
-        assert!(matches!(err, MonomorphizeError::FunctionalShape { .. }), "{err:?}");
+        assert!(
+            matches!(err, MonomorphizeError::FunctionalShape { .. }),
+            "{err:?}"
+        );
         assert!(err.to_string().contains("help:"), "{err}");
     }
 
@@ -1649,8 +1734,14 @@ mod tests {
     #[test]
     fn a_non_name_in_a_functional_position_is_rejected() {
         let err = call_error("  real r = twice(1, x + 1);\n");
-        assert!(matches!(err, MonomorphizeError::ArgumentNotAName { .. }), "{err:?}");
-        assert!(err.to_string().contains("there are no function literals"), "{err}");
+        assert!(
+            matches!(err, MonomorphizeError::ArgumentNotAName { .. }),
+            "{err:?}"
+        );
+        assert!(
+            err.to_string().contains("there are no function literals"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1681,13 +1772,19 @@ mod tests {
         );
         let rendered = err.to_string();
         assert!(rendered.contains("func(real) -> real"), "{rendered}");
-        assert!(rendered.contains("`vec_one` is `func(vector) -> vector`"), "{rendered}");
+        assert!(
+            rendered.contains("`vec_one` is `func(vector) -> vector`"),
+            "{rendered}"
+        );
     }
 
     #[test]
     fn the_wrong_number_of_arguments_at_a_call_site_is_rejected() {
         let err = call_error("  real r = twice(1);\n");
-        assert!(matches!(err, MonomorphizeError::CallArity { .. }), "{err:?}");
+        assert!(
+            matches!(err, MonomorphizeError::CallArity { .. }),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -1748,8 +1845,7 @@ mod tests {
 
     #[test]
     fn wait_expands_to_the_bound_functions_sized_return_type() {
-        let source = concat!
-        (
+        let source = concat!(
             "functions {\n",
             "  vector[2] to_pair(real x) { return [x, x * 2]'; }\n",
             "  matrix expand_rows(vector x, func(real) -> vector f) {\n",
@@ -1769,8 +1865,14 @@ mod tests {
         let plan = run(&units).unwrap();
         let definition = &plan.definitions[0];
 
-        assert!(definition.contains("matrix[num_elements(x), 2] out;"), "{definition}");
-        assert!(definition.contains("vector[2] row = to_pair(x[i]);"), "{definition}");
+        assert!(
+            definition.contains("matrix[num_elements(x), 2] out;"),
+            "{definition}"
+        );
+        assert!(
+            definition.contains("vector[2] row = to_pair(x[i]);"),
+            "{definition}"
+        );
         assert!(!definition.contains("@wait"), "{definition}");
 
         // The size annotation is stripped from `to_pair` itself.
@@ -1795,7 +1897,10 @@ mod tests {
         );
         let err = run(&[project(source, &[])]).unwrap_err();
         let rendered = err.to_string();
-        assert!(rendered.contains("needs the return size of `to_pair`"), "{rendered}");
+        assert!(
+            rendered.contains("needs the return size of `to_pair`"),
+            "{rendered}"
+        );
         assert!(rendered.contains("annotate the return type"), "{rendered}");
     }
 
@@ -1815,7 +1920,10 @@ mod tests {
         );
         let plan = run(&[project(source, &[])]).unwrap();
         let definition = &plan.definitions[0];
-        assert!(definition.contains("vector[(k)] r = basis(t, k);"), "{definition}");
+        assert!(
+            definition.contains("vector[(k)] r = basis(t, k);"),
+            "{definition}"
+        );
     }
 
     #[test]
@@ -1846,7 +1954,11 @@ mod tests {
             "  real h(real x, func(real) -> real f) {\n    @wait(g) a = f(x);\n    return a;\n  }\n",
         );
         assert!(matches!(err, MonomorphizeError::Wait { .. }), "{err:?}");
-        assert!(err.to_string().contains("does not name a functional parameter"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("does not name a functional parameter"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1900,7 +2012,12 @@ mod tests {
 
     #[test]
     fn a_package_with_no_functional_parameters_is_untouched() {
-        let units = vec![package("stats", "real mean_(vector x) {\n  return 1;\n}\n", &["mean_"], &[])];
+        let units = vec![package(
+            "stats",
+            "real mean_(vector x) {\n  return 1;\n}\n",
+            &["mean_"],
+            &[],
+        )];
         let plan = run(&units).unwrap();
         assert!(!plan.emits_anything());
         assert_eq!(plan.apply(0, &units[0].text), units[0].text);
@@ -1913,4 +2030,3 @@ mod tests {
         assert_eq!(compile(&units), compile(&units));
     }
 }
-

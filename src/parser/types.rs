@@ -412,7 +412,10 @@ mod tests {
 
     #[test]
     fn splitting_args_ignores_commas_in_braces_and_strings() {
-        assert_eq!(split_top_level_args("{1, 2}, \"a, b\""), vec!["{1, 2}", " \"a, b\""]);
+        assert_eq!(
+            split_top_level_args("{1, 2}, \"a, b\""),
+            vec!["{1, 2}", " \"a, b\""]
+        );
     }
 
     #[test]

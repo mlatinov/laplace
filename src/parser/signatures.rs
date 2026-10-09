@@ -200,8 +200,9 @@ fn parse_function_header(pre: &str, base: usize) -> Option<FunctionSig> {
     // `vector f(...)` is what Stan gets.
     let return_ty = types::parse_type(&return_type);
     let strip_sizes = return_ty.is_sized() && return_ty.category != TypeCategory::Array;
-    let return_size_span =
-        strip_sizes.then(|| return_size_span(pre, header_start)).flatten();
+    let return_size_span = strip_sizes
+        .then(|| return_size_span(pre, header_start))
+        .flatten();
     let (return_type, return_sizes) = if strip_sizes {
         (return_ty.bare.clone(), return_ty.sizes.clone())
     } else {
@@ -551,7 +552,10 @@ matrix rbf_cov_jittered(vector x, real alpha, real rho, real epsilon) {
         let jitter = sigs.iter().find(|s| s.name == "jitter").unwrap();
 
         assert_eq!(jitter.return_type, "real");
-        assert_eq!(jitter.params, vec![("epsilon".to_string(), "real".to_string())]);
+        assert_eq!(
+            jitter.params,
+            vec![("epsilon".to_string(), "real".to_string())]
+        );
         assert_eq!(jitter.doc, None);
     }
 
@@ -666,9 +670,15 @@ real ou(real x) {
   return x;
 }
 "#;
-        let doc = extract_signatures(source)[0].doc.clone().expect("doc attached");
+        let doc = extract_signatures(source)[0]
+            .doc
+            .clone()
+            .expect("doc attached");
         assert_eq!(doc.brief.as_deref(), Some("Ornstein-Uhlenbeck kernel."));
-        assert_eq!(doc.params, vec![("x".to_string(), "Input locations.".to_string())]);
+        assert_eq!(
+            doc.params,
+            vec![("x".to_string(), "Input locations.".to_string())]
+        );
     }
 
     #[test]
@@ -692,13 +702,17 @@ real wrapped(real x) {
         );
         assert_eq!(
             doc.params,
-            vec![("x".to_string(), "The input, continued on another line.".to_string())]
+            vec![(
+                "x".to_string(),
+                "The input, continued on another line.".to_string()
+            )]
         );
     }
 
     #[test]
     fn header_offset_points_at_the_return_type_and_item_offset_at_the_doc_block() {
-        let source = "real a() {\n  return 1;\n}\n\n// @laplace\n// @brief B.\nreal b() {\n  return 2;\n}\n";
+        let source =
+            "real a() {\n  return 1;\n}\n\n// @laplace\n// @brief B.\nreal b() {\n  return 2;\n}\n";
         let sigs = extract_signatures(source);
 
         let a = &sigs[0];
@@ -720,7 +734,10 @@ real wrapped(real x) {
         let source = "  real indented(real x) {\n    return x;\n  }\n";
         let sigs = extract_signatures(source);
         assert_eq!(sigs[0].header_offset, 2);
-        assert_eq!(sigs[0].item_offset, 0, "the line start, indentation included");
+        assert_eq!(
+            sigs[0].item_offset, 0,
+            "the line start, indentation included"
+        );
     }
 
     #[test]
@@ -728,7 +745,10 @@ real wrapped(real x) {
         let one = extract_signatures("real f(real x) {\n  return x;\n}\n");
         let two = extract_signatures("\n\nreal f(real x) {\n  return x;\n}\n");
         assert_ne!(one[0].header_offset, two[0].header_offset);
-        assert_eq!(one[0], two[0], "equality compares what a signature says, not where it is");
+        assert_eq!(
+            one[0], two[0],
+            "equality compares what a signature says, not where it is"
+        );
     }
 
     // ---- sized return types + functional parameters -----------------
@@ -787,7 +807,10 @@ real wrapped(real x) {
         assert_eq!(sig.functional_params[0].shape(), "func(real) -> real");
         // The specialized copy keeps only the value parameters.
         assert_eq!(
-            sig.value_params().iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            sig.value_params()
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>(),
             vec!["x"]
         );
     }
@@ -797,7 +820,11 @@ real wrapped(real x) {
         let source = "real h(real x, func(real, int) -> vector f, int k) {\n  return x;\n}\n";
         let sigs = extract_signatures(source);
         assert_eq!(
-            sigs[0].params.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            sigs[0]
+                .params
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>(),
             vec!["x", "f", "k"]
         );
         assert_eq!(sigs[0].functional_params[0].arg_types.len(), 2);
@@ -809,7 +836,11 @@ real wrapped(real x) {
         let source = "real h(func(real) -> real f, func(real) -> real g) {\n  return f(g(1));\n}\n";
         let sigs = extract_signatures(source);
         assert_eq!(
-            sigs[0].functional_params.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            sigs[0]
+                .functional_params
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["f", "g"]
         );
         assert!(sigs[0].value_params().is_empty());
@@ -893,9 +924,7 @@ matrix rbf_cov(vector x) {
         let doc = sigs[0].doc.as_ref().unwrap();
         assert_eq!(
             doc.math.as_deref(),
-            Some(
-                "k(x, x') = \\alpha^2 \\exp\\left(\n-\\frac{(x - x')^2}{2 \\rho^2}\n\\right)"
-            )
+            Some("k(x, x') = \\alpha^2 \\exp\\left(\n-\\frac{(x - x')^2}{2 \\rho^2}\n\\right)")
         );
     }
 
@@ -960,9 +989,6 @@ real array_sum(array[N] real xs) {
         assert_eq!(sigs.len(), 1);
         assert_eq!(sigs[0].name, "array_sum");
         let doc = sigs[0].doc.as_ref().unwrap();
-        assert_eq!(
-            doc.example.as_deref(),
-            Some("array_sum({1.0, 2.0, 3.0})")
-        );
+        assert_eq!(doc.example.as_deref(), Some("array_sum({1.0, 2.0, 3.0})"));
     }
 }

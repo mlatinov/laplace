@@ -221,7 +221,10 @@ mod tests {
         let found = calls(text, "apply_twice");
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].arity(), 2);
-        assert_eq!(&text[found[0].full_range.clone()], "apply_twice(5, add_one)");
+        assert_eq!(
+            &text[found[0].full_range.clone()],
+            "apply_twice(5, add_one)"
+        );
         assert_eq!(found[0].arg(text, 0), Some("5"));
         assert_eq!(found[0].arg(text, 1), Some("add_one"));
     }
@@ -295,7 +298,10 @@ mod tests {
     #[test]
     fn a_name_only_ever_called_reports_nothing() {
         let text = "{\n  real a = f(x);\n  return f(a);\n}\n";
-        assert_eq!(uses_outside_call_position(text, &CodeMask::new(text), "f"), None);
+        assert_eq!(
+            uses_outside_call_position(text, &CodeMask::new(text), "f"),
+            None
+        );
     }
 
     #[test]
@@ -320,12 +326,18 @@ mod tests {
     #[test]
     fn a_mention_in_a_comment_is_not_a_use() {
         let text = "{\n  // f is the callback\n  return f(1);\n}\n";
-        assert_eq!(uses_outside_call_position(text, &CodeMask::new(text), "f"), None);
+        assert_eq!(
+            uses_outside_call_position(text, &CodeMask::new(text), "f"),
+            None
+        );
     }
 
     #[test]
     fn a_longer_identifier_containing_the_name_is_not_a_use() {
         let text = "{\n  real fx = 1;\n  return f(fx);\n}\n";
-        assert_eq!(uses_outside_call_position(text, &CodeMask::new(text), "f"), None);
+        assert_eq!(
+            uses_outside_call_position(text, &CodeMask::new(text), "f"),
+            None
+        );
     }
 }

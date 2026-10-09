@@ -70,7 +70,9 @@ impl FunctionalParam {
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum FunctionalError {
-    #[error("`{param}`'s type is not a valid functional parameter: expected `func(<types>) -> <type>`")]
+    #[error(
+        "`{param}`'s type is not a valid functional parameter: expected `func(<types>) -> <type>`"
+    )]
     Malformed { param: String },
 
     #[error(
@@ -355,7 +357,10 @@ mod tests {
     fn a_multi_argument_shape_splits_on_its_own_commas() {
         let f = func("g", "func(real, int, vector) -> matrix");
         assert_eq!(
-            f.arg_types.iter().map(|t| t.bare.as_str()).collect::<Vec<_>>(),
+            f.arg_types
+                .iter()
+                .map(|t| t.bare.as_str())
+                .collect::<Vec<_>>(),
             vec!["real", "int", "vector"]
         );
         assert_eq!(f.return_type.category, TypeCategory::Matrix);
@@ -393,18 +398,26 @@ mod tests {
     fn a_missing_arrow_is_malformed() {
         assert_eq!(
             err("f", "func(real) real"),
-            FunctionalError::Malformed { param: "f".to_string() }
+            FunctionalError::Malformed {
+                param: "f".to_string()
+            }
         );
     }
 
     #[test]
     fn a_missing_return_type_is_malformed() {
-        assert!(matches!(err("f", "func(real) ->"), FunctionalError::Malformed { .. }));
+        assert!(matches!(
+            err("f", "func(real) ->"),
+            FunctionalError::Malformed { .. }
+        ));
     }
 
     #[test]
     fn an_unclosed_argument_list_is_malformed() {
-        assert!(matches!(err("f", "func(real -> real"), FunctionalError::Malformed { .. }));
+        assert!(matches!(
+            err("f", "func(real -> real"),
+            FunctionalError::Malformed { .. }
+        ));
     }
 
     #[test]
@@ -449,7 +462,11 @@ mod tests {
             uses.iter()
                 .map(|u| (u.param.as_str(), u.accessor.as_deref()))
                 .collect::<Vec<_>>(),
-            vec![("f", Some("rows")), ("f", Some("cols")), ("g", Some("size"))]
+            vec![
+                ("f", Some("rows")),
+                ("f", Some("cols")),
+                ("g", Some("size"))
+            ]
         );
         assert_eq!(&source[uses[0].range.clone()], "@wait(f).rows");
     }
@@ -462,7 +479,9 @@ mod tests {
 
     #[test]
     fn a_source_with_no_wait_yields_nothing() {
-        assert!(find_wait_uses("real f(real x) {\n  return x;\n}\n").unwrap().is_empty());
+        assert!(find_wait_uses("real f(real x) {\n  return x;\n}\n")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -486,12 +505,17 @@ mod tests {
     #[test]
     fn a_longer_word_starting_with_wait_is_not_a_placeholder() {
         assert!(find_wait_uses("real waiting_room = 1;").unwrap().is_empty());
-        assert!(find_wait_uses("// @waiting\nreal x = 1;").unwrap().is_empty());
+        assert!(find_wait_uses("// @waiting\nreal x = 1;")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn scanning_is_deterministic() {
         let source = "@wait(f) a = f(1);\nvector[@wait(g).size] b;\n";
-        assert_eq!(find_wait_uses(source).unwrap(), find_wait_uses(source).unwrap());
+        assert_eq!(
+            find_wait_uses(source).unwrap(),
+            find_wait_uses(source).unwrap()
+        );
     }
 }

@@ -248,7 +248,8 @@ mod tests {
     fn nested_braces_do_not_produce_nested_blocks() {
         // `data` appears as a *variable* name inside a function body; it is
         // not at depth zero, so it must not be reported as a block.
-        let source = "functions {\n  real f() {\n    real data_x = 1;\n    return data_x;\n  }\n}\n";
+        let source =
+            "functions {\n  real f() {\n    real data_x = 1;\n    return data_x;\n  }\n}\n";
         assert_eq!(kinds(source), vec![BlockKind::Functions]);
     }
 
@@ -268,7 +269,10 @@ mod tests {
     fn body_range_covers_exactly_the_text_between_the_braces() {
         let source = "functions {\n  real f() { return 1; }\n}\n";
         let block = &find_top_level_blocks(source)[0];
-        assert_eq!(&source[block.body_range.clone()], "\n  real f() { return 1; }\n");
+        assert_eq!(
+            &source[block.body_range.clone()],
+            "\n  real f() { return 1; }\n"
+        );
         assert_eq!(&source[block.byte_range.clone()], source.trim_end());
     }
 

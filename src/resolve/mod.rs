@@ -98,7 +98,9 @@ pub enum ResolveError {
         actual: String,
     },
 
-    #[error("`{package}` is not a dependency of this project yet -- run `laplace add {package}` first")]
+    #[error(
+        "`{package}` is not a dependency of this project yet -- run `laplace add {package}` first"
+    )]
     NotADependency { package: String },
 
     #[error(
@@ -132,9 +134,7 @@ pub enum ResolveError {
     #[error(transparent)]
     Git(#[from] git::GitError),
 
-    #[error(
-        "laplace.lock has an unrecognized source `{pkg_source}` for `{name}@{version}`"
-    )]
+    #[error("laplace.lock has an unrecognized source `{pkg_source}` for `{name}@{version}`")]
     UnknownSource {
         name: String,
         version: String,
@@ -203,10 +203,11 @@ impl Registry {
 fn dep_requirement(dep: &Dependency) -> Result<DepRequirement, ResolveError> {
     match dep {
         Dependency::Range(range) => {
-            let req = VersionReq::parse(range).map_err(|source| ResolveError::InvalidVersionReq {
-                value: range.clone(),
-                source,
-            })?;
+            let req =
+                VersionReq::parse(range).map_err(|source| ResolveError::InvalidVersionReq {
+                    value: range.clone(),
+                    source,
+                })?;
             Ok(DepRequirement::Range(req))
         }
         Dependency::Git(git_dep) => Ok(DepRequirement::Git {
@@ -366,7 +367,9 @@ impl<'a> RegistryProvider<'a> {
 
 impl PackageProvider for RegistryProvider<'_> {
     fn available_versions(&self, name: &str) -> Result<Vec<Version>, GraphError> {
-        self.registry.available_versions(name).map_err(|e| self.fail(e))
+        self.registry
+            .available_versions(name)
+            .map_err(|e| self.fail(e))
     }
 
     fn git_version(
@@ -387,8 +390,8 @@ impl PackageProvider for RegistryProvider<'_> {
         git::fetch(url, git_ref, tmp.path()).map_err(|e| self.fail(e.into()))?;
 
         let root = package_root(tmp.path(), subdir);
-        let pkg_manifest = read_git_package_manifest(&root, &source, subdir)
-            .map_err(|e| self.fail(e))?;
+        let pkg_manifest =
+            read_git_package_manifest(&root, &source, subdir).map_err(|e| self.fail(e))?;
         if pkg_manifest.name != name {
             return Err(self.fail(ResolveError::PackageNameMismatch {
                 path: root.join("laplace.toml"),
@@ -465,12 +468,14 @@ fn resolve_install_and_lock(
     preferred.extend(pinned.iter().map(|(k, v)| (k.clone(), v.clone())));
 
     let provider = RegistryProvider::new(registry);
-    let graph = graph::resolve_graph_with_preferences(&roots, &provider, &preferred)
-        .map_err(|err| match provider.take_error() {
-            // A provider callback failed; report the precise error it hit
-            // rather than the resolver's stringified copy of it.
-            Some(original) if matches!(err, GraphError::Provider(_)) => original,
-            _ => map_graph_error(err, registry),
+    let graph =
+        graph::resolve_graph_with_preferences(&roots, &provider, &preferred).map_err(|err| {
+            match provider.take_error() {
+                // A provider callback failed; report the precise error it hit
+                // rather than the resolver's stringified copy of it.
+                Some(original) if matches!(err, GraphError::Provider(_)) => original,
+                _ => map_graph_error(err, registry),
+            }
         })?;
 
     let mut packages = Vec::with_capacity(graph.packages.len());
@@ -595,10 +600,9 @@ pub fn add(
                             package: package.to_string(),
                             registry_root: registry.root.clone(),
                         })?;
-                    project_manifest.dependencies.insert(
-                        package.to_string(),
-                        Dependency::Range(format!("^{latest}")),
-                    );
+                    project_manifest
+                        .dependencies
+                        .insert(package.to_string(), Dependency::Range(format!("^{latest}")));
                 }
             }
         }
@@ -1161,7 +1165,8 @@ mod tests {
                     "gps",
                     "1.0.0",
                     "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-                    REGISTRY_SOURCE,)],
+                    REGISTRY_SOURCE,
+                )],
             },
         )
         .unwrap();
@@ -1181,7 +1186,8 @@ mod tests {
                     "ghost",
                     "1.0.0",
                     "sha256:doesnotmatter",
-                    REGISTRY_SOURCE,)],
+                    REGISTRY_SOURCE,
+                )],
             },
         )
         .unwrap();
@@ -1428,8 +1434,13 @@ mod tests {
     #[test]
     fn add_git_with_tag_records_git_source_and_installs() {
         let f = fixture();
-        let (bare, _rev) =
-            init_git_package_repo(f.registry_root.parent().unwrap(), "gps", "1.0.0", "0.1.0", &["rbf_cov"]);
+        let (bare, _rev) = init_git_package_repo(
+            f.registry_root.parent().unwrap(),
+            "gps",
+            "1.0.0",
+            "0.1.0",
+            &["rbf_cov"],
+        );
         let url = bare.to_str().unwrap();
 
         let locked = add_git(
@@ -1472,8 +1483,13 @@ mod tests {
     #[test]
     fn add_git_with_rev_records_git_source_and_installs() {
         let f = fixture();
-        let (bare, rev) =
-            init_git_package_repo(f.registry_root.parent().unwrap(), "gps", "1.0.0", "0.1.0", &["rbf_cov"]);
+        let (bare, rev) = init_git_package_repo(
+            f.registry_root.parent().unwrap(),
+            "gps",
+            "1.0.0",
+            "0.1.0",
+            &["rbf_cov"],
+        );
         let url = bare.to_str().unwrap();
 
         let locked = add_git(
@@ -1632,7 +1648,10 @@ mod tests {
         .unwrap_err();
 
         let message = err.to_string();
-        assert!(matches!(err, ResolveError::GitManifestMissing { .. }), "{message}");
+        assert!(
+            matches!(err, ResolveError::GitManifestMissing { .. }),
+            "{message}"
+        );
         assert!(message.contains("its top level"), "{message}");
         assert!(message.contains(r#"subdir = "laplace""#), "{message}");
         // Nothing was written on the way to the error.
@@ -1688,7 +1707,10 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(err, ResolveError::Manifest(ManifestError::GitSubdirInvalid { .. })),
+            matches!(
+                err,
+                ResolveError::Manifest(ManifestError::GitSubdirInvalid { .. })
+            ),
             "{err:?}"
         );
     }
@@ -1713,7 +1735,10 @@ mod tests {
         .unwrap();
 
         let err = install(&f.lockfile_path, &f.registry, &f.cache_root).unwrap_err();
-        assert!(matches!(err, ResolveError::InvalidGitSubdir { .. }), "{err:?}");
+        assert!(
+            matches!(err, ResolveError::InvalidGitSubdir { .. }),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -1746,8 +1771,13 @@ mod tests {
     #[test]
     fn install_refetches_git_sourced_package_on_a_fresh_machine() {
         let f = fixture();
-        let (bare, _rev) =
-            init_git_package_repo(f.registry_root.parent().unwrap(), "gps", "1.0.0", "0.1.0", &["rbf_cov"]);
+        let (bare, _rev) = init_git_package_repo(
+            f.registry_root.parent().unwrap(),
+            "gps",
+            "1.0.0",
+            "0.1.0",
+            &["rbf_cov"],
+        );
         let url = bare.to_str().unwrap();
 
         let locked = add_git(
@@ -1779,8 +1809,13 @@ mod tests {
     #[test]
     fn install_detects_checksum_mismatch_for_git_source() {
         let f = fixture();
-        let (bare, _rev) =
-            init_git_package_repo(f.registry_root.parent().unwrap(), "gps", "1.0.0", "0.1.0", &["rbf_cov"]);
+        let (bare, _rev) = init_git_package_repo(
+            f.registry_root.parent().unwrap(),
+            "gps",
+            "1.0.0",
+            "0.1.0",
+            &["rbf_cov"],
+        );
         let url = bare.to_str().unwrap();
 
         add_git(
@@ -1798,7 +1833,8 @@ mod tests {
 
         // Tamper with the lock's checksum after the fact.
         let mut lock = lockfile::read_lockfile(&f.lockfile_path).unwrap();
-        lock.packages[0].checksum = "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string();
+        lock.packages[0].checksum =
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string();
         lockfile::write_lockfile(&f.lockfile_path, &lock).unwrap();
 
         fs::remove_dir_all(&f.cache_root).unwrap();
@@ -1809,8 +1845,13 @@ mod tests {
     #[test]
     fn update_on_a_git_dependency_refetches_from_the_pinned_ref() {
         let f = fixture();
-        let (bare, _rev) =
-            init_git_package_repo(f.registry_root.parent().unwrap(), "gps", "1.0.0", "0.1.0", &["rbf_cov"]);
+        let (bare, _rev) = init_git_package_repo(
+            f.registry_root.parent().unwrap(),
+            "gps",
+            "1.0.0",
+            "0.1.0",
+            &["rbf_cov"],
+        );
         let url = bare.to_str().unwrap();
 
         add_git(

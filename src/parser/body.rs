@@ -128,7 +128,9 @@ impl BodyError {
             BodyError::DeclarationFromNonIdent { param, .. } => {
                 format!("declare `${param}: ident`, since it names a variable")
             }
-            BodyError::CapturedVariable { reference, owner, .. } => format!(
+            BodyError::CapturedVariable {
+                reference, owner, ..
+            } => format!(
                 "a {owner} cannot reach for one of the model's own variables; pass `{reference}` \
                  in as a placeholder instead"
             ),
@@ -153,7 +155,12 @@ pub fn check(
     let described = owner.describe();
     let mut used: Vec<String> = Vec::new();
 
-    for (keyword, label) in [("@use", "@use"), ("@template", "@template"), ("@expand", "@expand"), ("@macro", "@macro")] {
+    for (keyword, label) in [
+        ("@use", "@use"),
+        ("@template", "@template"),
+        ("@expand", "@expand"),
+        ("@macro", "@macro"),
+    ] {
         if let Some(offset) = find_keyword(body, keyword) {
             return Err(BodyError::Nested {
                 owner: described,
@@ -297,11 +304,7 @@ mod tests {
 
     #[test]
     fn a_well_formed_body_passes_and_reports_what_it_used() {
-        let used = check_macro(
-            &[ident("p"), expr("dist")],
-            "\n    $p ~ $dist;\n",
-        )
-        .unwrap();
+        let used = check_macro(&[ident("p"), expr("dist")], "\n    $p ~ $dist;\n").unwrap();
         assert_eq!(used, vec!["p", "dist"]);
     }
 
@@ -377,10 +380,17 @@ mod tests {
 
     #[test]
     fn every_nesting_keyword_is_rejected() {
-        for keyword in ["@use other::t(x)", "@expand other::m(x)", "@template t($n: ident) { }"] {
+        for keyword in [
+            "@use other::t(x)",
+            "@expand other::m(x)",
+            "@template t($n: ident) { }",
+        ] {
             let body = format!("  {keyword};\n");
             let err = check_macro(&[ident("p")], &body).unwrap_err();
-            assert!(matches!(err, BodyError::Nested { .. }), "{keyword}: {err:?}");
+            assert!(
+                matches!(err, BodyError::Nested { .. }),
+                "{keyword}: {err:?}"
+            );
         }
     }
 
