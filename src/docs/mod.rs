@@ -99,6 +99,9 @@ pub enum DocsError {
 
     #[error(transparent)]
     Manifest(#[from] crate::manifest::ManifestError),
+
+    #[error(transparent)]
+    Resolve(Box<crate::resolve::ResolveError>),
 }
 
 /// Extract every function signature from `package_dir`'s `.stan` file(s)
@@ -172,7 +175,10 @@ pub fn lookup(
         });
     };
 
-    let package_dir = cache_root.join(&locked.name).join(&locked.version);
+    // A path dependency is re-synced from its directory first, so the docs
+    // shown are the ones in the source being edited.
+    let (package_dir, _) = crate::resolve::installed_package_dir(lockfile_path, cache_root, locked)
+        .map_err(|e| DocsError::Resolve(Box::new(e)))?;
     let docs_path = package_dir.join("docs.json");
     if !docs_path.is_file() {
         return Err(DocsError::PackageNotInstalled {

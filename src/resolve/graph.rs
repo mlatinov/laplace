@@ -43,6 +43,12 @@ pub enum DepRequirement {
         /// different subdirectories are different packages, and conflict.
         subdir: Option<String>,
     },
+    /// A local directory, already made absolute against the manifest that
+    /// named it -- so two packages naming the same directory by different
+    /// relative paths agree, and the resolver needs no filesystem access.
+    Path {
+        root: std::path::PathBuf,
+    },
 }
 
 impl DepRequirement {
@@ -55,6 +61,7 @@ impl DepRequirement {
                 git_ref,
                 subdir,
             } => describe_git(url, git_ref, subdir.as_deref()),
+            DepRequirement::Path { root } => format!("path+{}", root.display()),
         }
     }
 }
@@ -88,6 +95,15 @@ pub trait PackageProvider {
         git_ref: &str,
         subdir: Option<&str>,
     ) -> Result<Version, GraphError>;
+
+    /// Resolve a path requirement to the version the directory's manifest
+    /// declares.
+    fn path_version(&self, name: &str, root: &std::path::Path) -> Result<Version, GraphError> {
+        let _ = root;
+        Err(GraphError::Provider(format!(
+            "`{name}` is a path dependency, which this provider cannot resolve"
+        )))
+    }
 
     /// The dependencies `name@version` declares in its own manifest.
     fn dependencies_of(
@@ -186,8 +202,8 @@ pub enum GraphError {
     },
 
     #[error(
-        "`{package}` is required both from git ({first}) and from git ({second}) -- a build \
-         can only contain one copy of a package"
+        "`{package}` is required both from {first} and from {second} -- a build can only \
+         contain one copy of a package"
     )]
     GitSourceConflict {
         package: String,
@@ -347,41 +363,37 @@ fn pick_version(
     provider: &dyn PackageProvider,
     preferred: Option<&Version>,
 ) -> Result<Version, GraphError> {
-    // (url, ref, subdir, requirer)
-    let mut git: Option<(&str, &str, Option<&str>, &str)> = None;
+    // A git or path source: at most one, since a build holds one copy.
+    let mut pinned: Option<&DepRequirement> = None;
     let mut ranges: Vec<(&VersionReq, &str)> = Vec::new();
 
     for constraint in constraints {
         match &constraint.requirement {
             DepRequirement::Range(req) => ranges.push((req, constraint.requirer.as_str())),
-            DepRequirement::Git {
-                url,
-                git_ref,
-                subdir,
-            } => {
-                let subdir = subdir.as_deref();
-                match git {
-                    Some((prev_url, prev_ref, prev_subdir, _))
-                        if (prev_url, prev_ref, prev_subdir) != (url, git_ref, subdir) =>
-                    {
-                        return Err(GraphError::GitSourceConflict {
-                            package: name.to_string(),
-                            first: describe_git(prev_url, prev_ref, prev_subdir),
-                            second: describe_git(url, git_ref, subdir),
-                        })
-                    }
-                    _ => git = Some((url, git_ref, subdir, constraint.requirer.as_str())),
+            source => match pinned {
+                Some(previous) if previous != source => {
+                    return Err(GraphError::GitSourceConflict {
+                        package: name.to_string(),
+                        first: previous.describe(),
+                        second: source.describe(),
+                    })
                 }
-            }
+                _ => pinned = Some(source),
+            },
         }
     }
 
-    let candidates: Vec<Version> = match git {
-        // A git source is its own registry-of-one: the checked-out ref
-        // decides the version, and every range constraint has to accept it.
-        Some((url, git_ref, subdir, _)) => {
-            vec![provider.git_version(name, url, git_ref, subdir)?]
-        }
+    let candidates: Vec<Version> = match pinned {
+        // A git or path source is its own registry-of-one: the checked-out
+        // ref or the directory decides the version, and every range
+        // constraint has to accept it.
+        Some(DepRequirement::Git {
+            url,
+            git_ref,
+            subdir,
+        }) => vec![provider.git_version(name, url, git_ref, subdir.as_deref())?],
+        Some(DepRequirement::Path { root }) => vec![provider.path_version(name, root)?],
+        Some(DepRequirement::Range(_)) => unreachable!("ranges are collected separately"),
         None => provider.available_versions(name)?,
     };
 

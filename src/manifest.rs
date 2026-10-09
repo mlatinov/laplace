@@ -15,6 +15,7 @@ use thiserror::Error;
 /// gps = "^1.0"
 /// gps2 = { git = "https://github.com/user/repo", tag = "0.1.0" }
 /// gps3 = { git = "https://github.com/user/repo", rev = "abc123" }
+/// gps4 = { path = "../gps" }
 /// ```
 ///
 /// An optional top-level `laplace = ">=0.2"` names the compiler versions
@@ -36,13 +37,45 @@ pub struct ProjectManifest {
 pub enum Dependency {
     Range(String),
     Git(GitDependency),
+    Path(PathDependency),
 }
 
 impl Dependency {
     pub fn as_range(&self) -> Option<&str> {
         match self {
             Dependency::Range(range) => Some(range),
-            Dependency::Git(_) => None,
+            Dependency::Git(_) | Dependency::Path(_) => None,
+        }
+    }
+}
+
+/// A package taken straight from a local directory -- the edit-and-test
+/// loop for library authors. `path` is relative to the directory of the
+/// `laplace.toml` that declares it. Not reproducible on another machine,
+/// which `install --locked` and `laplace release` point out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathDependency {
+    pub path: String,
+    /// Where the package's `laplace.toml` lives below `path`, matching the
+    /// git form. `None` means `path` itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subdir: Option<String>,
+}
+
+impl PathDependency {
+    /// The validated subdirectory the package is rooted in, if any.
+    pub fn subdir(&self) -> Result<Option<&str>, ManifestError> {
+        match self.subdir.as_deref() {
+            None => Ok(None),
+            Some(subdir) => {
+                validate_subdir(subdir).map_err(|reason| ManifestError::PathSubdirInvalid {
+                    path: self.path.clone(),
+                    subdir: subdir.to_string(),
+                    reason,
+                })?;
+                Ok(Some(subdir))
+            }
         }
     }
 }
@@ -223,6 +256,13 @@ pub enum ManifestError {
 
     #[error("git dependency `{git}` cannot have both `tag` and `rev` set")]
     GitRefAmbiguous { git: String },
+
+    #[error("path dependency `{path}` has an invalid `subdir` (`{subdir}`): {reason}")]
+    PathSubdirInvalid {
+        path: String,
+        subdir: String,
+        reason: &'static str,
+    },
 
     #[error(
         "{path} requires laplace {required}, but this is laplace {running}\n  help: update the \
@@ -750,6 +790,31 @@ mod tests {
             check_project_compiler_requirement(&path),
             Err(ManifestError::CompilerTooOld { .. })
         ));
+    }
+
+    #[test]
+    fn a_path_dependency_parses_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("laplace.toml");
+        fs::write(
+            &path,
+            "[dependencies]\ngps = { path = \"../gps\" }\nkern = { path = \"../repo\", subdir = \"lib\" }\n",
+        )
+        .unwrap();
+        let manifest = read_project_manifest(&path).unwrap();
+        assert_eq!(
+            manifest.dependencies["gps"],
+            Dependency::Path(PathDependency {
+                path: "../gps".to_string(),
+                subdir: None,
+            })
+        );
+        match &manifest.dependencies["kern"] {
+            Dependency::Path(dep) => assert_eq!(dep.subdir().unwrap(), Some("lib")),
+            other => panic!("expected a path dependency, got {other:?}"),
+        }
+        write_project_manifest(&path, &manifest).unwrap();
+        assert_eq!(read_project_manifest(&path).unwrap(), manifest);
     }
 
     #[test]

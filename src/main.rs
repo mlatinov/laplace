@@ -66,22 +66,32 @@ enum Command {
         split_functions: bool,
     },
     /// Install every package pinned in laplace.lock
-    Install,
+    Install {
+        /// CI mode: refuse a lock with path dependencies, which only exist
+        /// on this machine (plain install only warns about them)
+        #[arg(long)]
+        locked: bool,
+    },
     /// Add a dependency (optionally pinned to `<pkg>@<version>`), resolving
     /// it and updating laplace.toml + laplace.lock. Pass `--git <url>` with
     /// `--tag <tag>` or `--rev <rev>` to add a git dependency instead of
     /// resolving from the local registry, and `--subdir <path>` if that
-    /// repository keeps the package below its top level.
+    /// repository keeps the package below its top level. Pass `--path <dir>`
+    /// to depend on a local directory instead, re-read on every
+    /// install/build/doc so edits show up without a version bump.
     Add {
         package: String,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "path")]
         git: Option<String>,
+        /// A local package directory (relative to the project)
+        #[arg(long)]
+        path: Option<String>,
         #[arg(long)]
         tag: Option<String>,
         #[arg(long)]
         rev: Option<String>,
-        /// Directory inside the git repository holding the package's
-        /// laplace.toml (default: the repository root)
+        /// Directory inside the git repository (or --path directory)
+        /// holding the package's laplace.toml (default: its root)
         #[arg(long)]
         subdir: Option<String>,
     },
@@ -130,16 +140,18 @@ fn run() -> Result<(), CliError> {
             validate,
             split_functions,
         } => cmd_build(&file, output, check, validate, split_functions),
-        Command::Install => cmd_install(),
+        Command::Install { locked } => cmd_install(locked),
         Command::Add {
             package,
             git,
+            path,
             tag,
             rev,
             subdir,
         } => cmd_add(
             &package,
             git.as_deref(),
+            path.as_deref(),
             tag.as_deref(),
             rev.as_deref(),
             subdir.as_deref(),
@@ -431,7 +443,9 @@ fn cmd_build(
                  the lockfile is inconsistent; re-run `laplace add`"
             ))
         })?;
-        let package_dir = cache_root.join(&locked.name).join(&locked.version);
+        let (package_dir, note) =
+            resolve::installed_package_dir(&lockfile_path, &cache_root, locked)?;
+        print_notes(note.as_slice());
         if !package_dir.is_dir() {
             return Err(CliError::Message(format!(
                 "`{}@{}` is in laplace.lock but not installed -- run `laplace install` first",
@@ -566,13 +580,13 @@ fn pluralize(count: usize, singular: &'static str, plural: &'static str) -> &'st
     }
 }
 
-fn cmd_install() -> Result<(), CliError> {
+fn cmd_install(locked: bool) -> Result<(), CliError> {
     manifest::check_project_compiler_requirement(Path::new("laplace.toml"))?;
     let lockfile_path = PathBuf::from("laplace.lock");
     let registry = Registry::new(registry_root());
     let cache_root = default_cache_root();
 
-    let installed = resolve::install(&lockfile_path, &registry, &cache_root)?;
+    let installed = resolve::install(&lockfile_path, &registry, &cache_root, locked)?;
     print_notes(&installed.notes);
     println!(
         "installed {} {}",
@@ -597,6 +611,7 @@ fn print_notes(notes: &[resolve::Note]) {
 fn cmd_add(
     spec: &str,
     git: Option<&str>,
+    path: Option<&str>,
     tag: Option<&str>,
     rev: Option<&str>,
     subdir: Option<&str>,
@@ -632,9 +647,35 @@ fn cmd_add(
         return Ok(());
     }
 
+    if let Some(dir) = path {
+        if tag.is_some() || rev.is_some() {
+            return Err(CliError::Message(
+                "--tag/--rev only apply together with --git".to_string(),
+            ));
+        }
+        let registry = Registry::new(registry_root());
+        let resolved = resolve::add_path(
+            &project_manifest_path,
+            &lockfile_path,
+            &registry,
+            &cache_root,
+            spec,
+            dir,
+            subdir,
+        )?;
+        print_notes(&resolved.notes);
+        let locked = resolved.locked;
+        println!(
+            "added {}@{} ({})",
+            locked.name, locked.version, locked.source
+        );
+        return Ok(());
+    }
+
     if tag.is_some() || rev.is_some() || subdir.is_some() {
         return Err(CliError::Message(
-            "--tag/--rev/--subdir only apply together with --git".to_string(),
+            "--tag/--rev/--subdir only apply together with --git (or --path, for --subdir)"
+                .to_string(),
         ));
     }
 

@@ -529,3 +529,200 @@ fn doc_on_a_private_item_names_the_installed_version_and_what_to_check() {
     );
     assert!(err.contains("laplace update stats"), "{err}");
 }
+
+// -- Phase 5: path dependencies ---------------------------------------------
+
+/// A local `gps` package at `<root>/<dir>` exporting `rbf_cov`.
+fn local_gps(env: &Env, dir: &str) -> PathBuf {
+    let pkg = env.dir(dir);
+    write(&pkg.join("laplace.toml"), &gps_manifest("0.1.0"));
+    write(&pkg.join("gps.stan"), RBF_STAN);
+    pkg
+}
+
+#[test]
+fn a_path_dependency_is_locked_relative_to_the_project_and_builds() {
+    let env = setup();
+    local_gps(&env, "gps-lib");
+    let project = env.dir("project");
+    write(&project.join("model.laplace"), MODEL);
+
+    let out = env.run_in(&project, &["add", "gps", "--path", "../gps-lib"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("added gps@0.1.0 (path+../gps-lib)"),
+        "{}",
+        stdout(&out)
+    );
+
+    let manifest = read(&project.join("laplace.toml"));
+    assert!(manifest.contains("path = \"../gps-lib\""), "{manifest}");
+    let lock = read(&project.join("laplace.lock"));
+    assert!(lock.contains("source = \"path+../gps-lib\""), "{lock}");
+    assert!(
+        !lock.contains(&env.root.display().to_string()),
+        "absolute path in lock: {lock}"
+    );
+
+    let out = env.run_in(&project, &["build", "model.laplace"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(read(&project.join("build/model.stan")).contains("gps__rbf_cov"));
+
+    // A path package never lands in the shared versioned cache, where it
+    // could shadow a real gps@0.1.0 for other projects.
+    assert!(!env.cache().join("gps").join("0.1.0").exists());
+}
+
+#[test]
+fn edits_to_a_path_package_show_up_in_the_next_build_and_doc() {
+    let env = setup();
+    let pkg = local_gps(&env, "gps-lib");
+    let project = env.dir("project");
+    write(&project.join("model.laplace"), MODEL);
+    assert!(env
+        .run_in(&project, &["add", "gps", "--path", "../gps-lib"])
+        .status
+        .success());
+    assert!(env
+        .run_in(&project, &["build", "model.laplace"])
+        .status
+        .success());
+
+    // Edit in place: no version bump, no tag, no `laplace update`.
+    write(
+        &pkg.join("gps.stan"),
+        &RBF_STAN
+            .replace("RBF covariance.", "Edited brief.")
+            .replace(
+                "gp_exp_quad_cov(x, alpha, rho)",
+                "gp_exp_quad_cov(x, alpha, 2 * rho)",
+            ),
+    );
+
+    let out = env.run_in(&project, &["build", "model.laplace"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("refreshed gps@0.1.0"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(read(&project.join("build/model.stan")).contains("2 * rho"));
+
+    let out = env.run_in(&project, &["doc", "gps::rbf_cov"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("Edited brief."), "{}", stdout(&out));
+
+    // Unchanged since the last sync: nothing to refresh.
+    let out = env.run_in(&project, &["build", "model.laplace"]);
+    assert!(!stdout(&out).contains("refreshed"), "{}", stdout(&out));
+}
+
+#[test]
+fn a_path_dependency_accepts_a_subdir() {
+    let env = setup();
+    let repo = env.dir("monorepo");
+    write(&repo.join("README.md"), "# not the package\n");
+    write(&repo.join("pkgs/gps/laplace.toml"), &gps_manifest("0.1.0"));
+    write(&repo.join("pkgs/gps/gps.stan"), RBF_STAN);
+    let project = env.dir("project");
+
+    let out = env.run_in(
+        &project,
+        &[
+            "add",
+            "gps",
+            "--path",
+            "../monorepo",
+            "--subdir",
+            "pkgs/gps",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let manifest = read(&project.join("laplace.toml"));
+    assert!(manifest.contains("subdir = \"pkgs/gps\""), "{manifest}");
+    assert!(read(&project.join("laplace.lock")).contains("source = \"path+../monorepo/pkgs/gps\""));
+}
+
+#[test]
+fn install_warns_about_path_dependencies_and_locked_refuses_them() {
+    let env = setup();
+    local_gps(&env, "gps-lib");
+    let project = env.dir("project");
+    assert!(env
+        .run_in(&project, &["add", "gps", "--path", "../gps-lib"])
+        .status
+        .success());
+
+    let out = env.run_in(&project, &["install"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("warning: `gps` is a path dependency"), "{err}");
+    assert!(err.contains("another machine will not have it"), "{err}");
+
+    let out = env.run_in(&project, &["install", "--locked"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("path dependency: gps (path+../gps-lib)"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn a_path_package_can_path_depend_on_a_sibling_relative_to_itself() {
+    let env = setup();
+    let stats = env.dir("libs/stats");
+    write(
+        &stats.join("laplace.toml"),
+        "name = \"stats\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        &stats.join("stats.laplacelib"),
+        "pub real twice(real x) {\n  return 2 * x;\n}\n",
+    );
+    let reg = env.dir("libs/reg");
+    write(
+        &reg.join("laplace.toml"),
+        "name = \"reg\"\nversion = \"0.1.0\"\n\n[dependencies]\nstats = { path = \"../stats\" }\n",
+    );
+    write(
+        &reg.join("reg.laplacelib"),
+        "library {\n  import stats\n}\n\npub real fit(real x) {\n  return stats::twice(x);\n}\n",
+    );
+    let project = env.dir("project");
+    write(
+        &project.join("model.laplace"),
+        "library {\n  import reg\n}\n\nparameters {\n  real y;\n}\nmodel {\n  target += reg::fit(y);\n}\n",
+    );
+
+    let out = env.run_in(&project, &["add", "reg", "--path", "../libs/reg"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let lock = read(&project.join("laplace.lock"));
+    assert!(lock.contains("source = \"path+../libs/stats\""), "{lock}");
+    let out = env.run_in(&project, &["build", "model.laplace"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(read(&project.join("build/model.stan")).contains("stats__twice"));
+}
+
+#[test]
+fn a_registry_package_may_not_declare_a_path_dependency() {
+    let env = setup();
+    let dir = env.registry().join("reg").join("1.0.0");
+    write(
+        &dir.join("laplace.toml"),
+        "name = \"reg\"\nversion = \"1.0.0\"\n\n[dependencies]\nstats = { path = \"../stats\" }\n",
+    );
+    write(
+        &dir.join("reg.laplacelib"),
+        "pub real f() {\n  return 1;\n}\n",
+    );
+    let project = env.dir("project");
+    let out = env.run_in(&project, &["add", "reg"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out)
+            .contains("only the project, or another path package, may use a path dependency"),
+        "{}",
+        stderr(&out)
+    );
+}
