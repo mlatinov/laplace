@@ -1,0 +1,35 @@
+# Maintainer: FILL IN <name> <email>
+#
+# Installs the prebuilt release binary published by
+# .github/workflows/release.yml. See RELEASING.md, "AUR".
+#
+# FILL IN AFTER EACH RELEASE:
+#   - pkgver (without the leading `v`), and reset pkgrel to 1
+#   - sha256sums_x86_64 / sha256sums_aarch64: the first field of
+#     laplace-<target>.tar.gz.sha256 from the release (or run `updpkgsums`)
+#   - regenerate .SRCINFO: makepkg --printsrcinfo > .SRCINFO
+# The 'SKIP' placeholders below must not be published as-is.
+
+pkgname=laplace-bin
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="Package manager, namespaced imports and doc lookup for Stan (prebuilt binary)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/mlatinov/laplace"
+license=('MIT')
+# git fetches git-sourced Stan packages at `laplace add --git` / `install`.
+depends=('git' 'gcc-libs' 'glibc')
+provides=('laplace')
+conflicts=('laplace' 'laplace-git')
+source_x86_64=("laplace-$pkgver-x86_64.tar.gz::$url/releases/download/v$pkgver/laplace-x86_64-unknown-linux-gnu.tar.gz")
+source_aarch64=("laplace-$pkgver-aarch64.tar.gz::$url/releases/download/v$pkgver/laplace-aarch64-unknown-linux-gnu.tar.gz")
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
+
+package() {
+    cd "laplace-$CARCH-unknown-linux-gnu"
+    install -Dm755 laplace "$pkgdir/usr/bin/laplace"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 CHANGELOG.md "$pkgdir/usr/share/doc/$pkgname/CHANGELOG.md"
+}

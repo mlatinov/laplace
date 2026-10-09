@@ -1,0 +1,55 @@
+# Maintainer: FILL IN <name> <email>
+#
+# Builds laplace from the tip of `main`. pkgver is computed by pkgver(), and
+# a VCS source is correctly checksummed as 'SKIP', so this PKGBUILD needs no
+# per-release edits -- only the maintainer line and a regenerated .SRCINFO
+# (makepkg --printsrcinfo > .SRCINFO) before the first upload.
+
+pkgname=laplace-git
+pkgver=0.2.0.r0.g0000000
+pkgrel=1
+pkgdesc="Package manager, namespaced imports and doc lookup for Stan (built from git main)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/mlatinov/laplace"
+license=('MIT')
+depends=('git' 'gcc-libs' 'glibc')
+makedepends=('cargo')
+provides=('laplace')
+conflicts=('laplace' 'laplace-bin')
+options=('!lto')
+source=("$pkgname::git+$url.git#branch=main")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$pkgname"
+    local version
+    version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+    printf '%s.r%s.g%s' "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+    cd "$pkgname"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release
+}
+
+check() {
+    cd "$pkgname"
+    export RUSTUP_TOOLCHAIN=stable
+    # The integration tests use git and local temp repositories only.
+    cargo test --frozen
+}
+
+package() {
+    cd "$pkgname"
+    install -Dm755 target/release/laplace "$pkgdir/usr/bin/laplace"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
