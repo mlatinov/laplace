@@ -313,3 +313,219 @@ fn init_update_adds_new_exports_once_and_warns_about_stale_ones() {
     assert!(pruned.status.success(), "{}", stderr(&pruned));
     assert!(!read(&pkg.join("laplace.toml")).contains("removed_fn"));
 }
+
+// -- git fixtures -------------------------------------------------------------
+
+/// Run git with a clean, deterministic identity and no user config.
+fn git(cwd: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
+        .output()
+        .expect("failed to spawn git");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A working clone at `<root>/<name>-work` pushing to a bare repository at
+/// `<root>/<name>.git`, with one commit on `main` holding `files`.
+/// Returns `(work, bare)`.
+fn git_repo(env: &Env, name: &str, files: &[(&str, &str)]) -> (PathBuf, PathBuf) {
+    let bare = env.root.join(format!("{name}.git"));
+    let work = env.root.join(format!("{name}-work"));
+    git(
+        &env.root,
+        &[
+            "init",
+            "--quiet",
+            "--bare",
+            "-b",
+            "main",
+            bare.to_str().unwrap(),
+        ],
+    );
+    git(
+        &env.root,
+        &["init", "--quiet", "-b", "main", work.to_str().unwrap()],
+    );
+    for (path, contents) in files {
+        write(&work.join(path), contents);
+    }
+    git(&work, &["add", "."]);
+    git(&work, &["commit", "--quiet", "-m", "init"]);
+    git(&work, &["remote", "add", "origin", bare.to_str().unwrap()]);
+    git(&work, &["push", "--quiet", "-u", "origin", "main"]);
+    (work, bare)
+}
+
+fn gps_manifest(version: &str) -> String {
+    format!("name = \"gps\"\nversion = \"{version}\"\nexports = [\"rbf_cov\"]\n")
+}
+
+// -- Phase 4: stale cache and better errors ---------------------------------
+
+#[test]
+fn update_refreshes_a_cache_whose_source_changed_without_a_version_bump() {
+    let env = setup();
+    let pkg = registry_gps(&env, "1.0.0", "");
+    let project = env.dir("project");
+    assert!(env.run_in(&project, &["add", "gps"]).status.success());
+    let cached = env.cache().join("gps").join("1.0.0");
+    assert!(read(&cached.join("docs.json")).contains("RBF covariance."));
+
+    // The author edits the package in place, same version.
+    write(
+        &pkg.join("gps.stan"),
+        &RBF_STAN.replace("RBF covariance.", "Squared exponential kernel."),
+    );
+
+    // Re-running without changes says nothing about refreshing...
+    let out = env.run_in(&project, &["update", "gps"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("refreshed gps@1.0.0 (source changed)"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(read(&cached.join("gps.stan")).contains("Squared exponential kernel."));
+    assert!(read(&cached.join("docs.json")).contains("Squared exponential kernel."));
+
+    // ...and a second update has nothing left to refresh.
+    let again = env.run_in(&project, &["update", "gps"]);
+    assert!(!stdout(&again).contains("refreshed"), "{}", stdout(&again));
+
+    // The lock now records the new contents, so install agrees with it.
+    let out = env.run_in(&project, &["install"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+#[test]
+fn install_refuses_a_source_that_no_longer_matches_the_lock() {
+    let env = setup();
+    let pkg = registry_gps(&env, "1.0.0", "");
+    let project = env.dir("project");
+    assert!(env.run_in(&project, &["add", "gps"]).status.success());
+    let lock_before = read(&project.join("laplace.lock"));
+    let cached = env.cache().join("gps").join("1.0.0").join("gps.stan");
+    let cached_before = read(&cached);
+
+    write(&pkg.join("gps.stan"), &RBF_STAN.replace("RBF", "Changed"));
+
+    let out = env.run_in(&project, &["install"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("checksum mismatch for `gps@1.0.0`"), "{err}");
+    assert!(err.contains("without a version bump"), "{err}");
+    assert!(err.contains("laplace update gps"), "{err}");
+    // Neither copy was used: the cache and the lock are untouched.
+    assert_eq!(read(&cached), cached_before);
+    assert_eq!(read(&project.join("laplace.lock")), lock_before);
+}
+
+#[test]
+fn a_missing_tag_lists_the_available_tags_and_suggests_the_newest() {
+    let env = setup();
+    let (work, bare) = git_repo(
+        &env,
+        "gps",
+        &[
+            ("laplace.toml", &gps_manifest("0.1.0")),
+            ("gps.stan", RBF_STAN),
+        ],
+    );
+    for tag in ["0.1.0", "0.2.0", "0.10.0"] {
+        git(&work, &["tag", tag]);
+    }
+    git(&work, &["push", "--quiet", "origin", "--tags"]);
+    let project = env.dir("project");
+
+    let out = env.run_in(
+        &project,
+        &[
+            "add",
+            "gps",
+            "--git",
+            bare.to_str().unwrap(),
+            "--tag",
+            "0.3.0",
+        ],
+    );
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("`0.3.0` does not exist"), "{err}");
+    assert!(
+        err.contains("available tags: 0.1.0, 0.10.0, 0.2.0"),
+        "{err}"
+    );
+    assert!(err.contains("did you mean `--tag 0.10.0`?"), "{err}");
+    assert!(!err.contains("Remote branch"), "{err}");
+}
+
+#[test]
+fn a_tag_naming_a_different_version_than_the_manifest_warns() {
+    let env = setup();
+    let (work, bare) = git_repo(
+        &env,
+        "gps",
+        &[
+            ("laplace.toml", &gps_manifest("0.1.1")),
+            ("gps.stan", RBF_STAN),
+        ],
+    );
+    git(&work, &["tag", "0.1.2"]);
+    git(&work, &["push", "--quiet", "origin", "0.1.2"]);
+    let project = env.dir("project");
+
+    let out = env.run_in(
+        &project,
+        &[
+            "add",
+            "gps",
+            "--git",
+            bare.to_str().unwrap(),
+            "--tag",
+            "0.1.2",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("warning: tag 0.1.2 of `gps` contains version 0.1.1 in laplace.toml"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn doc_on_a_private_item_names_the_installed_version_and_what_to_check() {
+    let env = setup();
+    let dir = env.registry().join("stats").join("1.0.0");
+    write(
+        &dir.join("laplace.toml"),
+        "name = \"stats\"\nversion = \"1.0.0\"\n",
+    );
+    write(
+        &dir.join("stats.laplacelib"),
+        "// @laplace\n// @brief Mean.\nreal mean_(vector x) {\n  return mean(x);\n}\n",
+    );
+    let project = env.dir("project");
+    assert!(env.run_in(&project, &["add", "stats"]).status.success());
+
+    let out = env.run_in(&project, &["doc", "stats::mean_"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(
+        err.contains("installed `stats@1.0.0` defines `mean_` without `pub`"),
+        "{err}"
+    );
+    assert!(err.contains("laplace update stats"), "{err}");
+}

@@ -245,13 +245,18 @@ pub enum CodegenError {
 
     #[error(
         "`{package}::{func}` is private to package `{package}`\n  --> {location}\n  help: only \
-         items marked `pub` can be used outside their package"
+         items marked `pub` can be used outside their package. This build uses the installed \
+         `{package}@{version}`; if a newer release made `{func}` public, run \
+         `laplace update {package}`"
     )]
     ItemIsPrivate {
         package: String,
         func: String,
         /// Already rendered as `file:line:column`.
         location: String,
+        /// The installed version of `package`, which is often the real
+        /// problem: an old tag, or a cache that predates the `pub`.
+        version: String,
     },
 
     #[error(
@@ -935,6 +940,7 @@ fn check_exported(
             package: call.package.clone(),
             func: call.func.clone(),
             location: location(),
+            version: target.version.clone(),
         });
     }
     Err(CodegenError::FunctionNotExported {

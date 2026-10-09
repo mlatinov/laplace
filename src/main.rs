@@ -573,12 +573,25 @@ fn cmd_install() -> Result<(), CliError> {
     let cache_root = default_cache_root();
 
     let installed = resolve::install(&lockfile_path, &registry, &cache_root)?;
+    print_notes(&installed.notes);
     println!(
         "installed {} {}",
-        installed.len(),
-        pluralize(installed.len(), "package", "packages"),
+        installed.packages.len(),
+        pluralize(installed.packages.len(), "package", "packages"),
     );
     Ok(())
+}
+
+/// Print what the resolver noticed: information to stdout, warnings to
+/// stderr.
+fn print_notes(notes: &[resolve::Note]) {
+    for note in notes {
+        if note.is_warning() {
+            eprintln!("warning: {note}");
+        } else {
+            println!("{note}");
+        }
+    }
 }
 
 fn cmd_add(
@@ -602,7 +615,7 @@ fn cmd_add(
 
     if let Some(url) = git {
         let registry = Registry::new(registry_root());
-        let locked = resolve::add_git(
+        let resolved = resolve::add_git(
             &project_manifest_path,
             &lockfile_path,
             &registry,
@@ -613,6 +626,8 @@ fn cmd_add(
             rev,
             subdir,
         )?;
+        print_notes(&resolved.notes);
+        let locked = resolved.locked;
         println!("added {}@{} (git)", locked.name, locked.version);
         return Ok(());
     }
@@ -625,7 +640,7 @@ fn cmd_add(
 
     let (name, version) = parse_package_spec(spec);
     let registry = Registry::new(registry_root());
-    let locked = resolve::add(
+    let resolved = resolve::add(
         &project_manifest_path,
         &lockfile_path,
         &registry,
@@ -633,6 +648,8 @@ fn cmd_add(
         name,
         version,
     )?;
+    print_notes(&resolved.notes);
+    let locked = resolved.locked;
     println!("added {}@{}", locked.name, locked.version);
     Ok(())
 }
@@ -643,13 +660,15 @@ fn cmd_update(package: &str) -> Result<(), CliError> {
     let registry = Registry::new(registry_root());
     let cache_root = default_cache_root();
 
-    let locked = resolve::update(
+    let resolved = resolve::update(
         &project_manifest_path,
         &lockfile_path,
         &registry,
         &cache_root,
         package,
     )?;
+    print_notes(&resolved.notes);
+    let locked = resolved.locked;
     println!("updated {} to {}", locked.name, locked.version);
     Ok(())
 }

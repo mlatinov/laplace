@@ -87,6 +87,88 @@ pub fn fetch(url: &str, git_ref: &str, dest: &Path) -> Result<(), GitError> {
     Ok(())
 }
 
+/// Run `git` and return its stdout.
+fn output(args: &[&str], cwd: Option<&Path>) -> Result<String, GitError> {
+    let mut cmd = Command::new("git");
+    cmd.args(args);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    let joined = args.join(" ");
+    let out = cmd.output().map_err(|source| GitError::Spawn {
+        args: joined.clone(),
+        source,
+    })?;
+    if !out.status.success() {
+        return Err(GitError::CommandFailed {
+            args: joined,
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The tag and branch names a remote advertises.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RemoteRefs {
+    /// Tag names, sorted (peeled `^{}` duplicates removed).
+    pub tags: Vec<String>,
+    /// Branch names, sorted.
+    pub branches: Vec<String>,
+}
+
+impl RemoteRefs {
+    /// Whether `name` is a tag or a branch on the remote.
+    pub fn has(&self, name: &str) -> bool {
+        self.tags.iter().any(|t| t == name) || self.branches.iter().any(|b| b == name)
+    }
+
+    /// Parse `git ls-remote --tags --heads` output.
+    pub fn parse(listing: &str) -> RemoteRefs {
+        let mut refs = RemoteRefs::default();
+        for line in listing.lines() {
+            let Some((_, name)) = line.split_once('\t') else {
+                continue;
+            };
+            if let Some(tag) = name.strip_prefix("refs/tags/") {
+                let tag = tag.strip_suffix("^{}").unwrap_or(tag);
+                refs.tags.push(tag.to_string());
+            } else if let Some(branch) = name.strip_prefix("refs/heads/") {
+                refs.branches.push(branch.to_string());
+            }
+        }
+        refs.tags.sort();
+        refs.tags.dedup();
+        refs.branches.sort();
+        refs
+    }
+}
+
+/// List a remote's tags and branches without cloning it.
+pub fn remote_refs(url: &str) -> Result<RemoteRefs, GitError> {
+    output(&["ls-remote", "--tags", "--heads", url], None).map(|text| RemoteRefs::parse(&text))
+}
+
+/// The version a tag names, if it names one: `1.2.0` or `v1.2.0`.
+pub fn version_in_tag(tag: &str) -> Option<semver::Version> {
+    let bare = tag.strip_prefix('v').unwrap_or(tag);
+    semver::Version::parse(bare).ok()
+}
+
+/// The tag naming the highest version, if any tag names a version at all.
+pub fn newest_version_tag(tags: &[String]) -> Option<&str> {
+    tags.iter()
+        .filter_map(|tag| version_in_tag(tag).map(|v| (v, tag)))
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, tag)| tag.as_str())
+}
+
+/// Whether `git_ref` could be a commit sha (abbreviated or full), which a
+/// tag listing cannot confirm or deny.
+pub fn looks_like_commit(git_ref: &str) -> bool {
+    (7..=40).contains(&git_ref.len()) && git_ref.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// The `laplace.lock` `source` string for a git-sourced package:
 /// `git+<url>@<ref>`, with `#<subdir>` appended when the package is rooted
 /// in a subdirectory of the repository rather than at its top level.
@@ -157,6 +239,49 @@ mod tests {
             parse_git_source(&with_subdir),
             Some(("git@github.com:user/repo", "abc123", Some("lib")))
         );
+    }
+
+    #[test]
+    fn remote_refs_parse_tags_and_branches_and_drop_peeled_duplicates() {
+        let listing = "aaa\trefs/heads/main\nbbb\trefs/tags/0.1.0\nccc\trefs/tags/0.1.0^{}\n\
+                       ddd\trefs/tags/v0.2.0\n";
+        let refs = RemoteRefs::parse(listing);
+        assert_eq!(refs.tags, vec!["0.1.0", "v0.2.0"]);
+        assert_eq!(refs.branches, vec!["main"]);
+        assert!(refs.has("main") && refs.has("v0.2.0") && !refs.has("0.3.0"));
+    }
+
+    #[test]
+    fn the_newest_tag_is_chosen_by_version_not_by_name() {
+        let tags: Vec<String> = ["0.9.0", "0.10.0", "v0.2.0", "latest"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(newest_version_tag(&tags), Some("0.10.0"));
+        assert_eq!(newest_version_tag(&["latest".to_string()]), None);
+    }
+
+    #[test]
+    fn version_in_tag_accepts_an_optional_v_prefix() {
+        assert_eq!(
+            version_in_tag("v1.2.3"),
+            semver::Version::parse("1.2.3").ok()
+        );
+        assert_eq!(
+            version_in_tag("1.2.3"),
+            semver::Version::parse("1.2.3").ok()
+        );
+        assert_eq!(version_in_tag("abc1234"), None);
+    }
+
+    #[test]
+    fn commit_shas_are_recognised() {
+        assert!(looks_like_commit("abc1234"));
+        assert!(looks_like_commit(
+            "0123456789abcdef0123456789abcdef01234567"
+        ));
+        assert!(!looks_like_commit("0.1.0"));
+        assert!(!looks_like_commit("main"));
     }
 
     #[test]

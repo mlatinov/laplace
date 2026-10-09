@@ -79,10 +79,20 @@ pub enum DocsError {
     FunctionNotFound { package: String, func: String },
 
     #[error(
-        "`{package}::{func}` is private to package `{package}`\n  help: only items marked `pub` \
-         are part of `{package}`'s documented API"
+        "`{package}::{func}` is private to package `{package}`: the installed \
+         `{package}@{version}` defines `{func}` without `pub`\n  help: only items marked `pub` \
+         are part of `{package}`'s documented API. If you expected it to be public, the \
+         installed copy may be older than you think -- laplace.lock pins {version} from \
+         `{pkg_source}`; check that this version/tag contains the `pub`, then run \
+         `laplace update {package}` (which also refreshes a cache whose source changed \
+         without a version bump)"
     )]
-    ItemIsPrivate { package: String, func: String },
+    ItemIsPrivate {
+        package: String,
+        func: String,
+        version: String,
+        pkg_source: String,
+    },
 
     #[error(transparent)]
     Package(Box<crate::package::PackageError>),
@@ -184,6 +194,8 @@ pub fn lookup(
         return Err(DocsError::ItemIsPrivate {
             package: package.to_string(),
             func: func.to_string(),
+            version: locked.version.clone(),
+            pkg_source: locked.source.clone(),
         });
     }
     let overloads: Vec<FunctionSig> = docs
