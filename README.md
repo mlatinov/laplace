@@ -17,19 +17,51 @@ libraries](#libraries-that-depend-on-libraries).
 
 ## Installing laplace
 
-laplace is built from source with Cargo (edition 2021 — any reasonably recent
-stable Rust toolchain works):
+**Prebuilt binary** (Linux x86_64/aarch64, macOS, Windows): the installer
+downloads the right archive from GitHub Releases, verifies its sha256, and
+puts `laplace` in `~/.local/bin` (override with `LAPLACE_INSTALL_DIR`; pin a
+release with `LAPLACE_VERSION=0.2.0`):
 
 ```sh
-cargo install --path . --root ~/.local
+curl -fsSL https://github.com/mlatinov/laplace/releases/latest/download/install.sh | sh
 ```
 
-Add the install directory's `bin/` to your `PATH` if it isn't already there
+**Arch Linux:** `laplace-bin` (release binary) or `laplace-git` (built from
+`main`) from the AUR, e.g. `yay -S laplace-bin`.
+
+**From source** with Cargo (edition 2021 — any reasonably recent stable Rust
+toolchain works):
+
+```sh
+cargo install --locked --git https://github.com/mlatinov/laplace
+# or, from a checkout:
+cargo install --locked --path . --root ~/.local
+```
+
+Add the install directory to your `PATH` if it isn't already there
 (e.g. `export PATH="$HOME/.local/bin:$PATH"`), then verify:
 
 ```sh
-laplace --help
+laplace --version             # laplace 0.2.0 (e8b84c9)
+laplace version --verbose     # + build date, target, cache and registry dirs
 ```
+
+### Updating laplace
+
+```sh
+laplace self-update --check   # exit 0: up to date, exit 10: update available
+laplace self-update           # install the latest release
+laplace self-update --version 0.2.0   # a specific release (downgrades allowed)
+```
+
+`self-update` shows the release notes, verifies the download's sha256, and
+swaps the binary atomically — if anything fails, the old one is untouched. It
+knows how it was installed: a binary owned by a package manager (pacman/AUR,
+Homebrew, apt, …) is left alone and the right command is printed instead, and
+a `cargo install`ed one gets the matching `cargo install` command (run for you
+with `--yes`). It needs `curl` on `PATH`. laplace never checks for updates on
+its own — `self-update` is the only command that contacts GitHub, and only
+when you run it.
 
 laplace does not require Stan or `stanc` to be installed for anything except
 the optional `--validate` flag on `laplace build` (see [Building](#building)),
@@ -224,8 +256,44 @@ included 1 exported function: add_one
 note: 1 undocumented function left out of exports (add manually if this guess is wrong): helper
 ```
 
-It refuses to run (rather than overwrite) if `laplace.toml` already exists in
-that directory.
+For a package whose sources are all `.laplacelib`, `init` writes no `exports`
+key at all and prints the pub/private summary instead — including which `pub`
+items still lack a `// @laplace` doc comment:
+
+```
+$ laplace init
+wrote laplace.toml for `splines`
+no `exports` key written: every source is .laplacelib, where `pub` decides what is public
+public (`pub`, documented): knots
+public (`pub`) but undocumented -- `laplace doc` will have nothing to show until you add a `// @laplace` comment: basis
+private (no `pub`; ...): helper
+```
+
+`init` never overwrites an existing `laplace.toml`. To bring one up to date
+with the sources later, run **`laplace init --update`**: it appends newly
+documented `.stan` functions to `exports` and fills in a missing `name` or
+`version`, and leaves everything else alone — your name, version, comments,
+key order, `[dependencies]` and any other keys. An `exports` entry whose
+function no longer exists is warned about, not deleted; add `--prune` to
+delete it. Running it twice in a row changes nothing.
+
+### Requiring a compiler version
+
+A package (or a project) can state which `laplace` it needs:
+
+```toml
+name = "splines"
+version = "1.2.0"
+laplace = ">=0.2"     # any semver range
+```
+
+A compiler outside that range refuses to `build`, `install`, `add` or `doc`
+it, and says why — `requires laplace >=0.2, but this is laplace 0.1.9` — and
+how to fix it (`laplace self-update`). If the package uses syntax the old
+compiler cannot even parse, the same message is shown instead of a confusing
+parse error. Without the key, any compiler is accepted. If your library uses
+`pub`, `.laplacelib`, templates, macros or functions as arguments, add
+`laplace = ">=0.2"`.
 
 ### Making the library available to install
 
@@ -286,6 +354,64 @@ subdirectories are different packages (and conflict, like any other two git
 sources for one package name). It must be a plain relative path inside the
 repository — an absolute path or one containing `..` is rejected, in
 `laplace.toml` and in `laplace.lock` alike.
+
+**Local directories (path dependencies)** — for developing a library and a
+model side by side. Point at the package directory, relative to your
+`laplace.toml`:
+
+```sh
+laplace add gps --path ../gps-stan
+laplace add gps --path ../monorepo --subdir pkgs/gps
+```
+
+```toml
+[dependencies]
+gps = { path = "../gps-stan" }
+```
+
+A path package is re-read from its directory on every `install`, `build` and
+`doc`, so an edit to the library shows up in the next build with no version
+bump, no tag and no `laplace update` (`refreshed gps@0.1.0 (source changed)`
+tells you when it does). The lock records `source = "path+../gps-stan"` —
+always relative, never your home directory — and the package is cached
+separately from versioned ones, so your working copy can't shadow a released
+`gps@0.1.0` that other projects use.
+
+Path dependencies only exist on your machine, so laplace points that out:
+`laplace install` warns about each one, `laplace install --locked` (use it in
+CI) refuses them, and `laplace release` refuses to release a package whose own
+`[dependencies]` contain one. A path package may itself path-depend on a
+sibling (relative to its own directory); a registry or git package may not.
+
+### Releasing a library version
+
+Run `laplace release` inside the library's git repository:
+
+```sh
+laplace release patch --dry-run   # show every step and check everything; change nothing
+laplace release patch             # or minor, major, or an explicit 1.4.0
+```
+
+It bumps `version` in `laplace.toml`, commits `release <version>`, tags the
+commit and pushes the branch and the tag — after checking that:
+
+- tracked files have no uncommitted changes, and the branch isn't behind its
+  remote (it fetches first);
+- the tag doesn't already exist, locally or on the remote;
+- the package loads the way a consumer would load it, every `// @laplace`
+  block sits directly above something it documents, a `.laplacelib` package
+  has at least one `pub` item, and no dependency is a path dependency.
+
+The tag follows whatever the repository already does — `v1.4.0` if most
+existing version tags have a `v`, `1.4.0` otherwise and for a first release —
+and the output says which and why. The package may live in a subdirectory of
+the repository: run `release` from that directory, or from the repository
+root when exactly one subdirectory holds a `laplace.toml` (or pass `--path`).
+Consumers then pick it up with
+`laplace add <pkg> --git <url> --tag <the tag>`.
+
+(This is a *package* release. Releasing the `laplace` compiler itself is a
+separate process — see `RELEASING.md`.)
 
 ## Libraries that depend on libraries
 
@@ -906,6 +1032,40 @@ there's no network access or Stan re-parsing at lookup time. A function with
 no `@laplace` comment still prints its signature, with a note that no
 documentation is available for it.
 
+## Troubleshooting
+
+**"`pkg::func` is private to package `pkg`" — but the source says `pub`.**
+The build and `laplace doc` use the *installed* copy, and the message names
+its version (`the installed stats@1.0.0 defines mean_ without pub`). Usually:
+
+- *An old tag.* The `pub` was added after the tag your lock pins. Check
+  `source = ...` for the package in `laplace.lock`; release a new version
+  (`laplace release patch`) and move to it (`laplace add pkg --git <url> --tag
+  <new tag>`, or `laplace update pkg` for a registry range).
+- *A stale cache.* The library was edited without a version bump.
+  `laplace update pkg` re-reads the source, notices the change by checksum,
+  and replaces the cache (`refreshed pkg@1.0.0 (source changed)`). While
+  developing, a path dependency (`laplace add pkg --path ../pkg`) avoids this
+  entirely.
+
+**"`0.3.0` does not exist in <url>" (tag not found).** The error lists the
+tags the repository does have and suggests the newest
+(`did you mean --tag 0.2.1?`). Typical causes: the tag was created locally but
+never pushed (`git push origin <tag>`), or a `v` prefix mismatch (`v0.2.1` vs
+`0.2.1`). A warning like `tag 0.1.2 of gps contains version 0.1.1 in
+laplace.toml` means the tag was made before `version` was bumped —
+`laplace release` does both together, so it can't happen that way.
+
+**"checksum mismatch for `pkg@1.0.0`".** `laplace install` found that the
+package's source no longer hashes to what `laplace.lock` recorded: it was
+changed without a version bump, or a git tag was moved. Neither copy is
+installed. If the new contents are what you want, `laplace update pkg`
+re-pins them; otherwise the library author should restore that version and
+publish the change as a new one.
+
+**"requires laplace >=X, but this is laplace Y".** The package or project
+needs a newer compiler: `laplace self-update`.
+
 ## Design decisions
 
 A few choices are worth stating outright, because they're baked into published
@@ -981,6 +1141,17 @@ emitted before the function it calls.
 the packages in its own `[dependencies]`; your model may call only the
 packages in its own `library { }` block. Depending on something transitively
 doesn't put it in scope.
+
+**A cache entry is trusted by content, not by version number.** Every cached
+package records the checksum of the source it came from. Re-installing the
+same version with different contents replaces it and says so, and
+`laplace install` refuses a source that no longer matches the lock. Path
+dependencies are the one deliberate exception — re-synced on every use, warned
+about, and refused by `install --locked`.
+
+**The compiler gate reads one key.** `build`, `install` and `doc` work from
+`laplace.lock` alone, but they do read a project's `laplace = "..."` key: it
+decides only *whether* this compiler may proceed, never *what* gets installed.
 
 **Transitive dependencies are flattened, never chained.** In
 `--split-functions` mode, laplace never emits an `#include` of one

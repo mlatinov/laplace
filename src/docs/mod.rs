@@ -79,20 +79,40 @@ pub enum DocsError {
     FunctionNotFound { package: String, func: String },
 
     #[error(
-        "`{package}::{func}` is private to package `{package}`\n  help: only items marked `pub` \
-         are part of `{package}`'s documented API"
+        "`{package}::{func}` is private to package `{package}`: the installed \
+         `{package}@{version}` defines `{func}` without `pub`\n  help: only items marked `pub` \
+         are part of `{package}`'s documented API. If you expected it to be public, the \
+         installed copy may be older than you think -- laplace.lock pins {version} from \
+         `{pkg_source}`; check that this version/tag contains the `pub`, then run \
+         `laplace update {package}` (which also refreshes a cache whose source changed \
+         without a version bump)"
     )]
-    ItemIsPrivate { package: String, func: String },
+    ItemIsPrivate {
+        package: String,
+        func: String,
+        version: String,
+        pkg_source: String,
+    },
 
     #[error(transparent)]
     Package(Box<crate::package::PackageError>),
+
+    #[error(transparent)]
+    Manifest(#[from] crate::manifest::ManifestError),
+
+    #[error(transparent)]
+    Resolve(Box<crate::resolve::ResolveError>),
 }
 
 /// Extract every function signature from `package_dir`'s `.stan` file(s)
 /// and write them to `package_dir/docs.json`. Called after a package is
 /// copied into the cache, so `laplace doc` never has to re-parse Stan
 /// source at lookup time.
-pub fn write_sidecar(package_dir: &Path, name: &str, version: &str) -> Result<PackageDocs, DocsError> {
+pub fn write_sidecar(
+    package_dir: &Path,
+    name: &str,
+    version: &str,
+) -> Result<PackageDocs, DocsError> {
     let sources = crate::package::read_package_sources(package_dir)
         .map_err(|source| DocsError::Package(Box::new(source)))?;
 
@@ -155,13 +175,21 @@ pub fn lookup(
         });
     };
 
-    let package_dir = cache_root.join(&locked.name).join(&locked.version);
+    // A path dependency is re-synced from its directory first, so the docs
+    // shown are the ones in the source being edited.
+    let (package_dir, _) = crate::resolve::installed_package_dir(lockfile_path, cache_root, locked)
+        .map_err(|e| DocsError::Resolve(Box::new(e)))?;
     let docs_path = package_dir.join("docs.json");
     if !docs_path.is_file() {
         return Err(DocsError::PackageNotInstalled {
             package: package.to_string(),
             path: package_dir,
         });
+    }
+
+    let manifest_path = package_dir.join("laplace.toml");
+    if manifest_path.is_file() {
+        crate::manifest::read_package_manifest(&manifest_path)?;
     }
 
     let mut docs = read_docs_json(&docs_path)?;
@@ -172,10 +200,15 @@ pub fn lookup(
         return Err(DocsError::ItemIsPrivate {
             package: package.to_string(),
             func: func.to_string(),
+            version: locked.version.clone(),
+            pkg_source: locked.source.clone(),
         });
     }
-    let overloads: Vec<FunctionSig> =
-        docs.functions.into_iter().filter(|f| f.name == func).collect();
+    let overloads: Vec<FunctionSig> = docs
+        .functions
+        .into_iter()
+        .filter(|f| f.name == func)
+        .collect();
     if overloads.is_empty() {
         return Err(DocsError::FunctionNotFound {
             package: package.to_string(),
@@ -210,7 +243,11 @@ fn group_overloads(sigs: &[FunctionSig]) -> Vec<(Vec<&FunctionSig>, Option<&Doc>
 pub fn render_overloads(package: &str, sigs: &[FunctionSig]) -> String {
     let mut out = String::new();
     if sigs.len() > 1 {
-        out.push_str(&format!("{package}::{} has {} overloads\n\n", sigs[0].name, sigs.len()));
+        out.push_str(&format!(
+            "{package}::{} has {} overloads\n\n",
+            sigs[0].name,
+            sigs.len()
+        ));
     }
     for (i, (members, doc)) in group_overloads(sigs).into_iter().enumerate() {
         if i > 0 {
@@ -232,14 +269,21 @@ fn signature_line(package: &str, sig: &FunctionSig) -> String {
         .map(|(name, ty)| format!("{name}: {ty}"))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("{package}::{}({params_sig}) -> {}", sig.name, sig.return_type)
+    format!(
+        "{package}::{}({params_sig}) -> {}",
+        sig.name, sig.return_type
+    )
 }
 
 /// Pretty-print a function's signature and doc comment (if any) for
 /// terminal display. A function with no `// @laplace` doc comment still
 /// renders its signature, with a note that no docs are available.
 pub fn render(package: &str, sig: &FunctionSig) -> String {
-    format!("{}\n{}", signature_line(package, sig), doc_body(sig.doc.as_ref()))
+    format!(
+        "{}\n{}",
+        signature_line(package, sig),
+        doc_body(sig.doc.as_ref())
+    )
 }
 
 /// The part of [`render`] below the signature line.
@@ -267,7 +311,12 @@ fn doc_body(doc: Option<&Doc>) -> String {
 
     if !doc.params.is_empty() {
         out.push_str("\nParameters:\n");
-        let width = doc.params.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
+        let width = doc
+            .params
+            .iter()
+            .map(|(name, _)| name.len())
+            .max()
+            .unwrap_or(0);
         for (name, desc) in &doc.params {
             out.push_str(&format!("  {name:width$}  {desc}\n"));
         }
@@ -311,7 +360,10 @@ pub fn render_html_overloads(package: &str, sigs: &[FunctionSig]) -> String {
     let mut body = String::new();
     for (members, doc) in group_overloads(sigs) {
         for sig in members {
-            body.push_str(&format!("<h1>{}</h1>\n", html_escape(&signature_line(package, sig))));
+            body.push_str(&format!(
+                "<h1>{}</h1>\n",
+                html_escape(&signature_line(package, sig))
+            ));
         }
         body.push_str(&html_doc_body(doc));
     }
@@ -448,13 +500,20 @@ real jitter(real epsilon) {
         assert_eq!(docs.version, "1.0.0");
         // sorted by name: jitter before rbf_cov
         assert_eq!(
-            docs.functions.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            docs.functions
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["jitter", "rbf_cov"]
         );
 
         let reloaded = read_docs_json(&pkg_dir.join("docs.json")).unwrap();
         assert_eq!(reloaded.functions.len(), 2);
-        let rbf = reloaded.functions.iter().find(|f| f.name == "rbf_cov").unwrap();
+        let rbf = reloaded
+            .functions
+            .iter()
+            .find(|f| f.name == "rbf_cov")
+            .unwrap();
         assert_eq!(
             rbf.doc.as_ref().unwrap().brief.as_deref(),
             Some("Squared exponential (RBF) covariance matrix.")
@@ -510,7 +569,12 @@ real jitter(real epsilon) {
             &lockfile_path,
             &Lockfile {
                 root: vec!["gps".to_string()],
-                packages: vec![LockedPackage::leaf("gps", "1.0.0", "sha256:whatever", "registry")],
+                packages: vec![LockedPackage::leaf(
+                    "gps",
+                    "1.0.0",
+                    "sha256:whatever",
+                    "registry",
+                )],
             },
         )
         .unwrap();
@@ -613,11 +677,17 @@ real jitter(real epsilon) {
         let sigs = extract_signatures(source);
         let rendered = render_overloads("kinetics", &sigs);
 
-        assert!(rendered.starts_with("kinetics::hill has 3 overloads\n"), "{rendered}");
+        assert!(
+            rendered.starts_with("kinetics::hill has 3 overloads\n"),
+            "{rendered}"
+        );
         assert!(rendered.contains(
             "kinetics::hill(x: real) -> real\nkinetics::hill(x: vector) -> vector\n\nHill curve.\n"
         ), "{rendered}");
-        assert!(rendered.contains("kinetics::hill(x: matrix) -> matrix\n\nMatrix form.\n"), "{rendered}");
+        assert!(
+            rendered.contains("kinetics::hill(x: matrix) -> matrix\n\nMatrix form.\n"),
+            "{rendered}"
+        );
         assert_eq!(rendered.matches("Hill curve.").count(), 1);
         assert!(!rendered.contains("no @laplace documentation"));
 
@@ -627,7 +697,8 @@ real jitter(real epsilon) {
 
     #[test]
     fn render_overloads_of_a_single_function_matches_render() {
-        let sigs = extract_signatures("// @laplace\n// @brief One.\nreal f(real x) {\n  return x;\n}\n");
+        let sigs =
+            extract_signatures("// @laplace\n// @brief One.\nreal f(real x) {\n  return x;\n}\n");
         assert_eq!(render_overloads("p", &sigs), render("p", &sigs[0]));
     }
 
@@ -682,15 +753,26 @@ real jitter(real epsilon) {
 
         write_sidecar(&pkg_dir, "gps", "1.0.0").unwrap();
         let reloaded = read_docs_json(&pkg_dir.join("docs.json")).unwrap();
-        let rbf = reloaded.functions.iter().find(|f| f.name == "rbf_cov").unwrap();
+        let rbf = reloaded
+            .functions
+            .iter()
+            .find(|f| f.name == "rbf_cov")
+            .unwrap();
 
-        let expected_math = "k(x, x') = \\alpha^2 \\exp\\left(\n-\\frac{(x - x')^2}{2 \\rho^2}\n\\right)";
-        assert_eq!(rbf.doc.as_ref().unwrap().math.as_deref(), Some(expected_math));
+        let expected_math =
+            "k(x, x') = \\alpha^2 \\exp\\left(\n-\\frac{(x - x')^2}{2 \\rho^2}\n\\right)";
+        assert_eq!(
+            rbf.doc.as_ref().unwrap().math.as_deref(),
+            Some(expected_math)
+        );
 
         let rendered = render("gps", rbf);
         assert!(rendered.contains("Math:\n"));
         for line in expected_math.lines() {
-            assert!(rendered.contains(line), "rendered output missing math line: {line}");
+            assert!(
+                rendered.contains(line),
+                "rendered output missing math line: {line}"
+            );
         }
 
         let html = render_html("gps", rbf);
@@ -711,7 +793,11 @@ real jitter(real epsilon) {
 
         write_sidecar(&pkg_dir, "gps", "1.0.0").unwrap();
         let reloaded = read_docs_json(&pkg_dir.join("docs.json")).unwrap();
-        let rbf = reloaded.functions.iter().find(|f| f.name == "rbf_cov").unwrap();
+        let rbf = reloaded
+            .functions
+            .iter()
+            .find(|f| f.name == "rbf_cov")
+            .unwrap();
         assert_eq!(rbf.doc.as_ref().unwrap().math, None);
 
         let rendered = render("gps", rbf);
@@ -741,10 +827,17 @@ real jitter(real epsilon) {
 
         write_sidecar(&pkg_dir, "gps", "1.0.0").unwrap();
         let reloaded = read_docs_json(&pkg_dir.join("docs.json")).unwrap();
-        let rbf = reloaded.functions.iter().find(|f| f.name == "rbf_cov").unwrap();
+        let rbf = reloaded
+            .functions
+            .iter()
+            .find(|f| f.name == "rbf_cov")
+            .unwrap();
 
         let expected_example = "matrix k = rbf_cov(x, 1.0, 0.5);\nprint(k);";
-        assert_eq!(rbf.doc.as_ref().unwrap().example.as_deref(), Some(expected_example));
+        assert_eq!(
+            rbf.doc.as_ref().unwrap().example.as_deref(),
+            Some(expected_example)
+        );
 
         let rendered = render("gps", rbf);
         assert!(rendered.contains("Example:\n  matrix k = rbf_cov(x, 1.0, 0.5);\n  print(k);\n"));

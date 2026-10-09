@@ -86,9 +86,7 @@ pub enum BlockExpandError {
         location: String,
     },
 
-    #[error(
-        "package `{package}` has no template `{template}`\n  --> {location}\n  help: {help}"
-    )]
+    #[error("package `{package}` has no template `{template}`\n  --> {location}\n  help: {help}")]
     UnknownTemplate {
         package: String,
         template: String,
@@ -210,13 +208,12 @@ pub fn expand(
         }
 
         for piece in &def.pieces {
-            let substituted = substitute(&piece.body, &bindings).map_err(|error| {
-                BlockExpandError::Argument {
+            let substituted =
+                substitute(&piece.body, &bindings).map_err(|error| BlockExpandError::Argument {
                     location: location.clone(),
                     help: error.help(),
                     error: Box::new(error),
-                }
-            })?;
+                })?;
             // Calls in a template body resolve in the defining
             // package's scope, and this text leaves that package.
             let mangled = mangle_fragment(
@@ -270,8 +267,13 @@ pub fn expand(
     let blocks = existing_blocks(source);
     for (_, contributions) in per_block {
         let kind = contributions[0].0;
-        let text: String = contributions.iter().map(|(_, text, _)| text.as_str()).collect();
-        expansion.edits.push(insertion(source, &blocks, kind, &text));
+        let text: String = contributions
+            .iter()
+            .map(|(_, text, _)| text.as_str())
+            .collect();
+        expansion
+            .edits
+            .push(insertion(source, &blocks, kind, &text));
     }
 
     expansion
@@ -385,12 +387,7 @@ fn check_order(
         let kind = contributions[0].0;
         let declared: Vec<Vec<String>> = contributions
             .iter()
-            .map(|(_, _, c)| {
-                declarations(&c.body)
-                    .into_iter()
-                    .map(|d| d.name)
-                    .collect()
-            })
+            .map(|(_, _, c)| declarations(&c.body).into_iter().map(|d| d.name).collect())
             .collect();
 
         for (index, (_, _, contribution)) in contributions.iter().enumerate() {
@@ -422,7 +419,11 @@ fn trim_blank_lines(text: &str) -> &str {
             starts.push(i + 1);
         }
     }
-    let line_end = |start: usize| text[start..].find('\n').map_or(text.len(), |i| start + i + 1);
+    let line_end = |start: usize| {
+        text[start..]
+            .find('\n')
+            .map_or(text.len(), |i| start + i + 1)
+    };
     let blank = |start: usize| text[start..line_end(start)].trim().is_empty();
 
     let Some(first) = starts.iter().copied().find(|&s| !blank(s)) else {
@@ -460,12 +461,7 @@ fn existing_blocks(source: &str) -> Vec<ExistingBlock> {
 
 /// The edit that puts `text` into the right block, creating the block
 /// if the model does not have it.
-fn insertion(
-    source: &str,
-    blocks: &[ExistingBlock],
-    kind: BlockKind,
-    text: &str,
-) -> TextEdit {
+fn insertion(source: &str, blocks: &[ExistingBlock], kind: BlockKind, text: &str) -> TextEdit {
     if let Some(block) = blocks.iter().find(|block| block.kind == kind) {
         // Straight after the opening brace, so the pieces precede the
         // model's own content.
@@ -591,9 +587,18 @@ mod tests {
         let out = run(source, &[template(NCP, &[]), template(OBSERVATION, &[])]).unwrap();
 
         // Pieces land before the user's own content, in `@use` order.
-        assert!(out.contains("parameters {\n  // begin @use stats::ncp(theta, K)"), "{out}");
-        assert!(out.contains("  vector[K] theta_raw;\n  real<lower=0> theta_sigma;"), "{out}");
-        assert!(out.contains("  // end @use stats::ncp\n\n  real mu;"), "{out}");
+        assert!(
+            out.contains("parameters {\n  // begin @use stats::ncp(theta, K)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("  vector[K] theta_raw;\n  real<lower=0> theta_sigma;"),
+            "{out}"
+        );
+        assert!(
+            out.contains("  // end @use stats::ncp\n\n  real mu;"),
+            "{out}"
+        );
 
         // `transformed parameters` and `generated quantities` did not
         // exist and were created.
@@ -605,7 +610,10 @@ mod tests {
         assert!(out.contains("generated quantities {"), "{out}");
 
         // The `expr` argument is parenthesized; the plain one is not.
-        assert!(out.contains("  y ~ lognormal((mu + theta), sigma);"), "{out}");
+        assert!(
+            out.contains("  y ~ lognormal((mu + theta), sigma);"),
+            "{out}"
+        );
         assert!(
             out.contains("  real y_rep = lognormal_rng((mu + theta), sigma);"),
             "{out}"
@@ -728,7 +736,10 @@ mod tests {
             "data {\n  int K;\n}\n",
         );
         let err = error(source, &[template(NCP, &[]), template(uses_theta, &[])]);
-        assert!(matches!(err, BlockExpandError::OutOfOrder { .. }), "{err:?}");
+        assert!(
+            matches!(err, BlockExpandError::OutOfOrder { .. }),
+            "{err:?}"
+        );
         let rendered = err.to_string();
         assert!(rendered.contains("transformed parameters"), "{rendered}");
         assert!(rendered.contains("uses_theta"), "{rendered}");
@@ -756,7 +767,10 @@ mod tests {
     #[test]
     fn an_unknown_template_lists_what_the_package_does_offer() {
         let err = error("@use stats::nope(a);\n", &[template(NCP, &[])]);
-        assert!(matches!(err, BlockExpandError::UnknownTemplate { .. }), "{err:?}");
+        assert!(
+            matches!(err, BlockExpandError::UnknownTemplate { .. }),
+            "{err:?}"
+        );
         assert!(err.to_string().contains("defines ncp"), "{err}");
     }
 
@@ -769,15 +783,24 @@ mod tests {
             matches!(err, BlockExpandError::TemplateIsPrivate { .. }),
             "{err:?}"
         );
-        assert!(err.to_string().contains("only templates marked `pub`"), "{err}");
+        assert!(
+            err.to_string().contains("only templates marked `pub`"),
+            "{err}"
+        );
     }
 
     #[test]
     fn the_wrong_number_of_arguments_names_the_signature() {
         let err = error("@use stats::ncp(theta);\n", &[template(NCP, &[])]);
-        assert!(matches!(err, BlockExpandError::ArgumentCount { .. }), "{err:?}");
+        assert!(
+            matches!(err, BlockExpandError::ArgumentCount { .. }),
+            "{err:?}"
+        );
         let rendered = err.to_string();
-        assert!(rendered.contains("takes 2 argument(s) but was given 1"), "{rendered}");
+        assert!(
+            rendered.contains("takes 2 argument(s) but was given 1"),
+            "{rendered}"
+        );
         assert!(rendered.contains("$name: ident"), "{rendered}");
     }
 
@@ -792,7 +815,10 @@ mod tests {
 
     #[test]
     fn a_statement_in_an_expr_slot_is_an_error() {
-        let err = error("@use stats::ncp(theta, real x = 1;);\n", &[template(NCP, &[])]);
+        let err = error(
+            "@use stats::ncp(theta, real x = 1;);\n",
+            &[template(NCP, &[])],
+        );
         assert!(matches!(err, BlockExpandError::Argument { .. }), "{err:?}");
     }
 
@@ -826,7 +852,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(expansion.warnings.len(), 1);
-        assert!(expansion.warnings[0].contains("$spare"), "{:?}", expansion.warnings);
+        assert!(
+            expansion.warnings[0].contains("$spare"),
+            "{:?}",
+            expansion.warnings
+        );
     }
 
     #[test]

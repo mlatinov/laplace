@@ -15,9 +15,16 @@ use thiserror::Error;
 /// gps = "^1.0"
 /// gps2 = { git = "https://github.com/user/repo", tag = "0.1.0" }
 /// gps3 = { git = "https://github.com/user/repo", rev = "abc123" }
+/// gps4 = { path = "../gps" }
 /// ```
+///
+/// An optional top-level `laplace = ">=0.2"` names the compiler versions
+/// the project needs (see [`check_compiler_requirement`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectManifest {
+    /// Semver range the running `laplace` must satisfy. `None` means any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub laplace: Option<String>,
     #[serde(default)]
     pub dependencies: BTreeMap<String, Dependency>,
 }
@@ -30,13 +37,45 @@ pub struct ProjectManifest {
 pub enum Dependency {
     Range(String),
     Git(GitDependency),
+    Path(PathDependency),
 }
 
 impl Dependency {
     pub fn as_range(&self) -> Option<&str> {
         match self {
             Dependency::Range(range) => Some(range),
-            Dependency::Git(_) => None,
+            Dependency::Git(_) | Dependency::Path(_) => None,
+        }
+    }
+}
+
+/// A package taken straight from a local directory -- the edit-and-test
+/// loop for library authors. `path` is relative to the directory of the
+/// `laplace.toml` that declares it. Not reproducible on another machine,
+/// which `install --locked` and `laplace release` point out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathDependency {
+    pub path: String,
+    /// Where the package's `laplace.toml` lives below `path`, matching the
+    /// git form. `None` means `path` itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subdir: Option<String>,
+}
+
+impl PathDependency {
+    /// The validated subdirectory the package is rooted in, if any.
+    pub fn subdir(&self) -> Result<Option<&str>, ManifestError> {
+        match self.subdir.as_deref() {
+            None => Ok(None),
+            Some(subdir) => {
+                validate_subdir(subdir).map_err(|reason| ManifestError::PathSubdirInvalid {
+                    path: self.path.clone(),
+                    subdir: subdir.to_string(),
+                    reason,
+                })?;
+                Ok(Some(subdir))
+            }
         }
     }
 }
@@ -122,8 +161,10 @@ pub(crate) fn validate_subdir(subdir: &str) -> Result<(), &'static str> {
         return Err("it is empty -- omit `subdir` for a package at the repository root");
     }
     if subdir.contains('#') {
-        return Err("it contains `#`, which laplace.lock uses to separate the subdirectory \
-                    from the git ref");
+        return Err(
+            "it contains `#`, which laplace.lock uses to separate the subdirectory \
+                    from the git ref",
+        );
     }
     for component in Path::new(subdir).components() {
         match component {
@@ -156,6 +197,11 @@ pub(crate) fn validate_subdir(subdir: &str) -> Result<(), &'static str> {
 pub struct PackageManifest {
     pub name: String,
     pub version: String,
+    /// Semver range the running `laplace` must satisfy to build this
+    /// package, e.g. `">=0.2"` for a package that uses `pub`. `None` means
+    /// any compiler.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub laplace: Option<String>,
     #[serde(default)]
     pub exports: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -168,6 +214,7 @@ impl PackageManifest {
         PackageManifest {
             name: name.into(),
             version: version.into(),
+            laplace: None,
             exports,
             dependencies: BTreeMap::new(),
         }
@@ -209,6 +256,114 @@ pub enum ManifestError {
 
     #[error("git dependency `{git}` cannot have both `tag` and `rev` set")]
     GitRefAmbiguous { git: String },
+
+    #[error("path dependency `{path}` has an invalid `subdir` (`{subdir}`): {reason}")]
+    PathSubdirInvalid {
+        path: String,
+        subdir: String,
+        reason: &'static str,
+    },
+
+    #[error(
+        "{path} requires laplace {required}, but this is laplace {running}\n  help: update the \
+         compiler with `laplace self-update` (it prints the right command if laplace came from a \
+         package manager)"
+    )]
+    CompilerTooOld {
+        path: PathBuf,
+        required: String,
+        running: String,
+    },
+
+    #[error("{path}: `laplace = \"{value}\"` is not a valid version requirement: {source}")]
+    InvalidCompilerRequirement {
+        path: PathBuf,
+        value: String,
+        #[source]
+        source: semver::Error,
+    },
+}
+
+/// Check a manifest's `laplace = "<range>"` against the running compiler.
+/// `None` (no key) accepts every compiler.
+pub fn check_compiler_requirement(
+    path: &Path,
+    required: Option<&str>,
+) -> Result<(), ManifestError> {
+    check_compiler_requirement_against(path, required, &crate::version::current())
+}
+
+fn check_compiler_requirement_against(
+    path: &Path,
+    required: Option<&str>,
+    running: &semver::Version,
+) -> Result<(), ManifestError> {
+    let Some(required) = required else {
+        return Ok(());
+    };
+    let req = semver::VersionReq::parse(required).map_err(|source| {
+        ManifestError::InvalidCompilerRequirement {
+            path: path.to_path_buf(),
+            value: required.to_string(),
+            source,
+        }
+    })?;
+    if req.matches(running) {
+        return Ok(());
+    }
+    Err(ManifestError::CompilerTooOld {
+        path: path.to_path_buf(),
+        required: required.to_string(),
+        running: running.to_string(),
+    })
+}
+
+/// Parse a manifest, enforcing its `laplace` requirement.
+///
+/// The requirement is checked even when the manifest does not otherwise
+/// parse: a manifest written for a newer compiler may well use syntax this
+/// one does not know, and "you need laplace >=0.3" is the useful message
+/// there, not "unknown field". The bare parse error is only reported when
+/// the requirement is absent or satisfied.
+fn parse_checked<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    text: &str,
+    requirement: impl Fn(&T) -> Option<&str>,
+) -> Result<T, ManifestError> {
+    match toml::from_str::<T>(text) {
+        Ok(parsed) => {
+            check_compiler_requirement(path, requirement(&parsed))?;
+            Ok(parsed)
+        }
+        Err(source) => {
+            let raw = toml::from_str::<toml::Table>(text).ok();
+            let required = raw
+                .as_ref()
+                .and_then(|table| table.get("laplace"))
+                .and_then(|value| value.as_str());
+            check_compiler_requirement(path, required)?;
+            Err(ManifestError::Parse {
+                path: path.to_path_buf(),
+                source,
+            })
+        }
+    }
+}
+
+/// Enforce a project's `laplace` requirement without reading anything else
+/// from its manifest. `build`, `install` and `doc` call this: they work from
+/// `laplace.lock` alone and must not consult the dependency ranges, but a
+/// compiler gate decides nothing about *what* gets installed, only whether
+/// this binary may try. A missing or unreadable manifest imposes nothing --
+/// the commands that need it report that themselves.
+pub fn check_project_compiler_requirement(path: &Path) -> Result<(), ManifestError> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return Ok(());
+    };
+    let Ok(table) = toml::from_str::<toml::Table>(&text) else {
+        return Ok(());
+    };
+    check_compiler_requirement(path, table.get("laplace").and_then(|v| v.as_str()))
 }
 
 /// Read a project's `laplace.toml`. A missing file is treated as an empty
@@ -216,10 +371,7 @@ pub enum ManifestError {
 /// can run `laplace add` before `laplace.toml` exists.
 pub fn read_project_manifest(path: &Path) -> Result<ProjectManifest, ManifestError> {
     match fs::read_to_string(path) {
-        Ok(text) => toml::from_str(&text).map_err(|source| ManifestError::Parse {
-            path: path.to_path_buf(),
-            source,
-        }),
+        Ok(text) => parse_checked(path, &text, |m: &ProjectManifest| m.laplace.as_deref()),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
             Ok(ProjectManifest::default())
         }
@@ -245,16 +397,14 @@ pub fn write_project_manifest(
 }
 
 /// Read a package's own `laplace.toml`. Unlike the project manifest, this
-/// must exist -- every package in the registry ships one.
+/// must exist -- every package in the registry ships one. Fails with
+/// [`ManifestError::CompilerTooOld`] if the package needs a newer laplace.
 pub fn read_package_manifest(path: &Path) -> Result<PackageManifest, ManifestError> {
     let text = fs::read_to_string(path).map_err(|source| ManifestError::Io {
         path: path.to_path_buf(),
         source,
     })?;
-    toml::from_str(&text).map_err(|source| ManifestError::Parse {
-        path: path.to_path_buf(),
-        source,
-    })
+    parse_checked(path, &text, |m: &PackageManifest| m.laplace.as_deref())
 }
 
 pub fn write_package_manifest(
@@ -322,14 +472,7 @@ mod tests {
                 subdir: None,
             })
         );
-        assert_eq!(
-            manifest
-                .dependencies
-                .get("gps")
-                .unwrap()
-                .as_range(),
-            None
-        );
+        assert_eq!(manifest.dependencies.get("gps").unwrap().as_range(), None);
         assert_eq!(
             manifest.dependencies.get("gps2").unwrap(),
             &Dependency::Git(GitDependency {
@@ -515,6 +658,163 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("laplace.toml");
         assert!(read_package_manifest(&path).is_err());
+    }
+
+    fn v(s: &str) -> semver::Version {
+        semver::Version::parse(s).unwrap()
+    }
+
+    #[test]
+    fn a_satisfied_compiler_requirement_passes() {
+        let path = Path::new("laplace.toml");
+        assert!(check_compiler_requirement_against(path, Some(">=0.2"), &v("0.2.0")).is_ok());
+        assert!(check_compiler_requirement_against(path, Some("^0.2"), &v("0.2.7")).is_ok());
+    }
+
+    #[test]
+    fn a_missing_compiler_requirement_accepts_any_compiler() {
+        let path = Path::new("laplace.toml");
+        assert!(check_compiler_requirement_against(path, None, &v("0.0.1")).is_ok());
+    }
+
+    #[test]
+    fn an_unsatisfied_compiler_requirement_names_both_versions_and_the_fix() {
+        let path = Path::new("pkg/laplace.toml");
+        let err = check_compiler_requirement_against(path, Some(">=0.3"), &v("0.2.0")).unwrap_err();
+        let message = err.to_string();
+        assert!(matches!(err, ManifestError::CompilerTooOld { .. }));
+        assert!(message.contains("requires laplace >=0.3"), "{message}");
+        assert!(message.contains("this is laplace 0.2.0"), "{message}");
+        assert!(message.contains("laplace self-update"), "{message}");
+    }
+
+    #[test]
+    fn a_malformed_compiler_requirement_is_reported_as_such() {
+        let err = check_compiler_requirement_against(
+            Path::new("laplace.toml"),
+            Some("not a range"),
+            &v("0.2.0"),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ManifestError::InvalidCompilerRequirement { .. }
+        ));
+    }
+
+    #[test]
+    fn the_running_compiler_satisfies_its_own_minor_series() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("laplace.toml");
+        let series = format!(
+            ">={}.{}",
+            crate::version::current().major,
+            crate::version::current().minor
+        );
+        fs::write(
+            &path,
+            format!("name = \"gps\"\nversion = \"1.0.0\"\nlaplace = \"{series}\"\n"),
+        )
+        .unwrap();
+        let manifest = read_package_manifest(&path).unwrap();
+        assert_eq!(manifest.laplace.as_deref(), Some(series.as_str()));
+    }
+
+    #[test]
+    fn a_package_needing_a_newer_compiler_fails_to_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("laplace.toml");
+        fs::write(
+            &path,
+            "name = \"gps\"\nversion = \"1.0.0\"\nlaplace = \">=99.0\"\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            read_package_manifest(&path),
+            Err(ManifestError::CompilerTooOld { .. })
+        ));
+    }
+
+    /// A manifest written for a newer compiler may use syntax this one
+    /// cannot parse at all. The requirement still wins over the parse error.
+    #[test]
+    fn an_unparseable_manifest_for_a_newer_compiler_reports_the_requirement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("laplace.toml");
+        fs::write(
+            &path,
+            "name = \"gps\"\nversion = \"1.0.0\"\nlaplace = \">=99.0\"\n\
+             [dependencies]\nstats = { registry = \"future\", features = [1] }\n",
+        )
+        .unwrap();
+        let err = read_package_manifest(&path).unwrap_err();
+        assert!(matches!(err, ManifestError::CompilerTooOld { .. }), "{err}");
+
+        // Without the requirement, the same text is a plain parse error.
+        fs::write(
+            &path,
+            "name = \"gps\"\nversion = \"1.0.0\"\n\
+             [dependencies]\nstats = { registry = \"future\", features = [1] }\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            read_package_manifest(&path),
+            Err(ManifestError::Parse { .. })
+        ));
+    }
+
+    #[test]
+    fn a_project_manifest_requirement_round_trips_through_add() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("laplace.toml");
+        fs::write(
+            &path,
+            "laplace = \">=0.2\"\n\n[dependencies]\ngps = \"^1.0\"\n",
+        )
+        .unwrap();
+        let manifest = read_project_manifest(&path).unwrap();
+        assert_eq!(manifest.laplace.as_deref(), Some(">=0.2"));
+        write_project_manifest(&path, &manifest).unwrap();
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("laplace = \">=0.2\""));
+    }
+
+    #[test]
+    fn the_project_gate_ignores_a_missing_manifest_and_enforces_a_present_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("laplace.toml");
+        assert!(check_project_compiler_requirement(&path).is_ok());
+        fs::write(&path, "laplace = \">=99\"\n").unwrap();
+        assert!(matches!(
+            check_project_compiler_requirement(&path),
+            Err(ManifestError::CompilerTooOld { .. })
+        ));
+    }
+
+    #[test]
+    fn a_path_dependency_parses_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("laplace.toml");
+        fs::write(
+            &path,
+            "[dependencies]\ngps = { path = \"../gps\" }\nkern = { path = \"../repo\", subdir = \"lib\" }\n",
+        )
+        .unwrap();
+        let manifest = read_project_manifest(&path).unwrap();
+        assert_eq!(
+            manifest.dependencies["gps"],
+            Dependency::Path(PathDependency {
+                path: "../gps".to_string(),
+                subdir: None,
+            })
+        );
+        match &manifest.dependencies["kern"] {
+            Dependency::Path(dep) => assert_eq!(dep.subdir().unwrap(), Some("lib")),
+            other => panic!("expected a path dependency, got {other:?}"),
+        }
+        write_project_manifest(&path, &manifest).unwrap();
+        assert_eq!(read_project_manifest(&path).unwrap(), manifest);
     }
 
     #[test]

@@ -241,7 +241,10 @@ mod tests {
             kinds("target += normal_lpdf(y | 0, 1);"),
             vec![StatementKind::TargetIncrement]
         );
-        assert_eq!(kinds("target  +=  1;"), vec![StatementKind::TargetIncrement]);
+        assert_eq!(
+            kinds("target  +=  1;"),
+            vec![StatementKind::TargetIncrement]
+        );
     }
 
     #[test]
@@ -281,7 +284,10 @@ mod tests {
 
     #[test]
     fn a_placeholder_token_does_not_look_like_a_brace() {
-        assert_eq!(kinds("${p}_z ~ std_normal();"), vec![StatementKind::Sampling]);
+        assert_eq!(
+            kinds("${p}_z ~ std_normal();"),
+            vec![StatementKind::Sampling]
+        );
     }
 
     #[test]

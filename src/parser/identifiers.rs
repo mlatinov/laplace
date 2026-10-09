@@ -90,7 +90,8 @@ mod tests {
 
     #[test]
     fn single_underscores_are_fine_anywhere() {
-        let source = "real _leading(real trailing_, real in_the_middle) {\n  return trailing_;\n}\n";
+        let source =
+            "real _leading(real trailing_, real in_the_middle) {\n  return trailing_;\n}\n";
         assert_eq!(check_identifiers(source), Ok(()));
     }
 
@@ -110,8 +111,14 @@ mod tests {
 
     #[test]
     fn a_trailing_or_leading_double_underscore_is_rejected() {
-        assert_eq!(check_identifiers("real x__;\n").unwrap_err().identifier, "x__");
-        assert_eq!(check_identifiers("real __x;\n").unwrap_err().identifier, "__x");
+        assert_eq!(
+            check_identifiers("real x__;\n").unwrap_err().identifier,
+            "x__"
+        );
+        assert_eq!(
+            check_identifiers("real __x;\n").unwrap_err().identifier,
+            "__x"
+        );
     }
 
     #[test]

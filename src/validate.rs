@@ -17,7 +17,9 @@ use crate::codegen::GeneratedStan;
 
 #[derive(Debug, Error)]
 pub enum ValidateError {
-    #[error("`{command}` was not found on PATH -- install cmdstan/stanc, or omit --validate: {source}")]
+    #[error(
+        "`{command}` was not found on PATH -- install cmdstan/stanc, or omit --validate: {source}"
+    )]
     CommandNotFound {
         command: String,
         #[source]
@@ -41,7 +43,11 @@ pub enum ValidateError {
 /// path, because `stanc` does not resolve `#include` relative to the
 /// including file -- without it a `--split-functions` build could never
 /// validate.
-pub fn validate(command: &str, path: &Path, generated: &GeneratedStan) -> Result<(), ValidateError> {
+pub fn validate(
+    command: &str,
+    path: &Path,
+    generated: &GeneratedStan,
+) -> Result<(), ValidateError> {
     let include_dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -49,7 +55,10 @@ pub fn validate(command: &str, path: &Path, generated: &GeneratedStan) -> Result
     let scratch = tempfile::tempdir().map_err(ValidateError::Scratch)?;
     let output = Command::new(command)
         .arg(format!("--include-paths={}", include_dir.display()))
-        .arg(format!("--o={}", scratch.path().join("model.hpp").display()))
+        .arg(format!(
+            "--o={}",
+            scratch.path().join("model.hpp").display()
+        ))
         .arg(path)
         .output()
         .map_err(|source| ValidateError::CommandNotFound {
@@ -288,7 +297,9 @@ mod tests {
             lines: 3..=7,
         }];
         let annotated = annotate_with_packages(raw, &ranges);
-        assert!(annotated.starts_with("note: lines 3-7 of the compiled output came from package `gps`"));
+        assert!(
+            annotated.starts_with("note: lines 3-7 of the compiled output came from package `gps`")
+        );
         assert!(annotated.ends_with(raw));
     }
 
@@ -314,7 +325,7 @@ mod tests {
             source: String::new(),
             package_line_ranges: vec![],
             function_files: vec![],
-                    warnings: Vec::new(),
+            warnings: Vec::new(),
         };
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let err = validate(
@@ -360,7 +371,8 @@ Ill-typed arguments supplied to infix operator +. Available signatures:
 Instead supplied arguments of incompatible type: vector, matrix.
 ";
 
-    const INVALID_TYPE: &str = "Syntax error in 'model.stan', line 2, column 2 to column 9, parsing error:
+    const INVALID_TYPE: &str =
+        "Syntax error in 'model.stan', line 2, column 2 to column 9, parsing error:
    -------------------------------------------------
      1:  data {
      2:    integer N;
@@ -382,7 +394,11 @@ optionally preceded by a single array[...]
         assert_eq!(d.line, 7);
         assert_eq!((d.column_start, d.column_end), (2, 3));
         assert!(d.message.starts_with("Ill-formed expression."));
-        assert!(!d.message.contains("------"), "dash border leaked into message: {}", d.message);
+        assert!(
+            !d.message.contains("------"),
+            "dash border leaked into message: {}",
+            d.message
+        );
     }
 
     #[test]

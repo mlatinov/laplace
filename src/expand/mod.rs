@@ -242,8 +242,10 @@ pub fn validate_expression(text: &str) -> Result<(), &'static str> {
             }
             b';' => return Err("it contains `;`, so it is a statement rather than an expression"),
             b'~' => {
-                return Err("it contains `~`, so it is a sampling statement rather than an \
-                            expression")
+                return Err(
+                    "it contains `~`, so it is a sampling statement rather than an \
+                            expression",
+                )
             }
             _ => {}
         }
@@ -324,15 +326,15 @@ pub struct Declared {
 
 /// The first name that `incoming` would declare twice, or that already
 /// exists in `existing`.
-pub fn find_collision(existing: &[Declared], incoming: &[Declared]) -> Option<(Declared, Declared)> {
+pub fn find_collision(
+    existing: &[Declared],
+    incoming: &[Declared],
+) -> Option<(Declared, Declared)> {
     for (index, candidate) in incoming.iter().enumerate() {
         if let Some(earlier) = existing.iter().find(|d| d.name == candidate.name) {
             return Some((earlier.clone(), candidate.clone()));
         }
-        if let Some(earlier) = incoming[..index]
-            .iter()
-            .find(|d| d.name == candidate.name)
-        {
+        if let Some(earlier) = incoming[..index].iter().find(|d| d.name == candidate.name) {
             return Some((earlier.clone(), candidate.clone()));
         }
     }
@@ -438,7 +440,10 @@ mod tests {
     #[test]
     fn a_non_identifier_argument_is_refused_for_an_ident_placeholder() {
         let err = check_argument(&ident("name"), "mu + 1").unwrap_err();
-        assert!(matches!(err, ExpandError::NotAnIdentifier { .. }), "{err:?}");
+        assert!(
+            matches!(err, ExpandError::NotAnIdentifier { .. }),
+            "{err:?}"
+        );
         assert!(err.help().contains("bare name"), "{}", err.help());
     }
 
@@ -460,7 +465,10 @@ mod tests {
     #[test]
     fn a_statement_is_refused_for_an_expr_placeholder() {
         let err = check_argument(&expr("mu"), "real x = 1;").unwrap_err();
-        assert!(matches!(err, ExpandError::NotAnExpression { .. }), "{err:?}");
+        assert!(
+            matches!(err, ExpandError::NotAnExpression { .. }),
+            "{err:?}"
+        );
         assert!(err.to_string().contains("`;`"), "{err}");
     }
 
@@ -590,7 +598,10 @@ mod tests {
             &bind(&[("mu", PlaceholderKind::Expr, "a + b")]),
         )
         .unwrap_err();
-        assert!(matches!(err, ExpandError::NotConcatenable { .. }), "{err:?}");
+        assert!(
+            matches!(err, ExpandError::NotConcatenable { .. }),
+            "{err:?}"
+        );
         assert!(err.help().contains("ident"), "{}", err.help());
     }
 

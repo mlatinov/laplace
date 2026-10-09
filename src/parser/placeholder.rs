@@ -363,7 +363,10 @@ mod tests {
     #[test]
     fn a_declaration_without_a_dollar_is_malformed() {
         let err = parse_declarations("name: ident").unwrap_err();
-        assert!(matches!(err, PlaceholderError::MalformedDecl { .. }), "{err:?}");
+        assert!(
+            matches!(err, PlaceholderError::MalformedDecl { .. }),
+            "{err:?}"
+        );
         assert!(err.help().contains("$name:"), "{}", err.help());
     }
 
@@ -378,7 +381,10 @@ mod tests {
     #[test]
     fn an_unknown_kind_lists_the_ones_that_exist() {
         let err = parse_declarations("$T: type").unwrap_err();
-        assert!(matches!(err, PlaceholderError::UnknownKind { .. }), "{err:?}");
+        assert!(
+            matches!(err, PlaceholderError::UnknownKind { .. }),
+            "{err:?}"
+        );
         assert!(err.help().contains("ident"), "{}", err.help());
         assert!(err.help().contains("expr"), "{}", err.help());
     }
@@ -386,7 +392,10 @@ mod tests {
     #[test]
     fn declaring_the_same_placeholder_twice_is_an_error() {
         let err = parse_declarations("$a: ident, $a: expr").unwrap_err();
-        assert!(matches!(err, PlaceholderError::DuplicateDecl { .. }), "{err:?}");
+        assert!(
+            matches!(err, PlaceholderError::DuplicateDecl { .. }),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -481,7 +490,10 @@ mod tests {
     #[test]
     fn an_unclosed_brace_is_reported_as_such() {
         let err = find_uses("real ${name;").unwrap_err();
-        assert!(matches!(err, PlaceholderError::UnclosedBrace { .. }), "{err:?}");
+        assert!(
+            matches!(err, PlaceholderError::UnclosedBrace { .. }),
+            "{err:?}"
+        );
         assert!(err.help().contains("closing `}`"), "{}", err.help());
     }
 

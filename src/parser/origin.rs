@@ -60,10 +60,10 @@ pub fn apply_cuts(source: &str, cuts: &[Range<usize>], markers: &[usize]) -> Cut
     let mut line = 1usize;
 
     let copy_to = |text: &mut String,
-                       segments: &mut Vec<LineSegment>,
-                       cursor: &mut usize,
-                       line: &mut usize,
-                       end: usize| {
+                   segments: &mut Vec<LineSegment>,
+                   cursor: &mut usize,
+                   line: &mut usize,
+                   end: usize| {
         if end <= *cursor {
             return;
         }
@@ -208,15 +208,9 @@ impl PackageOrigin {
     /// from. `None` for an offset in no file's range, or in a gap between
     /// segments (the separator newlines the concatenation adds).
     pub fn locate<'a>(&'a self, body: &str, offset: usize) -> Option<Location<'a>> {
-        let file = self
-            .files
-            .iter()
-            .find(|f| f.body_range.contains(&offset))?;
+        let file = self.files.iter().find(|f| f.body_range.contains(&offset))?;
         let relative = offset - file.body_range.start;
-        let segment = file
-            .segments
-            .iter()
-            .find(|s| s.range.contains(&relative))?;
+        let segment = file.segments.iter().find(|s| s.range.contains(&relative))?;
 
         let from = file.body_range.start + segment.range.start;
         let seen = body

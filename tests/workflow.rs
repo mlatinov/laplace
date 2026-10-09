@@ -1,0 +1,1213 @@
+//! End-to-end tests for the package-author and compiler-maintenance
+//! workflow: `--version`, the `laplace` manifest key, `init --update`, cache
+//! refresh, path dependencies, `release` and `self-update`.
+//!
+//! Like `tests/cli.rs`, every test runs the real binary against temp
+//! directories with `HOME` pointed at a fake home. Git remotes are local bare
+//! repositories; nothing here touches the network.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+struct Env {
+    _tmp: tempfile::TempDir,
+    root: PathBuf,
+    home: PathBuf,
+    extra_env: Vec<(String, String)>,
+}
+
+fn setup() -> Env {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let home = root.join("home");
+    fs::create_dir_all(home.join(".laplace").join("registry")).unwrap();
+    Env {
+        _tmp: tmp,
+        root,
+        home,
+        extra_env: Vec::new(),
+    }
+}
+
+impl Env {
+    /// A fresh directory under the test root.
+    fn dir(&self, name: &str) -> PathBuf {
+        let dir = self.root.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn registry(&self) -> PathBuf {
+        self.home.join(".laplace").join("registry")
+    }
+
+    fn cache(&self) -> PathBuf {
+        self.home.join(".laplace").join("packages")
+    }
+
+    fn run_in(&self, cwd: &Path, args: &[&str]) -> Output {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_laplace"));
+        cmd.args(args)
+            .current_dir(cwd)
+            .env("HOME", &self.home)
+            .env_remove("LAPLACE_REGISTRY")
+            .env_remove("LAPLACE_RELEASES_URL")
+            // Keep git from reading the developer's own config (signing,
+            // hooks, default branch) inside `laplace release` tests.
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com");
+        for (key, value) in &self.extra_env {
+            cmd.env(key, value);
+        }
+        cmd.output().expect("failed to run laplace binary")
+    }
+}
+
+fn write(path: &Path, contents: &str) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(path, contents).unwrap();
+}
+
+fn read(path: &Path) -> String {
+    fs::read_to_string(path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).to_string()
+}
+
+/// Both streams, for assertions that should not care which one a note went to.
+fn all_output(output: &Output) -> String {
+    format!("{}{}", stdout(output), stderr(output))
+}
+
+// -- Phase 1: compiler versioning -------------------------------------------
+
+#[test]
+fn version_flag_prints_the_cargo_version() {
+    let env = setup();
+    let out = env.run_in(&env.root, &["--version"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.starts_with(&format!("laplace {}", env!("CARGO_PKG_VERSION"))),
+        "{text}"
+    );
+}
+
+#[test]
+fn version_verbose_names_commit_target_and_directories() {
+    let env = setup();
+    let out = env.run_in(&env.root, &["version", "--verbose"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    for key in [
+        "version:",
+        "commit:",
+        "built:",
+        "target:",
+        "cache:",
+        "registry:",
+    ] {
+        assert!(text.contains(key), "missing {key}: {text}");
+    }
+    // The directories reported are the ones actually in use.
+    assert!(text.contains(&env.cache().display().to_string()), "{text}");
+    assert!(
+        text.contains(&env.registry().display().to_string()),
+        "{text}"
+    );
+}
+
+// -- Phase 2: minimum compiler version in manifests -------------------------
+
+const RBF_STAN: &str = "// @laplace\n// @brief RBF covariance.\nmatrix rbf_cov(vector x, real alpha, real rho) {\n  return gp_exp_quad_cov(x, alpha, rho);\n}\n";
+
+const MODEL: &str = "library {\n  import gps\n}\n\ndata {\n  int N;\n  vector[N] x;\n}\nmodel {\n  matrix[N, N] K = gps::rbf_cov(x, 1.0, 1.0);\n}\n";
+
+/// A registry package `gps@<version>` exporting `rbf_cov`, with optional
+/// extra manifest lines (e.g. a `laplace = ...` requirement).
+fn registry_gps(env: &Env, version: &str, extra_manifest: &str) -> PathBuf {
+    let dir = env.registry().join("gps").join(version);
+    write(
+        &dir.join("laplace.toml"),
+        &format!(
+            "name = \"gps\"\nversion = \"{version}\"\n{extra_manifest}exports = [\"rbf_cov\"]\n"
+        ),
+    );
+    write(&dir.join("gps.stan"), RBF_STAN);
+    dir
+}
+
+#[test]
+fn a_package_requiring_a_newer_compiler_is_refused_with_the_update_hint() {
+    let env = setup();
+    registry_gps(&env, "1.0.0", "laplace = \">=99.0\"\n");
+    let project = env.dir("project");
+
+    let out = env.run_in(&project, &["add", "gps"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("requires laplace >=99.0"), "{err}");
+    assert!(
+        err.contains(&format!("this is laplace {}", env!("CARGO_PKG_VERSION"))),
+        "{err}"
+    );
+    assert!(err.contains("laplace self-update"), "{err}");
+}
+
+#[test]
+fn a_satisfied_package_requirement_builds() {
+    let env = setup();
+    registry_gps(&env, "1.0.0", "laplace = \">=0.2\"\n");
+    let project = env.dir("project");
+    write(&project.join("model.laplace"), MODEL);
+
+    let out = env.run_in(&project, &["add", "gps"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = env.run_in(&project, &["build", "model.laplace"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = env.run_in(&project, &["doc", "gps::rbf_cov"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+#[test]
+fn a_project_requiring_a_newer_compiler_refuses_build_install_and_doc() {
+    let env = setup();
+    registry_gps(&env, "1.0.0", "");
+    let project = env.dir("project");
+    write(&project.join("model.laplace"), MODEL);
+    assert!(env.run_in(&project, &["add", "gps"]).status.success());
+
+    // Raise the bar after the fact: the gate applies to every command,
+    // including the lock-only ones.
+    let manifest = read(&project.join("laplace.toml"));
+    write(
+        &project.join("laplace.toml"),
+        &format!("laplace = \">=99\"\n{manifest}"),
+    );
+    for args in [
+        &["build", "model.laplace"][..],
+        &["install"][..],
+        &["doc", "gps::rbf_cov"][..],
+        &["add", "gps"][..],
+    ] {
+        let out = env.run_in(&project, args);
+        assert!(!out.status.success(), "{args:?} should fail");
+        assert!(
+            stderr(&out).contains("requires laplace >=99"),
+            "{args:?}: {}",
+            stderr(&out)
+        );
+    }
+}
+
+#[test]
+fn a_manifest_without_the_laplace_key_imposes_nothing() {
+    let env = setup();
+    registry_gps(&env, "1.0.0", "");
+    let project = env.dir("project");
+    write(&project.join("model.laplace"), MODEL);
+    assert!(env.run_in(&project, &["add", "gps"]).status.success());
+    assert!(!read(&project.join("laplace.toml")).contains("laplace ="));
+    let out = env.run_in(&project, &["build", "model.laplace"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+// -- Phase 3: `laplace init` fixes -------------------------------------------
+
+#[test]
+fn init_on_a_laplacelib_only_package_has_no_misleading_doc_warning() {
+    let env = setup();
+    let pkg = env.dir("splines");
+    write(
+        &pkg.join("splines.laplacelib"),
+        "// @laplace\n// @brief Knots.\npub vector knots(int k) {\n  return rep_vector(0, k);\n}\n\nreal helper() {\n  return 1;\n}\n",
+    );
+    let out = env.run_in(&pkg, &["init"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = all_output(&out);
+    assert!(!text.contains("doc comment -- exports is empty"), "{text}");
+    assert!(!text.contains("none of the"), "{text}");
+    assert!(text.contains("public (`pub`, documented): knots"), "{text}");
+    assert!(text.contains("private (no `pub`"), "{text}");
+    assert!(text.contains("helper"), "{text}");
+    assert!(!read(&pkg.join("laplace.toml")).contains("exports"));
+}
+
+#[test]
+fn init_still_warns_when_stan_sources_lack_doc_comments() {
+    let env = setup();
+    let pkg = env.dir("gps");
+    write(
+        &pkg.join("gps.stan"),
+        "real jitter(real e) {\n  return e;\n}\n",
+    );
+    let out = env.run_in(&pkg, &["init"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("has a `// @laplace` doc comment"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn init_on_an_existing_manifest_points_at_update() {
+    let env = setup();
+    let pkg = env.dir("gps");
+    write(
+        &pkg.join("laplace.toml"),
+        "name = \"gps\"\nversion = \"9.9.9\"\n",
+    );
+    let out = env.run_in(&pkg, &["init"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("already exists -- run `laplace init --update` to sync it"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(read(&pkg.join("laplace.toml")).contains("9.9.9"));
+}
+
+#[test]
+fn init_update_adds_new_exports_once_and_warns_about_stale_ones() {
+    let env = setup();
+    let pkg = env.dir("gps");
+    write(&pkg.join("gps.stan"), RBF_STAN);
+    write(
+        &pkg.join("laplace.toml"),
+        "name = \"gps_custom\"\nversion = \"2.0.0\"\nexports = [\"removed_fn\"]\n",
+    );
+
+    let out = env.run_in(&pkg, &["init", "--update"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("rbf_cov"), "{}", stdout(&out));
+    assert!(stderr(&out).contains("`removed_fn`"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("--prune"), "{}", stderr(&out));
+    let manifest = read(&pkg.join("laplace.toml"));
+    assert!(
+        manifest.contains("gps_custom") && manifest.contains("2.0.0"),
+        "{manifest}"
+    );
+
+    let again = env.run_in(&pkg, &["init", "--update"]);
+    assert!(stdout(&again).contains("up to date"), "{}", stdout(&again));
+    assert_eq!(read(&pkg.join("laplace.toml")), manifest);
+
+    let pruned = env.run_in(&pkg, &["init", "--update", "--prune"]);
+    assert!(pruned.status.success(), "{}", stderr(&pruned));
+    assert!(!read(&pkg.join("laplace.toml")).contains("removed_fn"));
+}
+
+// -- git fixtures -------------------------------------------------------------
+
+/// Run git with a clean, deterministic identity and no user config.
+fn git(cwd: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
+        .output()
+        .expect("failed to spawn git");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A working clone at `<root>/<name>-work` pushing to a bare repository at
+/// `<root>/<name>.git`, with one commit on `main` holding `files`.
+/// Returns `(work, bare)`.
+fn git_repo(env: &Env, name: &str, files: &[(&str, &str)]) -> (PathBuf, PathBuf) {
+    let bare = env.root.join(format!("{name}.git"));
+    let work = env.root.join(format!("{name}-work"));
+    git(
+        &env.root,
+        &[
+            "init",
+            "--quiet",
+            "--bare",
+            "-b",
+            "main",
+            bare.to_str().unwrap(),
+        ],
+    );
+    git(
+        &env.root,
+        &["init", "--quiet", "-b", "main", work.to_str().unwrap()],
+    );
+    for (path, contents) in files {
+        write(&work.join(path), contents);
+    }
+    git(&work, &["add", "."]);
+    git(&work, &["commit", "--quiet", "-m", "init"]);
+    git(&work, &["remote", "add", "origin", bare.to_str().unwrap()]);
+    git(&work, &["push", "--quiet", "-u", "origin", "main"]);
+    (work, bare)
+}
+
+fn gps_manifest(version: &str) -> String {
+    format!("name = \"gps\"\nversion = \"{version}\"\nexports = [\"rbf_cov\"]\n")
+}
+
+// -- Phase 4: stale cache and better errors ---------------------------------
+
+#[test]
+fn update_refreshes_a_cache_whose_source_changed_without_a_version_bump() {
+    let env = setup();
+    let pkg = registry_gps(&env, "1.0.0", "");
+    let project = env.dir("project");
+    assert!(env.run_in(&project, &["add", "gps"]).status.success());
+    let cached = env.cache().join("gps").join("1.0.0");
+    assert!(read(&cached.join("docs.json")).contains("RBF covariance."));
+
+    // The author edits the package in place, same version.
+    write(
+        &pkg.join("gps.stan"),
+        &RBF_STAN.replace("RBF covariance.", "Squared exponential kernel."),
+    );
+
+    // Re-running without changes says nothing about refreshing...
+    let out = env.run_in(&project, &["update", "gps"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("refreshed gps@1.0.0 (source changed)"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(read(&cached.join("gps.stan")).contains("Squared exponential kernel."));
+    assert!(read(&cached.join("docs.json")).contains("Squared exponential kernel."));
+
+    // ...and a second update has nothing left to refresh.
+    let again = env.run_in(&project, &["update", "gps"]);
+    assert!(!stdout(&again).contains("refreshed"), "{}", stdout(&again));
+
+    // The lock now records the new contents, so install agrees with it.
+    let out = env.run_in(&project, &["install"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+#[test]
+fn install_refuses_a_source_that_no_longer_matches_the_lock() {
+    let env = setup();
+    let pkg = registry_gps(&env, "1.0.0", "");
+    let project = env.dir("project");
+    assert!(env.run_in(&project, &["add", "gps"]).status.success());
+    let lock_before = read(&project.join("laplace.lock"));
+    let cached = env.cache().join("gps").join("1.0.0").join("gps.stan");
+    let cached_before = read(&cached);
+
+    write(&pkg.join("gps.stan"), &RBF_STAN.replace("RBF", "Changed"));
+
+    let out = env.run_in(&project, &["install"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("checksum mismatch for `gps@1.0.0`"), "{err}");
+    assert!(err.contains("without a version bump"), "{err}");
+    assert!(err.contains("laplace update gps"), "{err}");
+    // Neither copy was used: the cache and the lock are untouched.
+    assert_eq!(read(&cached), cached_before);
+    assert_eq!(read(&project.join("laplace.lock")), lock_before);
+}
+
+#[test]
+fn a_missing_tag_lists_the_available_tags_and_suggests_the_newest() {
+    let env = setup();
+    let (work, bare) = git_repo(
+        &env,
+        "gps",
+        &[
+            ("laplace.toml", &gps_manifest("0.1.0")),
+            ("gps.stan", RBF_STAN),
+        ],
+    );
+    for tag in ["0.1.0", "0.2.0", "0.10.0"] {
+        git(&work, &["tag", tag]);
+    }
+    git(&work, &["push", "--quiet", "origin", "--tags"]);
+    let project = env.dir("project");
+
+    let out = env.run_in(
+        &project,
+        &[
+            "add",
+            "gps",
+            "--git",
+            bare.to_str().unwrap(),
+            "--tag",
+            "0.3.0",
+        ],
+    );
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("`0.3.0` does not exist"), "{err}");
+    assert!(
+        err.contains("available tags: 0.1.0, 0.10.0, 0.2.0"),
+        "{err}"
+    );
+    assert!(err.contains("did you mean `--tag 0.10.0`?"), "{err}");
+    assert!(!err.contains("Remote branch"), "{err}");
+}
+
+#[test]
+fn a_tag_naming_a_different_version_than_the_manifest_warns() {
+    let env = setup();
+    let (work, bare) = git_repo(
+        &env,
+        "gps",
+        &[
+            ("laplace.toml", &gps_manifest("0.1.1")),
+            ("gps.stan", RBF_STAN),
+        ],
+    );
+    git(&work, &["tag", "0.1.2"]);
+    git(&work, &["push", "--quiet", "origin", "0.1.2"]);
+    let project = env.dir("project");
+
+    let out = env.run_in(
+        &project,
+        &[
+            "add",
+            "gps",
+            "--git",
+            bare.to_str().unwrap(),
+            "--tag",
+            "0.1.2",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("warning: tag 0.1.2 of `gps` contains version 0.1.1 in laplace.toml"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn doc_on_a_private_item_names_the_installed_version_and_what_to_check() {
+    let env = setup();
+    let dir = env.registry().join("stats").join("1.0.0");
+    write(
+        &dir.join("laplace.toml"),
+        "name = \"stats\"\nversion = \"1.0.0\"\n",
+    );
+    write(
+        &dir.join("stats.laplacelib"),
+        "// @laplace\n// @brief Mean.\nreal mean_(vector x) {\n  return mean(x);\n}\n",
+    );
+    let project = env.dir("project");
+    assert!(env.run_in(&project, &["add", "stats"]).status.success());
+
+    let out = env.run_in(&project, &["doc", "stats::mean_"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(
+        err.contains("installed `stats@1.0.0` defines `mean_` without `pub`"),
+        "{err}"
+    );
+    assert!(err.contains("laplace update stats"), "{err}");
+}
+
+// -- Phase 5: path dependencies ---------------------------------------------
+
+/// A local `gps` package at `<root>/<dir>` exporting `rbf_cov`.
+fn local_gps(env: &Env, dir: &str) -> PathBuf {
+    let pkg = env.dir(dir);
+    write(&pkg.join("laplace.toml"), &gps_manifest("0.1.0"));
+    write(&pkg.join("gps.stan"), RBF_STAN);
+    pkg
+}
+
+#[test]
+fn a_path_dependency_is_locked_relative_to_the_project_and_builds() {
+    let env = setup();
+    local_gps(&env, "gps-lib");
+    let project = env.dir("project");
+    write(&project.join("model.laplace"), MODEL);
+
+    let out = env.run_in(&project, &["add", "gps", "--path", "../gps-lib"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("added gps@0.1.0 (path+../gps-lib)"),
+        "{}",
+        stdout(&out)
+    );
+
+    let manifest = read(&project.join("laplace.toml"));
+    assert!(manifest.contains("path = \"../gps-lib\""), "{manifest}");
+    let lock = read(&project.join("laplace.lock"));
+    assert!(lock.contains("source = \"path+../gps-lib\""), "{lock}");
+    assert!(
+        !lock.contains(&env.root.display().to_string()),
+        "absolute path in lock: {lock}"
+    );
+
+    let out = env.run_in(&project, &["build", "model.laplace"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(read(&project.join("build/model.stan")).contains("gps__rbf_cov"));
+
+    // A path package never lands in the shared versioned cache, where it
+    // could shadow a real gps@0.1.0 for other projects.
+    assert!(!env.cache().join("gps").join("0.1.0").exists());
+}
+
+#[test]
+fn edits_to_a_path_package_show_up_in_the_next_build_and_doc() {
+    let env = setup();
+    let pkg = local_gps(&env, "gps-lib");
+    let project = env.dir("project");
+    write(&project.join("model.laplace"), MODEL);
+    assert!(env
+        .run_in(&project, &["add", "gps", "--path", "../gps-lib"])
+        .status
+        .success());
+    assert!(env
+        .run_in(&project, &["build", "model.laplace"])
+        .status
+        .success());
+
+    // Edit in place: no version bump, no tag, no `laplace update`.
+    write(
+        &pkg.join("gps.stan"),
+        &RBF_STAN
+            .replace("RBF covariance.", "Edited brief.")
+            .replace(
+                "gp_exp_quad_cov(x, alpha, rho)",
+                "gp_exp_quad_cov(x, alpha, 2 * rho)",
+            ),
+    );
+
+    let out = env.run_in(&project, &["build", "model.laplace"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("refreshed gps@0.1.0"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(read(&project.join("build/model.stan")).contains("2 * rho"));
+
+    let out = env.run_in(&project, &["doc", "gps::rbf_cov"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("Edited brief."), "{}", stdout(&out));
+
+    // Unchanged since the last sync: nothing to refresh.
+    let out = env.run_in(&project, &["build", "model.laplace"]);
+    assert!(!stdout(&out).contains("refreshed"), "{}", stdout(&out));
+}
+
+#[test]
+fn a_path_dependency_accepts_a_subdir() {
+    let env = setup();
+    let repo = env.dir("monorepo");
+    write(&repo.join("README.md"), "# not the package\n");
+    write(&repo.join("pkgs/gps/laplace.toml"), &gps_manifest("0.1.0"));
+    write(&repo.join("pkgs/gps/gps.stan"), RBF_STAN);
+    let project = env.dir("project");
+
+    let out = env.run_in(
+        &project,
+        &[
+            "add",
+            "gps",
+            "--path",
+            "../monorepo",
+            "--subdir",
+            "pkgs/gps",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let manifest = read(&project.join("laplace.toml"));
+    assert!(manifest.contains("subdir = \"pkgs/gps\""), "{manifest}");
+    assert!(read(&project.join("laplace.lock")).contains("source = \"path+../monorepo/pkgs/gps\""));
+}
+
+#[test]
+fn install_warns_about_path_dependencies_and_locked_refuses_them() {
+    let env = setup();
+    local_gps(&env, "gps-lib");
+    let project = env.dir("project");
+    assert!(env
+        .run_in(&project, &["add", "gps", "--path", "../gps-lib"])
+        .status
+        .success());
+
+    let out = env.run_in(&project, &["install"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("warning: `gps` is a path dependency"), "{err}");
+    assert!(err.contains("another machine will not have it"), "{err}");
+
+    let out = env.run_in(&project, &["install", "--locked"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("path dependency: gps (path+../gps-lib)"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn a_path_package_can_path_depend_on_a_sibling_relative_to_itself() {
+    let env = setup();
+    let stats = env.dir("libs/stats");
+    write(
+        &stats.join("laplace.toml"),
+        "name = \"stats\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        &stats.join("stats.laplacelib"),
+        "pub real twice(real x) {\n  return 2 * x;\n}\n",
+    );
+    let reg = env.dir("libs/reg");
+    write(
+        &reg.join("laplace.toml"),
+        "name = \"reg\"\nversion = \"0.1.0\"\n\n[dependencies]\nstats = { path = \"../stats\" }\n",
+    );
+    write(
+        &reg.join("reg.laplacelib"),
+        "library {\n  import stats\n}\n\npub real fit(real x) {\n  return stats::twice(x);\n}\n",
+    );
+    let project = env.dir("project");
+    write(
+        &project.join("model.laplace"),
+        "library {\n  import reg\n}\n\nparameters {\n  real y;\n}\nmodel {\n  target += reg::fit(y);\n}\n",
+    );
+
+    let out = env.run_in(&project, &["add", "reg", "--path", "../libs/reg"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let lock = read(&project.join("laplace.lock"));
+    assert!(lock.contains("source = \"path+../libs/stats\""), "{lock}");
+    let out = env.run_in(&project, &["build", "model.laplace"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(read(&project.join("build/model.stan")).contains("stats__twice"));
+}
+
+#[test]
+fn a_registry_package_may_not_declare_a_path_dependency() {
+    let env = setup();
+    let dir = env.registry().join("reg").join("1.0.0");
+    write(
+        &dir.join("laplace.toml"),
+        "name = \"reg\"\nversion = \"1.0.0\"\n\n[dependencies]\nstats = { path = \"../stats\" }\n",
+    );
+    write(
+        &dir.join("reg.laplacelib"),
+        "pub real f() {\n  return 1;\n}\n",
+    );
+    let project = env.dir("project");
+    let out = env.run_in(&project, &["add", "reg"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out)
+            .contains("only the project, or another path package, may use a path dependency"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+// -- Phase 6: `laplace release` -----------------------------------------------
+
+const GPS_LAPLACELIB: &str =
+    "// @laplace\n// @brief RBF.\npub real rbf(real x) {\n  return x;\n}\n";
+
+fn release_repo(env: &Env) -> (PathBuf, PathBuf) {
+    git_repo(
+        env,
+        "gps",
+        &[
+            ("laplace.toml", "name = \"gps\"\nversion = \"0.1.0\"\n"),
+            ("gps.laplacelib", GPS_LAPLACELIB),
+        ],
+    )
+}
+
+fn remote_tags(bare: &Path) -> String {
+    git(bare, &["tag", "--list"])
+}
+
+#[test]
+fn release_dry_run_changes_nothing() {
+    let env = setup();
+    let (work, bare) = release_repo(&env);
+    let head = git(&work, &["rev-parse", "HEAD"]);
+
+    let out = env.run_in(&work, &["release", "minor", "--dry-run"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains("releasing gps 0.1.0 -> 0.2.0 (tag `0.2.0`"),
+        "{text}"
+    );
+    assert!(text.contains("would set version = \"0.2.0\""), "{text}");
+    assert!(
+        text.contains("would push tag `0.2.0` to `origin`"),
+        "{text}"
+    );
+    assert!(text.contains("nothing was changed"), "{text}");
+
+    assert!(read(&work.join("laplace.toml")).contains("version = \"0.1.0\""));
+    assert_eq!(git(&work, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git(&work, &["tag", "--list"]), "");
+    assert_eq!(remote_tags(&bare), "");
+}
+
+#[test]
+fn release_bumps_commits_tags_and_pushes() {
+    let env = setup();
+    let (work, bare) = release_repo(&env);
+
+    let out = env.run_in(&work, &["release", "patch"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("released gps 0.1.1"),
+        "{}",
+        stdout(&out)
+    );
+
+    assert!(read(&work.join("laplace.toml")).contains("version = \"0.1.1\""));
+    assert_eq!(git(&work, &["log", "-1", "--format=%s"]), "release 0.1.1");
+    assert_eq!(git(&work, &["status", "--porcelain"]), "");
+    assert_eq!(remote_tags(&bare), "0.1.1");
+    assert_eq!(
+        git(&bare, &["rev-parse", "main"]),
+        git(&work, &["rev-parse", "HEAD"])
+    );
+    // The tag points at the release commit.
+    assert_eq!(
+        git(&bare, &["rev-parse", "0.1.1^{commit}"]),
+        git(&work, &["rev-parse", "HEAD"])
+    );
+
+    // And the result is installable as a git dependency at that tag.
+    let project = env.dir("project");
+    let out = env.run_in(
+        &project,
+        &[
+            "add",
+            "gps",
+            "--git",
+            bare.to_str().unwrap(),
+            "--tag",
+            "0.1.1",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(!stderr(&out).contains("warning"), "{}", stderr(&out));
+}
+
+#[test]
+fn release_refuses_a_dirty_tree() {
+    let env = setup();
+    let (work, bare) = release_repo(&env);
+    write(
+        &work.join("gps.laplacelib"),
+        &format!("{GPS_LAPLACELIB}\n// wip\n"),
+    );
+
+    let out = env.run_in(&work, &["release", "patch"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("uncommitted changes"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(stderr(&out).contains("gps.laplacelib"), "{}", stderr(&out));
+    assert_eq!(remote_tags(&bare), "");
+}
+
+#[test]
+fn release_refuses_an_existing_tag_locally_or_on_the_remote() {
+    let env = setup();
+    let (work, bare) = release_repo(&env);
+    git(&work, &["tag", "0.2.0"]);
+    let out = env.run_in(&work, &["release", "0.2.0"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("tag `0.2.0` already exists locally"),
+        "{}",
+        stderr(&out)
+    );
+
+    // Someone else pushed 0.3.0 from another clone.
+    let other = env.root.join("other");
+    git(
+        &env.root,
+        &[
+            "clone",
+            "--quiet",
+            bare.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    git(&other, &["tag", "0.3.0"]);
+    git(&other, &["push", "--quiet", "origin", "0.3.0"]);
+    // `release` fetches tags first, so this is caught as a local tag after
+    // the fetch; either way it is refused.
+    let out = env.run_in(&work, &["release", "0.3.0"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("tag `0.3.0` already exists"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn release_refuses_a_branch_behind_its_remote() {
+    let env = setup();
+    let (work, bare) = release_repo(&env);
+    let other = env.root.join("other");
+    git(
+        &env.root,
+        &[
+            "clone",
+            "--quiet",
+            bare.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    write(&other.join("NOTES.md"), "newer\n");
+    git(&other, &["add", "."]);
+    git(&other, &["commit", "--quiet", "-m", "newer"]);
+    git(&other, &["push", "--quiet", "origin", "main"]);
+
+    let out = env.run_in(&work, &["release", "patch"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("behind"), "{}", stderr(&out));
+}
+
+#[test]
+fn release_works_for_a_package_in_a_subdirectory_and_matches_a_v_prefix() {
+    let env = setup();
+    let (work, bare) = git_repo(
+        &env,
+        "mono",
+        &[
+            ("README.md", "# repo\n"),
+            (
+                "laplace/laplace.toml",
+                "name = \"gps\"\nversion = \"1.0.0\"\n",
+            ),
+            ("laplace/gps.laplacelib", GPS_LAPLACELIB),
+        ],
+    );
+    git(&work, &["tag", "v1.0.0"]);
+    git(&work, &["push", "--quiet", "origin", "v1.0.0"]);
+
+    // Run from the repository root: the package directory is found below it.
+    let out = env.run_in(&work, &["release", "minor"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains("tag `v1.1.0`: existing tags use the `v` prefix"),
+        "{text}"
+    );
+    assert!(text.contains("laplace/laplace.toml"), "{text}");
+    assert!(read(&work.join("laplace/laplace.toml")).contains("version = \"1.1.0\""));
+    assert!(remote_tags(&bare).contains("v1.1.0"));
+}
+
+#[test]
+fn release_refuses_a_package_that_is_not_ready() {
+    let env = setup();
+    let (work, bare) = git_repo(
+        &env,
+        "gps",
+        &[
+            (
+                "laplace.toml",
+                "name = \"gps\"\nversion = \"0.1.0\"\n\n[dependencies]\nstats = { path = \"../stats\" }\n",
+            ),
+            (
+                "gps.laplacelib",
+                "// @laplace\n// @brief Orphaned.\n\nreal helper() {\n  return 1;\n}\n",
+            ),
+        ],
+    );
+    let out = env.run_in(&work, &["release", "patch", "--dry-run"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(
+        err.contains("no `.laplacelib` item is marked `pub`"),
+        "{err}"
+    );
+    assert!(
+        err.contains("gps.laplacelib:1: this `// @laplace` block"),
+        "{err}"
+    );
+    assert!(err.contains("`stats` is a path dependency"), "{err}");
+    assert_eq!(remote_tags(&bare), "");
+}
+
+// -- Phase 7: `laplace self-update` -------------------------------------------
+
+/// A tiny HTTP/1.1 server on 127.0.0.1 serving fixed bodies by path, so
+/// `self-update` is tested without the network. `routes` receives the
+/// server's own base URL, since release metadata links back to it. Lives
+/// until the test process exits.
+fn fake_server(routes: impl FnOnce(&str) -> Vec<(String, Vec<u8>)>) -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let routes = routes(&base);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request_line = String::new();
+            if reader.read_line(&mut request_line).is_err() {
+                continue;
+            }
+            // Drain the request headers.
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok() && !line.trim().is_empty() {
+                line.clear();
+            }
+            let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+            let (status, body): (&str, &[u8]) = match routes.iter().find(|(p, _)| p == path) {
+                Some((_, body)) => ("200 OK", body),
+                None => ("404 Not Found", b""),
+            };
+            let head = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(body);
+        }
+    });
+    base
+}
+
+fn running_target(env: &Env) -> String {
+    let out = env.run_in(&env.root, &["version", "--verbose"]);
+    stdout(&out)
+        .lines()
+        .find_map(|l| l.strip_prefix("target:"))
+        .expect("version --verbose prints the target")
+        .trim()
+        .to_string()
+}
+
+/// Serve a release `tag` (latest, and by tag) whose archive holds a fake
+/// `laplace` script printing `laplace <version>`. With `corrupt_checksum`
+/// the published `.sha256` is wrong. Returns the base URL.
+fn serve_release(env: &Env, tag: &str, corrupt_checksum: bool) -> String {
+    use sha2::Digest;
+    let target = running_target(env);
+    let version = tag.trim_start_matches('v');
+    let staging = env.dir(&format!("staging-{tag}"));
+    let inner = format!("laplace-{target}");
+    let script = staging.join(&inner).join("laplace");
+    write(&script, &format!("#!/bin/sh\necho \"laplace {version}\"\n"));
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    fs::set_permissions(&script, perms).unwrap();
+
+    let archive_name = format!("laplace-{target}.tar.gz");
+    let archive = staging.join(&archive_name);
+    let out = Command::new("tar")
+        .arg("-czf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&staging)
+        .arg(&inner)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let bytes = fs::read(&archive).unwrap();
+    let checksum = if corrupt_checksum {
+        "0".repeat(64)
+    } else {
+        format!("{:x}", sha2::Sha256::digest(&bytes))
+    };
+
+    fake_server(|base| {
+        let metadata = format!(
+            r#"{{"tag_name":"{tag}","body":"- faster builds\n- new `laplace release`","assets":[
+                {{"name":"{archive_name}","browser_download_url":"{base}/dl/{archive_name}"}},
+                {{"name":"{archive_name}.sha256","browser_download_url":"{base}/dl/{archive_name}.sha256"}},
+                {{"name":"laplace-other-target.tar.gz","browser_download_url":"{base}/dl/nope"}}
+            ]}}"#
+        );
+        vec![
+            (
+                "/releases/latest".to_string(),
+                metadata.clone().into_bytes(),
+            ),
+            (format!("/releases/tags/{tag}"), metadata.into_bytes()),
+            (format!("/dl/{archive_name}"), bytes),
+            (
+                format!("/dl/{archive_name}.sha256"),
+                format!("{checksum}  {archive_name}\n").into_bytes(),
+            ),
+        ]
+    })
+}
+
+/// A scratch "installed laplace" to be replaced, outside any package
+/// manager or cargo directory.
+fn scratch_exe(env: &Env) -> PathBuf {
+    let exe = env.dir("bin").join("laplace");
+    write(&exe, "#!/bin/sh\necho \"laplace 0.0.0-old\"\n");
+    exe
+}
+
+fn self_update_env(env: &mut Env, base: &str, exe: &Path) {
+    env.extra_env
+        .push(("LAPLACE_RELEASES_URL".to_string(), base.to_string()));
+    env.extra_env.push((
+        "LAPLACE_SELF_UPDATE_EXE".to_string(),
+        exe.display().to_string(),
+    ));
+}
+
+#[test]
+fn self_update_reports_up_to_date_against_an_older_release() {
+    let mut env = setup();
+    let base = serve_release(&env, "v0.0.1", false);
+    let exe = scratch_exe(&env);
+    self_update_env(&mut env, &base, &exe);
+
+    for args in [&["self-update", "--check"][..], &["self-update"][..]] {
+        let out = env.run_in(&env.root, args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {}", stderr(&out));
+        assert!(stdout(&out).contains("is up to date"), "{}", stdout(&out));
+    }
+    assert!(read(&exe).contains("0.0.0-old"));
+}
+
+#[test]
+fn self_update_check_exits_10_and_shows_what_changed() {
+    let mut env = setup();
+    let base = serve_release(&env, "v99.0.0", false);
+    let exe = scratch_exe(&env);
+    self_update_env(&mut env, &base, &exe);
+
+    let out = env.run_in(&env.root, &["self-update", "--check"]);
+    assert_eq!(out.status.code(), Some(10), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("-> 99.0.0"), "{text}");
+    assert!(text.contains("faster builds"), "{text}");
+    assert!(read(&exe).contains("0.0.0-old"), "--check must not install");
+}
+
+#[test]
+fn self_update_replaces_a_standalone_binary() {
+    let mut env = setup();
+    let base = serve_release(&env, "v99.0.0", false);
+    let exe = scratch_exe(&env);
+    self_update_env(&mut env, &base, &exe);
+
+    let out = env.run_in(&env.root, &["self-update"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("to laplace 99.0.0"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(read(&exe).contains("laplace 99.0.0"));
+    // Nothing staged is left behind beside it.
+    let leftovers: Vec<_> = fs::read_dir(exe.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name() != "laplace")
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[test]
+fn self_update_with_an_explicit_version_fetches_that_tag() {
+    let mut env = setup();
+    let base = serve_release(&env, "v0.0.1", false);
+    let exe = scratch_exe(&env);
+    self_update_env(&mut env, &base, &exe);
+
+    // A downgrade is allowed when asked for explicitly.
+    let out = env.run_in(&env.root, &["self-update", "--version", "0.0.1"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(read(&exe).contains("laplace 0.0.1"));
+}
+
+#[test]
+fn self_update_aborts_on_a_checksum_mismatch_leaving_the_binary_alone() {
+    let mut env = setup();
+    let base = serve_release(&env, "v99.0.0", true);
+    let exe = scratch_exe(&env);
+    let before = read(&exe);
+    self_update_env(&mut env, &base, &exe);
+
+    let out = env.run_in(&env.root, &["self-update"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("checksum mismatch"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("nothing was changed"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(read(&exe), before);
+    assert_eq!(fs::read_dir(exe.parent().unwrap()).unwrap().count(), 1);
+}
+
+#[test]
+fn self_update_refuses_to_overwrite_a_package_managed_binary() {
+    let mut env = setup();
+    let base = serve_release(&env, "v99.0.0", false);
+    // Never written to: the classification alone must stop it.
+    let exe = PathBuf::from("/usr/bin/laplace-test-never-written");
+    self_update_env(&mut env, &base, &exe);
+
+    let out = env.run_in(&env.root, &["self-update"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("which owns that file"), "{err}");
+    assert!(!exe.exists());
+}
+
+#[test]
+fn self_update_under_cargo_bin_prints_the_cargo_command() {
+    let mut env = setup();
+    let base = serve_release(&env, "v99.0.0", false);
+    let cargo_home = env.dir("cargo-home");
+    let exe = cargo_home.join("bin").join("laplace");
+    write(&exe, "old");
+    self_update_env(&mut env, &base, &exe);
+    env.extra_env
+        .push(("CARGO_HOME".to_string(), cargo_home.display().to_string()));
+
+    let out = env.run_in(&env.root, &["self-update"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("cargo install --locked --force --git"),
+        "{}",
+        stdout(&out)
+    );
+    assert_eq!(read(&exe), "old");
+}

@@ -180,12 +180,7 @@ pub fn declarations(text: &str) -> Vec<Declaration> {
     found
 }
 
-fn try_declaration(
-    text: &str,
-    range: Range<usize>,
-    depth: usize,
-    out: &mut Vec<Declaration>,
-) {
+fn try_declaration(text: &str, range: Range<usize>, depth: usize, out: &mut Vec<Declaration>) {
     if range.start >= range.end {
         return;
     }
@@ -279,7 +274,8 @@ pub fn loop_variables(text: &str) -> Vec<Declaration> {
         if !mask.is_real(start) {
             continue;
         }
-        if (start > 0 && is_ident_char(bytes[start - 1])) || (end < bytes.len() && is_ident_char(bytes[end]))
+        if (start > 0 && is_ident_char(bytes[start - 1]))
+            || (end < bytes.len() && is_ident_char(bytes[end]))
         {
             continue;
         }
@@ -424,7 +420,10 @@ mod tests {
 
     #[test]
     fn a_declaration_with_an_initializer_is_recognised() {
-        assert_eq!(names("real x = 1;\nvector[N] v = rep_vector(0, N);\n"), vec!["x", "v"]);
+        assert_eq!(
+            names("real x = 1;\nvector[N] v = rep_vector(0, N);\n"),
+            vec!["x", "v"]
+        );
     }
 
     #[test]
@@ -460,8 +459,7 @@ mod tests {
     fn declarations_record_their_brace_depth() {
         let text = "real a;\nfor (i in 1:N) {\n  real b;\n}\nreal c;\n";
         let found = declarations(text);
-        let by_name: Vec<(String, usize)> =
-            found.into_iter().map(|d| (d.name, d.depth)).collect();
+        let by_name: Vec<(String, usize)> = found.into_iter().map(|d| (d.name, d.depth)).collect();
         assert_eq!(
             by_name,
             vec![
@@ -535,11 +533,15 @@ mod tests {
     fn a_call_is_told_apart_from_a_reference() {
         let text = "y ~ normal(mu, sigma);";
         let uses = identifier_uses(text);
-        let roles: Vec<(&str, bool)> =
-            uses.iter().map(|u| (u.name.as_str(), u.is_call)).collect();
+        let roles: Vec<(&str, bool)> = uses.iter().map(|u| (u.name.as_str(), u.is_call)).collect();
         assert_eq!(
             roles,
-            vec![("y", false), ("normal", true), ("mu", false), ("sigma", false)]
+            vec![
+                ("y", false),
+                ("normal", true),
+                ("mu", false),
+                ("sigma", false)
+            ]
         );
     }
 

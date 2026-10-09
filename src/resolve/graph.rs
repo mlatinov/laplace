@@ -43,6 +43,12 @@ pub enum DepRequirement {
         /// different subdirectories are different packages, and conflict.
         subdir: Option<String>,
     },
+    /// A local directory, already made absolute against the manifest that
+    /// named it -- so two packages naming the same directory by different
+    /// relative paths agree, and the resolver needs no filesystem access.
+    Path {
+        root: std::path::PathBuf,
+    },
 }
 
 impl DepRequirement {
@@ -55,6 +61,7 @@ impl DepRequirement {
                 git_ref,
                 subdir,
             } => describe_git(url, git_ref, subdir.as_deref()),
+            DepRequirement::Path { root } => format!("path+{}", root.display()),
         }
     }
 }
@@ -88,6 +95,15 @@ pub trait PackageProvider {
         git_ref: &str,
         subdir: Option<&str>,
     ) -> Result<Version, GraphError>;
+
+    /// Resolve a path requirement to the version the directory's manifest
+    /// declares.
+    fn path_version(&self, name: &str, root: &std::path::Path) -> Result<Version, GraphError> {
+        let _ = root;
+        Err(GraphError::Provider(format!(
+            "`{name}` is a path dependency, which this provider cannot resolve"
+        )))
+    }
 
     /// The dependencies `name@version` declares in its own manifest.
     fn dependencies_of(
@@ -186,8 +202,8 @@ pub enum GraphError {
     },
 
     #[error(
-        "`{package}` is required both from git ({first}) and from git ({second}) -- a build \
-         can only contain one copy of a package"
+        "`{package}` is required both from {first} and from {second} -- a build can only \
+         contain one copy of a package"
     )]
     GitSourceConflict {
         package: String,
@@ -315,13 +331,10 @@ fn collect_constraints(
 
     for (name, version) in selected {
         for (dep_name, requirement) in provider.dependencies_of(name, version)? {
-            constraints
-                .entry(dep_name)
-                .or_default()
-                .push(Constraint {
-                    requirer: format!("`{name}@{version}`"),
-                    requirement,
-                });
+            constraints.entry(dep_name).or_default().push(Constraint {
+                requirer: format!("`{name}@{version}`"),
+                requirement,
+            });
         }
     }
 
@@ -350,41 +363,37 @@ fn pick_version(
     provider: &dyn PackageProvider,
     preferred: Option<&Version>,
 ) -> Result<Version, GraphError> {
-    // (url, ref, subdir, requirer)
-    let mut git: Option<(&str, &str, Option<&str>, &str)> = None;
+    // A git or path source: at most one, since a build holds one copy.
+    let mut pinned: Option<&DepRequirement> = None;
     let mut ranges: Vec<(&VersionReq, &str)> = Vec::new();
 
     for constraint in constraints {
         match &constraint.requirement {
             DepRequirement::Range(req) => ranges.push((req, constraint.requirer.as_str())),
-            DepRequirement::Git {
-                url,
-                git_ref,
-                subdir,
-            } => {
-                let subdir = subdir.as_deref();
-                match git {
-                    Some((prev_url, prev_ref, prev_subdir, _))
-                        if (prev_url, prev_ref, prev_subdir) != (url, git_ref, subdir) =>
-                    {
-                        return Err(GraphError::GitSourceConflict {
-                            package: name.to_string(),
-                            first: describe_git(prev_url, prev_ref, prev_subdir),
-                            second: describe_git(url, git_ref, subdir),
-                        })
-                    }
-                    _ => git = Some((url, git_ref, subdir, constraint.requirer.as_str())),
+            source => match pinned {
+                Some(previous) if previous != source => {
+                    return Err(GraphError::GitSourceConflict {
+                        package: name.to_string(),
+                        first: previous.describe(),
+                        second: source.describe(),
+                    })
                 }
-            }
+                _ => pinned = Some(source),
+            },
         }
     }
 
-    let candidates: Vec<Version> = match git {
-        // A git source is its own registry-of-one: the checked-out ref
-        // decides the version, and every range constraint has to accept it.
-        Some((url, git_ref, subdir, _)) => {
-            vec![provider.git_version(name, url, git_ref, subdir)?]
-        }
+    let candidates: Vec<Version> = match pinned {
+        // A git or path source is its own registry-of-one: the checked-out
+        // ref or the directory decides the version, and every range
+        // constraint has to accept it.
+        Some(DepRequirement::Git {
+            url,
+            git_ref,
+            subdir,
+        }) => vec![provider.git_version(name, url, git_ref, subdir.as_deref())?],
+        Some(DepRequirement::Path { root }) => vec![provider.path_version(name, root)?],
+        Some(DepRequirement::Range(_)) => unreachable!("ranges are collected separately"),
         None => provider.available_versions(name)?,
     };
 
@@ -394,8 +403,7 @@ fn pick_version(
         });
     }
 
-    let satisfies =
-        |version: &Version| ranges.iter().all(|(req, _)| req.matches(version));
+    let satisfies = |version: &Version| ranges.iter().all(|(req, _)| req.matches(version));
 
     // A still-valid preference wins over the newest match, so a lock stays
     // put unless something actually forces it to move.
@@ -739,15 +747,20 @@ mod tests {
 
     #[test]
     fn detects_an_indirect_two_package_cycle() {
-        let provider = TestProvider::new()
-            .add("a", "1.0.0", &[("b", "^1.0")])
-            .add("b", "1.0.0", &[("a", "^1.0")]);
+        let provider = TestProvider::new().add("a", "1.0.0", &[("b", "^1.0")]).add(
+            "b",
+            "1.0.0",
+            &[("a", "^1.0")],
+        );
 
         let err = resolve_graph(&[root("a", "^1.0")], &provider).unwrap_err();
         let GraphError::Cycle { path } = &err else {
             panic!("expected a cycle, got {err:?}");
         };
-        assert_eq!(path, &vec!["a".to_string(), "b".to_string(), "a".to_string()]);
+        assert_eq!(
+            path,
+            &vec!["a".to_string(), "b".to_string(), "a".to_string()]
+        );
         assert_eq!(err.to_string(), "dependency cycle: a -> b -> a");
     }
 
@@ -865,7 +878,10 @@ mod tests {
             ),
         ];
         let err = resolve_graph(&roots, &provider).unwrap_err();
-        assert!(matches!(err, GraphError::GitSourceConflict { .. }), "{err:?}");
+        assert!(
+            matches!(err, GraphError::GitSourceConflict { .. }),
+            "{err:?}"
+        );
     }
 
     #[test]

@@ -157,9 +157,9 @@ impl WaitError {
                 "a `{category}` return has no such size; use `.size` for a vector or \
                  row_vector, `.rows`/`.cols` for a matrix, or `@wait(f)` for the whole type"
             ),
-            WaitError::MissingReturnSize { bound, example, .. } => format!(
-                "annotate the return type, e.g. `{example} {bound}(...)`"
-            ),
+            WaitError::MissingReturnSize { bound, example, .. } => {
+                format!("annotate the return type, e.g. `{example} {bound}(...)`")
+            }
             WaitError::AccessorOnParameterDependentSize { param, .. } => format!(
                 "declare the value with `@wait({param}) r = {param}(...);` instead, so the \
                  arguments are known, or give the bound function a fixed return size"
@@ -290,13 +290,14 @@ fn resolve_one(
             }
             // The size needs this call's arguments, so the declaration
             // has to be initialized by a direct call to the parameter.
-            let actuals = direct_call_args(body, mask, use_.range.end, &use_.param).ok_or_else(
-                || WaitError::NeedsDirectCall {
-                    param: use_.param.clone(),
-                    bound: shape.bound.clone(),
-                    offset: use_.range.start,
-                },
-            )?;
+            let actuals =
+                direct_call_args(body, mask, use_.range.end, &use_.param).ok_or_else(|| {
+                    WaitError::NeedsDirectCall {
+                        param: use_.param.clone(),
+                        bound: shape.bound.clone(),
+                        offset: use_.range.start,
+                    }
+                })?;
             Ok(shape.sized_type(&actuals))
         }
     }
@@ -317,12 +318,7 @@ fn example_annotation(shape: &ReturnShape) -> String {
 ///
 /// Recognises exactly `@wait(f) <name> = f(<args>);` -- an `=` followed
 /// by a call to `f`, before the statement's `;`.
-fn direct_call_args(
-    body: &str,
-    mask: &CodeMask,
-    from: usize,
-    param: &str,
-) -> Option<Vec<String>> {
+fn direct_call_args(body: &str, mask: &CodeMask, from: usize, param: &str) -> Option<Vec<String>> {
     let statement_end = body[from..].find(';').map(|i| from + i)?;
     let statement = &body[from..statement_end];
     let equals = statement.find('=')?;
@@ -509,9 +505,20 @@ mod tests {
     fn a_missing_return_size_is_an_error_naming_the_bound_function() {
         let body = "{\n  @wait(f) r = f(x);\n}\n";
         let err = sub(body, vector_shape(&[], &["x"])).unwrap_err();
-        assert!(matches!(err, WaitError::MissingReturnSize { .. }), "{err:?}");
-        assert!(err.to_string().contains("needs the return size of `to_pair`"), "{err}");
-        assert!(err.help().contains("vector[2] to_pair(...)"), "{}", err.help());
+        assert!(
+            matches!(err, WaitError::MissingReturnSize { .. }),
+            "{err:?}"
+        );
+        assert!(
+            err.to_string()
+                .contains("needs the return size of `to_pair`"),
+            "{err}"
+        );
+        assert!(
+            err.help().contains("vector[2] to_pair(...)"),
+            "{}",
+            err.help()
+        );
     }
 
     #[test]
@@ -667,7 +674,10 @@ mod tests {
         assert_eq!(blanked.len(), body.len());
         assert!(!blanked.contains("@wait"), "{blanked}");
         assert!(blanked.contains("r = f(x);"), "{blanked}");
-        assert!(blanked.contains("vector[") && blanked.contains("] v;"), "{blanked}");
+        assert!(
+            blanked.contains("vector[") && blanked.contains("] v;"),
+            "{blanked}"
+        );
     }
 
     #[test]

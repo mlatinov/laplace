@@ -68,9 +68,9 @@ use crate::expand::macros::{self as expand_macros, MacroSource};
 use crate::monomorphize::{self, Unit};
 use crate::parser::brace_match::CodeMask;
 use crate::parser::library_block::{ImportStatement, LibraryBlock};
+use crate::parser::macros::LocatedMacro;
 use crate::parser::origin::{line_col, PackageOrigin};
 use crate::parser::signatures::FunctionSig;
-use crate::parser::macros::LocatedMacro;
 use crate::parser::template::LocatedTemplate;
 use crate::parser::visibility::Visibility;
 use rename::{find_qualified_calls, mangle, rename_identifier_calls, QualifiedCall};
@@ -245,13 +245,18 @@ pub enum CodegenError {
 
     #[error(
         "`{package}::{func}` is private to package `{package}`\n  --> {location}\n  help: only \
-         items marked `pub` can be used outside their package"
+         items marked `pub` can be used outside their package. This build uses the installed \
+         `{package}@{version}`; if a newer release made `{func}` public, run \
+         `laplace update {package}`"
     )]
     ItemIsPrivate {
         package: String,
         func: String,
         /// Already rendered as `file:line:column`.
         location: String,
+        /// The installed version of `package`, which is often the real
+        /// problem: an old tag, or a cache that predates the `pub`.
+        version: String,
     },
 
     #[error(
@@ -473,7 +478,9 @@ enum SegmentKind {
 
 impl SourceMap {
     pub fn map(&self, output_offset: usize) -> Option<usize> {
-        let idx = self.segments.partition_point(|(r, _)| r.end <= output_offset);
+        let idx = self
+            .segments
+            .partition_point(|(r, _)| r.end <= output_offset);
         let (range, kind) = self.segments.get(idx)?;
         if output_offset < range.start || output_offset > range.end {
             return None;
@@ -516,7 +523,10 @@ fn generate_impl(
         // version always comes from the lock, so a disagreement is an error
         // rather than a silently ignored annotation.
         if let Some(pinned) = &import.version {
-            let same = match (semver::Version::parse(pinned), semver::Version::parse(&pkg.version)) {
+            let same = match (
+                semver::Version::parse(pinned),
+                semver::Version::parse(&pkg.version),
+            ) {
                 (Ok(a), Ok(b)) => a == b,
                 _ => pinned == &pkg.version,
             };
@@ -573,11 +583,7 @@ fn generate_impl(
                 package: pkg.name.clone(),
                 version: pkg.version.clone(),
                 def: located.def.clone(),
-                functions: pkg
-                    .signatures
-                    .iter()
-                    .map(|sig| sig.name.clone())
-                    .collect(),
+                functions: pkg.signatures.iter().map(|sig| sig.name.clone()).collect(),
                 origin: format!(
                     "{} v{} ({}/{}:{})",
                     pkg.name, pkg.version, pkg.name, located.file, located.line
@@ -605,11 +611,7 @@ fn generate_impl(
                 package: pkg.name.clone(),
                 version: pkg.version.clone(),
                 def: located.def.clone(),
-                functions: pkg
-                    .signatures
-                    .iter()
-                    .map(|sig| sig.name.clone())
-                    .collect(),
+                functions: pkg.signatures.iter().map(|sig| sig.name.clone()).collect(),
                 origin: format!(
                     "{} v{} ({}/{}:{})",
                     pkg.name, pkg.version, pkg.name, located.file, located.line
@@ -680,9 +682,7 @@ fn generate_impl(
             let target = by_name
                 .get(call.package.as_str())
                 .expect("dependency presence was checked above");
-            check_exported(target, &call, || {
-                package_location(pkg, call.range.start)
-            })?;
+            check_exported(target, &call, || package_location(pkg, call.range.start))?;
             edits.push(Edit {
                 range: call.range.clone(),
                 replacement: mangle(&call.package, &call.func),
@@ -869,7 +869,8 @@ fn generate_impl(
                     let abs_end = splice_start + rel_range.end;
                     PackageLineRange {
                         package,
-                        lines: line_at(&text, abs_start)..=line_at(&text, abs_end.saturating_sub(1)),
+                        lines: line_at(&text, abs_start)
+                            ..=line_at(&text, abs_end.saturating_sub(1)),
                     }
                 })
                 .collect()
@@ -939,6 +940,7 @@ fn check_exported(
             package: call.package.clone(),
             func: call.func.clone(),
             location: location(),
+            version: target.version.clone(),
         });
     }
     Err(CodegenError::FunctionNotExported {
@@ -979,10 +981,7 @@ fn provenance_comment(pkg: &InstalledPackage, sig: &FunctionSig) -> String {
         // No mapping back to a file: still say where the item came from,
         // rather than dropping the provenance line and leaving a reader
         // with nothing.
-        None => format!(
-            "{indent}// {} v{} ({visibility})\n",
-            pkg.name, pkg.version
-        ),
+        None => format!("{indent}// {} v{} ({visibility})\n", pkg.name, pkg.version),
     }
 }
 
@@ -1033,9 +1032,10 @@ fn topological_order<'a>(
             if emitted.contains(pkg.name.as_str()) {
                 continue;
             }
-            let ready = pkg.dependencies.iter().all(|d| {
-                emitted.contains(d.as_str()) || !by_name.contains_key(d.as_str())
-            });
+            let ready = pkg
+                .dependencies
+                .iter()
+                .all(|d| emitted.contains(d.as_str()) || !by_name.contains_key(d.as_str()));
             if ready {
                 emitted.insert(pkg.name.as_str());
                 out.push(pkg);
@@ -1275,7 +1275,11 @@ fn library_block_removal_range(
 }
 
 fn line_at(text: &str, at: usize) -> usize {
-    text.as_bytes()[..at].iter().filter(|&&b| b == b'\n').count() + 1
+    text.as_bytes()[..at]
+        .iter()
+        .filter(|&&b| b == b'\n')
+        .count()
+        + 1
 }
 
 struct Edit {
@@ -1474,9 +1478,13 @@ model {
         // The block's own line goes with it; the blank line after it stays
         // as the separator below the synthesized functions block.
         assert_eq!(byte_range.start, 0);
-        let expected_tail = laplace_source[byte_range.end + 1..].to_string()
-        .replace("gps::rbf_cov", "gps__rbf_cov");
-        assert_eq!(output_1, format!("{expected_functions_block}{expected_tail}"));
+        let expected_tail = laplace_source[byte_range.end + 1..]
+            .to_string()
+            .replace("gps::rbf_cov", "gps__rbf_cov");
+        assert_eq!(
+            output_1,
+            format!("{expected_functions_block}{expected_tail}")
+        );
     }
 
     #[test]
@@ -1574,28 +1582,30 @@ model {
 
         for line_no in alpha_range.lines.clone() {
             let line = lines[line_no - 1];
-            assert!(!line.contains("beta__") && !line.contains("user_fn"), "{line}");
+            assert!(
+                !line.contains("beta__") && !line.contains("user_fn"),
+                "{line}"
+            );
         }
         for line_no in beta_range.lines.clone() {
             let line = lines[line_no - 1];
-            assert!(!line.contains("alpha__") && !line.contains("user_fn"), "{line}");
+            assert!(
+                !line.contains("alpha__") && !line.contains("user_fn"),
+                "{line}"
+            );
         }
         // The first line of a package's range is its provenance comment;
         // its definition follows.
         assert!(lines[*alpha_range.lines.start() - 1].starts_with("// alpha v"));
-        assert!(
-            alpha_range
-                .lines
-                .clone()
-                .any(|n| lines[n - 1].contains("alpha__a_fn"))
-        );
+        assert!(alpha_range
+            .lines
+            .clone()
+            .any(|n| lines[n - 1].contains("alpha__a_fn")));
         assert!(lines[*beta_range.lines.start() - 1].starts_with("// beta v"));
-        assert!(
-            beta_range
-                .lines
-                .clone()
-                .any(|n| lines[n - 1].contains("beta__b_fn"))
-        );
+        assert!(beta_range
+            .lines
+            .clone()
+            .any(|n| lines[n - 1].contains("beta__b_fn")));
     }
 
     #[test]
@@ -1630,13 +1640,19 @@ model {
         let source = "// header\nlibrary {\n  import gps\n}\n\ndata {\n  int n;\n}\n";
         let block = parse_library_block(source).unwrap();
         let output = generate(source, block.as_ref(), &installed).unwrap();
-        assert!(output.ends_with("}\n// header\n\ndata {\n  int n;\n}\n"), "{output:?}");
+        assert!(
+            output.ends_with("}\n// header\n\ndata {\n  int n;\n}\n"),
+            "{output:?}"
+        );
 
         // Blank lines on both sides of the block collapse to one.
         let source = "// header\n\nlibrary {\n  import gps\n}\n\ndata {\n  int n;\n}\n";
         let block = parse_library_block(source).unwrap();
         let output = generate(source, block.as_ref(), &installed).unwrap();
-        assert!(output.ends_with("}\n// header\n\ndata {\n  int n;\n}\n"), "{output:?}");
+        assert!(
+            output.ends_with("}\n// header\n\ndata {\n  int n;\n}\n"),
+            "{output:?}"
+        );
 
         // A block on the same line as other code is removed on its own.
         let source = "library { import gps } data {\n  int n;\n}\n";
@@ -1660,12 +1676,16 @@ model {
         let block = parse_library_block(source).unwrap();
         let output = generate(source, block.as_ref(), &[density_package()]).unwrap();
         assert!(output.contains("real gp__marginal_normal_lpdf(vector y, real sigma)"));
-        assert!(output.contains("y ~ gp__marginal_normal(sigma);"), "{output}");
+        assert!(
+            output.contains("y ~ gp__marginal_normal(sigma);"),
+            "{output}"
+        );
     }
 
     #[test]
     fn density_base_name_outside_a_distribution_statement_names_the_suffix() {
-        let source = "library {\n  import gp\n}\nmodel {\n  target += gp::marginal_normal(y, sigma);\n}\n";
+        let source =
+            "library {\n  import gp\n}\nmodel {\n  target += gp::marginal_normal(y, sigma);\n}\n";
         let block = parse_library_block(source).unwrap();
         let err = generate(source, block.as_ref(), &[density_package()]).unwrap_err();
         assert_eq!(
@@ -1692,7 +1712,10 @@ model {
         let block = parse_library_block(source).unwrap();
         let err = generate(source, block.as_ref(), &[gp]).unwrap_err();
         assert!(matches!(err, CodegenError::ItemIsPrivate { .. }), "{err:?}");
-        assert!(err.to_string().contains("`gp::marginal_normal` is private"), "{err}");
+        assert!(
+            err.to_string().contains("`gp::marginal_normal` is private"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1727,9 +1750,15 @@ model {
         );
         let output = generate(source, None, &[]).unwrap();
 
-        assert!(output.contains("real apply_twice__add_one(real x) {"), "{output}");
+        assert!(
+            output.contains("real apply_twice__add_one(real x) {"),
+            "{output}"
+        );
         assert!(output.contains("\nreal apply_twice__add_one(real x) {\n  real a = add_one(x);\n  return add_one(a);\n}\n"), "{output}");
-        assert!(output.contains("  real r = apply_twice__add_one(5);"), "{output}");
+        assert!(
+            output.contains("  real r = apply_twice__add_one(5);"),
+            "{output}"
+        );
         assert!(!output.contains("func("), "{output}");
         // Specialized copies go at the end of the functions block, after
         // everything they might call.
@@ -1764,11 +1793,19 @@ model {
             "{output}"
         );
         assert!(output.contains("return softplus(x[1]) * x;"), "{output}");
-        assert!(output.contains("transforms__map_each__softplus(y)"), "{output}");
+        assert!(
+            output.contains("transforms__map_each__softplus(y)"),
+            "{output}"
+        );
         // The copy follows the user function it calls.
         let softplus = output.find("real softplus(real x)").unwrap();
-        let copy = output.find("vector transforms__map_each__softplus").unwrap();
-        assert!(softplus < copy, "the copy must come after what it calls:\n{output}");
+        let copy = output
+            .find("vector transforms__map_each__softplus")
+            .unwrap();
+        assert!(
+            softplus < copy,
+            "the copy must come after what it calls:\n{output}"
+        );
     }
 
     #[test]
@@ -1810,17 +1847,27 @@ model {
             "model {\n  real r = transforms::apply(1, add_one);\n}\n",
         );
         let block = parse_library_block(source).unwrap();
-        let generated =
-            generate_with_options(source, block.as_ref(), &[transforms], &CodegenOptions::split())
-                .unwrap();
+        let generated = generate_with_options(
+            source,
+            block.as_ref(),
+            &[transforms],
+            &CodegenOptions::split(),
+        )
+        .unwrap();
 
         assert!(
-            generated.source.contains("real transforms__apply__add_one(real x)"),
+            generated
+                .source
+                .contains("real transforms__apply__add_one(real x)"),
             "{}",
             generated.source
         );
         let file = &generated.function_files[0];
-        assert!(!file.contents.contains("apply__add_one"), "{}", file.contents);
+        assert!(
+            !file.contents.contains("apply__add_one"),
+            "{}",
+            file.contents
+        );
         // The generic original is not in the .stanfunctions file either.
         assert!(!file.contents.contains("func("), "{}", file.contents);
     }
@@ -1990,13 +2037,22 @@ model {
         );
         let block = LibraryBlock {
             imports: vec![
-                ImportStatement { name: "a".to_string(), version: None },
-                ImportStatement { name: "a__b".to_string(), version: None },
+                ImportStatement {
+                    name: "a".to_string(),
+                    version: None,
+                },
+                ImportStatement {
+                    name: "a__b".to_string(),
+                    version: None,
+                },
             ],
             byte_range: 0..source.find("model").unwrap() - 1,
         };
         let err = generate(source, Some(&block), &[pkg_a, pkg_a_b]).unwrap_err();
-        assert!(matches!(err, CodegenError::DuplicateMangledName { .. }), "{err:?}");
+        assert!(
+            matches!(err, CodegenError::DuplicateMangledName { .. }),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -2068,7 +2124,8 @@ model {
             &["stats"],
         );
 
-        let source = "library {\n  import regression\n}\n\nmodel {\n  real f = regression::fit(1);\n}\n";
+        let source =
+            "library {\n  import regression\n}\n\nmodel {\n  real f = regression::fit(1);\n}\n";
         let block = parse_library_block(source).unwrap();
         let output = generate(source, block.as_ref(), &[stats, regression]).unwrap();
 
@@ -2078,7 +2135,10 @@ model {
             "{output}"
         );
         assert!(output.contains("real stats__helper(real x)"), "{output}");
-        assert!(output.contains("real regression__helper(real x)"), "{output}");
+        assert!(
+            output.contains("real regression__helper(real x)"),
+            "{output}"
+        );
     }
 
     #[test]
@@ -2221,8 +2281,7 @@ model {
     #[test]
     fn split_mode_is_a_no_op_for_a_project_with_no_imports() {
         let source = "data {\n  int n;\n}\nmodel {\n}\n";
-        let inline =
-            generate_with_options(source, None, &[], &CodegenOptions::inline()).unwrap();
+        let inline = generate_with_options(source, None, &[], &CodegenOptions::inline()).unwrap();
         let split = generate_with_options(source, None, &[], &CodegenOptions::split()).unwrap();
         assert_eq!(inline.source, source);
         assert_eq!(split.source, source);
@@ -2255,7 +2314,10 @@ model {
         assert!(generated.source.contains("#include \"gps.stanfunctions\""));
         let include_at = generated.source.find("#include").unwrap();
         let user_at = generated.source.find("user_fn").unwrap();
-        assert!(include_at < user_at, "include must precede the user's functions");
+        assert!(
+            include_at < user_at,
+            "include must precede the user's functions"
+        );
     }
 
     #[test]
@@ -2273,7 +2335,8 @@ model {
         let source = "library {\n  import multi\n}\nmodel {\n}\n";
         let block = parse_library_block(source).unwrap();
         let generated =
-            generate_with_options(source, block.as_ref(), &[pkg], &CodegenOptions::split()).unwrap();
+            generate_with_options(source, block.as_ref(), &[pkg], &CodegenOptions::split())
+                .unwrap();
 
         assert_eq!(generated.function_files.len(), 1);
         let contents = &generated.function_files[0].contents;
@@ -2354,7 +2417,12 @@ model {
     fn transitive_ordering_does_not_depend_on_installed_order() {
         let (stats, regression) = chain_fixture();
         let block = parse_library_block(CHAIN_MODEL).unwrap();
-        let a = generate(CHAIN_MODEL, block.as_ref(), &[stats.clone(), regression.clone()]).unwrap();
+        let a = generate(
+            CHAIN_MODEL,
+            block.as_ref(),
+            &[stats.clone(), regression.clone()],
+        )
+        .unwrap();
         let b = generate(CHAIN_MODEL, block.as_ref(), &[regression, stats]).unwrap();
         assert_eq!(a, b);
     }
@@ -2472,7 +2540,10 @@ model {
             .iter()
             .map(|f| f.file_name.as_str())
             .collect();
-        assert_eq!(names, vec!["stats.stanfunctions", "regression.stanfunctions"]);
+        assert_eq!(
+            names,
+            vec!["stats.stanfunctions", "regression.stanfunctions"]
+        );
 
         let defined_in: Vec<&str> = generated
             .function_files
@@ -2507,8 +2578,12 @@ model {
         assert_eq!(file.file_name, "regression.stanfunctions");
         assert_eq!(file.packages, vec!["stats", "regression"]);
         assert!(file.contents.contains("real stats__mean_(vector x)"));
-        assert!(file.contents.contains("vector regression__centre(vector x)"));
-        assert!(file.contents.contains("Bundled dependencies of `regression`: stats 1.0.0."));
+        assert!(file
+            .contents
+            .contains("vector regression__centre(vector x)"));
+        assert!(file
+            .contents
+            .contains("Bundled dependencies of `regression`: stats 1.0.0."));
         // Dependency-first inside the file, too.
         assert!(
             file.contents.find("stats__mean_").unwrap()
@@ -2530,7 +2605,12 @@ model {
             &["m"],
             &["base"],
         );
-        let top = lib_package("top", "real t() {\n  return mid::m();\n}\n", &["t"], &["mid"]);
+        let top = lib_package(
+            "top",
+            "real t() {\n  return mid::m();\n}\n",
+            &["t"],
+            &["mid"],
+        );
 
         let source = "library {\n  import top\n}\nmodel {\n  real y = top::t();\n}\n";
         let block = parse_library_block(source).unwrap();

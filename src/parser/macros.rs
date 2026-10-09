@@ -279,9 +279,9 @@ impl MacroError {
             MacroError::MalformedExpand { .. } => {
                 "write `@expand pkg::macro(arg, [a, b]);` inside a Stan block".to_string()
             }
-            MacroError::UnqualifiedExpand { name, .. } => format!(
-                "macros live in packages, so name the package: `@expand pkg::{name}(...);`"
-            ),
+            MacroError::UnqualifiedExpand { name, .. } => {
+                format!("macros live in packages, so name the package: `@expand pkg::{name}(...);`")
+            }
             MacroError::UnknownKind { .. } => {
                 format!("the kinds are {}", MacroKind::all().join(", "))
             }
@@ -290,9 +290,7 @@ impl MacroError {
                  parameters, model, generated quantities"
                     .to_string()
             }
-            MacroError::NoTargets { .. } => {
-                "say where it may be used, as `in model`".to_string()
-            }
+            MacroError::NoTargets { .. } => "say where it may be used, as `in model`".to_string(),
             MacroError::DuplicateTarget { block, .. } => {
                 format!("list `{block}` once")
             }
@@ -383,8 +381,7 @@ pub fn find_macros(
         // `in <blocks>`, up to the body's brace.
         let in_start = skip_space(source, kind_end);
         if !source[in_start..].starts_with("in")
-            || source[in_start + 2..]
-                .starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+            || source[in_start + 2..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
         {
             return Err(malformed());
         }
@@ -437,11 +434,7 @@ pub fn find_macros(
     Ok(macros)
 }
 
-fn parse_targets(
-    name: &str,
-    text: &str,
-    base: usize,
-) -> Result<Vec<BlockKind>, MacroError> {
+fn parse_targets(name: &str, text: &str, base: usize) -> Result<Vec<BlockKind>, MacroError> {
     let mut targets = Vec::new();
     for chunk in split_top_level_args(text) {
         let block = chunk.trim();
@@ -677,13 +670,17 @@ mod tests {
         );
         assert_eq!(
             definition.targets,
-            vec![BlockKind::TransformedParameters, BlockKind::GeneratedQuantities]
+            vec![
+                BlockKind::TransformedParameters,
+                BlockKind::GeneratedQuantities
+            ]
         );
     }
 
     #[test]
     fn a_macro_without_each_parses() {
-        let definition = parse_one("@macro m($x: ident) : stmt in model {\n  $x ~ std_normal();\n}\n");
+        let definition =
+            parse_one("@macro m($x: ident) : stmt in model {\n  $x ~ std_normal();\n}\n");
         assert!(definition.each_param().is_none());
     }
 
@@ -698,7 +695,8 @@ mod tests {
 
     #[test]
     fn the_range_takes_the_doc_comment_and_trailing_blank_lines() {
-        let source = format!("// @laplace\n// @brief Priors.\n{PRIORS}\nreal f() {{\n  return 1;\n}}\n");
+        let source =
+            format!("// @laplace\n// @brief Priors.\n{PRIORS}\nreal f() {{\n  return 1;\n}}\n");
         let definition = parse_one(&source);
         assert_eq!(definition.range.start, 0);
         assert!(source[definition.range.clone()].starts_with("// @laplace"));
@@ -707,13 +705,16 @@ mod tests {
 
     #[test]
     fn a_macro_in_a_comment_is_not_a_macro() {
-        assert!(parse("// @macro m($x: ident) : stmt in model { }\n").unwrap().is_empty());
+        assert!(parse("// @macro m($x: ident) : stmt in model { }\n")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn an_unused_placeholder_is_recorded_for_a_warning() {
-        let definition =
-            parse_one("@macro m($x: ident, $spare: expr) : stmt in model {\n  $x ~ std_normal();\n}\n");
+        let definition = parse_one(
+            "@macro m($x: ident, $spare: expr) : stmt in model {\n  $x ~ std_normal();\n}\n",
+        );
         assert_eq!(definition.unused, vec!["spare"]);
     }
 
@@ -730,11 +731,23 @@ mod tests {
 
     #[test]
     fn a_sampling_body_targeting_generated_quantities_is_rejected() {
-        let err = error("@macro m($p: ident) : stmt in generated quantities {\n  $p ~ std_normal();\n}\n");
-        assert!(matches!(err, MacroError::BodyIllegalInTarget { .. }), "{err:?}");
+        let err = error(
+            "@macro m($p: ident) : stmt in generated quantities {\n  $p ~ std_normal();\n}\n",
+        );
+        assert!(
+            matches!(err, MacroError::BodyIllegalInTarget { .. }),
+            "{err:?}"
+        );
         let rendered = err.to_string();
-        assert!(rendered.contains("`~` statement is not legal in `generated quantities`"), "{rendered}");
-        assert!(err.help().contains("drop `generated quantities`"), "{}", err.help());
+        assert!(
+            rendered.contains("`~` statement is not legal in `generated quantities`"),
+            "{rendered}"
+        );
+        assert!(
+            err.help().contains("drop `generated quantities`"),
+            "{}",
+            err.help()
+        );
     }
 
     #[test]
@@ -742,7 +755,10 @@ mod tests {
         let err = error(
             "@macro m($p: ident) : stmt in model, generated quantities {\n  $p ~ std_normal();\n}\n",
         );
-        assert!(matches!(err, MacroError::BodyIllegalInTarget { .. }), "{err:?}");
+        assert!(
+            matches!(err, MacroError::BodyIllegalInTarget { .. }),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -750,7 +766,10 @@ mod tests {
         let err = error(
             "@macro m($x: ident) : stmt in model {\n  real ${x}_sim = normal_rng(0, 1);\n}\n",
         );
-        assert!(matches!(err, MacroError::BodyIllegalInTarget { .. }), "{err:?}");
+        assert!(
+            matches!(err, MacroError::BodyIllegalInTarget { .. }),
+            "{err:?}"
+        );
         assert!(err.to_string().contains("`_rng` function"), "{err}");
     }
 
@@ -762,7 +781,10 @@ mod tests {
     #[test]
     fn a_statement_body_may_not_target_parameters() {
         let err = error("@macro m($x: ident) : stmt in parameters {\n  $x = 1;\n}\n");
-        assert!(matches!(err, MacroError::BodyIllegalInTarget { .. }), "{err:?}");
+        assert!(
+            matches!(err, MacroError::BodyIllegalInTarget { .. }),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -776,7 +798,11 @@ mod tests {
     fn an_unknown_target_block_is_rejected() {
         let err = error("@macro m($x: ident) : stmt in priors {\n  $x ~ std_normal();\n}\n");
         assert!(matches!(err, MacroError::UnknownTarget { .. }), "{err:?}");
-        assert!(err.help().contains("generated quantities"), "{}", err.help());
+        assert!(
+            err.help().contains("generated quantities"),
+            "{}",
+            err.help()
+        );
     }
 
     #[test]
@@ -816,7 +842,9 @@ mod tests {
 
     #[test]
     fn body_hygiene_is_enforced_the_same_way_as_a_templates() {
-        let err = error("@macro m($p: ident) : stmt in model {\n  real tmp = 1;\n  $p ~ normal(tmp, 1);\n}\n");
+        let err = error(
+            "@macro m($p: ident) : stmt in model {\n  real tmp = 1;\n  $p ~ normal(tmp, 1);\n}\n",
+        );
         assert!(matches!(err, MacroError::Body(_)), "{err:?}");
         assert!(err.to_string().contains("macro `m`"), "{err}");
     }
@@ -852,7 +880,8 @@ mod tests {
 
     #[test]
     fn the_statement_range_covers_its_whole_line() {
-        let source = "model {\n  @expand stats::priors([a], normal(0, 1));\n  y ~ normal(0, 1);\n}\n";
+        let source =
+            "model {\n  @expand stats::priors([a], normal(0, 1));\n  y ~ normal(0, 1);\n}\n";
         let found = find_expand_statements(source).unwrap();
         assert_eq!(
             &source[found[0].range.clone()],
@@ -902,13 +931,18 @@ mod tests {
 
     #[test]
     fn an_expand_in_a_comment_is_ignored() {
-        assert!(find_expand_statements("// @expand s::m([x], 1);\n").unwrap().is_empty());
+        assert!(find_expand_statements("// @expand s::m([x], 1);\n")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn an_unqualified_expand_says_to_name_the_package() {
         let err = find_expand_statements("model {\n  @expand priors([a], 1);\n}\n").unwrap_err();
-        assert!(matches!(err, MacroError::UnqualifiedExpand { .. }), "{err:?}");
+        assert!(
+            matches!(err, MacroError::UnqualifiedExpand { .. }),
+            "{err:?}"
+        );
         assert!(err.help().contains("pkg::priors"), "{}", err.help());
     }
 

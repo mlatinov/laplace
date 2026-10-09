@@ -11,13 +11,14 @@ use clap::{Parser, Subcommand};
 
 use laplace::codegen::CodegenOptions;
 use laplace::parser::library_block::{parse_library_block, ImportStatement};
-use laplace::resolve::{self, Registry};
 use laplace::pipeline;
-use laplace::{docs, init, manifest, package, validate};
+use laplace::resolve::{self, Registry};
+use laplace::{docs, init, manifest, package, release, self_update, validate};
 
 #[derive(Parser)]
 #[command(
     name = "laplace",
+    version = laplace::version::LONG_VERSION,
     about = "Source-to-source preprocessor for Stan: package manager + namespaces + doc lookup"
 )]
 struct Cli {
@@ -27,9 +28,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Scan the current directory's .stan files and generate a starter
-    /// laplace.toml, guessing `exports` from @laplace-documented functions
-    Init,
+    /// Scan the current directory's .stan and .laplacelib files and
+    /// generate a starter laplace.toml. `exports` is guessed from
+    /// @laplace-documented .stan functions; .laplacelib items are public
+    /// when marked `pub` and need no manifest entry
+    Init {
+        /// Sync an existing laplace.toml with the sources instead: add
+        /// newly documented .stan functions to `exports`, never remove or
+        /// reorder anything, and warn about stale entries
+        #[arg(long)]
+        update: bool,
+        /// With --update: also delete `exports` entries whose function no
+        /// longer exists
+        #[arg(long, requires = "update")]
+        prune: bool,
+    },
     /// Compile a .laplace file to .stan
     Build {
         file: PathBuf,
@@ -53,22 +66,32 @@ enum Command {
         split_functions: bool,
     },
     /// Install every package pinned in laplace.lock
-    Install,
+    Install {
+        /// CI mode: refuse a lock with path dependencies, which only exist
+        /// on this machine (plain install only warns about them)
+        #[arg(long)]
+        locked: bool,
+    },
     /// Add a dependency (optionally pinned to `<pkg>@<version>`), resolving
     /// it and updating laplace.toml + laplace.lock. Pass `--git <url>` with
     /// `--tag <tag>` or `--rev <rev>` to add a git dependency instead of
     /// resolving from the local registry, and `--subdir <path>` if that
-    /// repository keeps the package below its top level.
+    /// repository keeps the package below its top level. Pass `--path <dir>`
+    /// to depend on a local directory instead, re-read on every
+    /// install/build/doc so edits show up without a version bump.
     Add {
         package: String,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "path")]
         git: Option<String>,
+        /// A local package directory (relative to the project)
+        #[arg(long)]
+        path: Option<String>,
         #[arg(long)]
         tag: Option<String>,
         #[arg(long)]
         rev: Option<String>,
-        /// Directory inside the git repository holding the package's
-        /// laplace.toml (default: the repository root)
+        /// Directory inside the git repository (or --path directory)
+        /// holding the package's laplace.toml (default: its root)
         #[arg(long)]
         subdir: Option<String>,
     },
@@ -89,11 +112,48 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Release a package: bump `version` in its laplace.toml, commit,
+    /// tag, and push the branch and the tag. Run inside the package's git
+    /// repository. (This is a *package* release; the laplace compiler
+    /// itself is released separately.)
+    Release {
+        /// An explicit version (`1.4.0`), or `patch`, `minor` or `major`
+        version: String,
+        /// Print every step and check everything, but change nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// The package directory (default: the current directory, or its
+        /// only subdirectory holding a laplace.toml)
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    /// Update the laplace compiler itself to the latest release (or
+    /// `--version X`). Explicit only: laplace never checks for updates on
+    /// its own.
+    SelfUpdate {
+        /// Only report whether an update exists: exit 0 when up to date,
+        /// 10 when an update is available
+        #[arg(long)]
+        check: bool,
+        /// Install this release instead of the latest (downgrades allowed)
+        #[arg(long = "version", value_name = "VERSION")]
+        target_version: Option<String>,
+        /// For a `cargo install`ed laplace: run the `cargo install` command
+        /// instead of only printing it
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Print the compiler version (`--verbose` adds the commit, build date,
+    /// target and the directories laplace reads and writes)
+    Version {
+        #[arg(short, long)]
+        verbose: bool,
+    },
 }
 
 fn main() -> ExitCode {
     match run() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(err) => {
             eprintln!("error: {err}");
             ExitCode::FAILURE
@@ -101,9 +161,25 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), CliError> {
-    match Cli::parse().command {
-        Command::Init => cmd_init(),
+/// `self-update --check`'s exit status when a newer release exists.
+const EXIT_UPDATE_AVAILABLE: u8 = 10;
+
+fn run() -> Result<ExitCode, CliError> {
+    let command = Cli::parse().command;
+    if let Command::SelfUpdate {
+        check,
+        target_version,
+        yes,
+    } = command
+    {
+        return cmd_self_update(check, target_version.as_deref(), yes);
+    }
+    run_command(command).map(|()| ExitCode::SUCCESS)
+}
+
+fn run_command(command: Command) -> Result<(), CliError> {
+    match command {
+        Command::Init { update, prune } => cmd_init(update, prune),
         Command::Build {
             file,
             output,
@@ -111,22 +187,34 @@ fn run() -> Result<(), CliError> {
             validate,
             split_functions,
         } => cmd_build(&file, output, check, validate, split_functions),
-        Command::Install => cmd_install(),
+        Command::Install { locked } => cmd_install(locked),
         Command::Add {
             package,
             git,
+            path,
             tag,
             rev,
             subdir,
         } => cmd_add(
             &package,
             git.as_deref(),
+            path.as_deref(),
             tag.as_deref(),
             rev.as_deref(),
             subdir.as_deref(),
         ),
         Command::Update { package } => cmd_update(&package),
         Command::Doc { spec, html, output } => cmd_doc(&spec, html, output),
+        Command::Release {
+            version,
+            dry_run,
+            path,
+        } => cmd_release(&version, dry_run, path),
+        Command::Version { verbose } => {
+            cmd_version(verbose);
+            Ok(())
+        }
+        Command::SelfUpdate { .. } => unreachable!("handled in run()"),
     }
 }
 
@@ -152,6 +240,10 @@ enum CliError {
     Docs(Box<docs::DocsError>),
     #[error(transparent)]
     Validate(Box<validate::ValidateError>),
+    #[error(transparent)]
+    Release(Box<release::ReleaseError>),
+    #[error(transparent)]
+    SelfUpdate(Box<self_update::SelfUpdateError>),
     #[error("{0}")]
     Message(String),
     #[error(
@@ -190,15 +282,31 @@ impl From<docs::DocsError> for CliError {
     }
 }
 
+impl From<self_update::SelfUpdateError> for CliError {
+    fn from(err: self_update::SelfUpdateError) -> Self {
+        CliError::SelfUpdate(Box::new(err))
+    }
+}
+
+impl From<release::ReleaseError> for CliError {
+    fn from(err: release::ReleaseError) -> Self {
+        CliError::Release(Box::new(err))
+    }
+}
+
 impl From<validate::ValidateError> for CliError {
     fn from(err: validate::ValidateError) -> Self {
         CliError::Validate(Box::new(err))
     }
 }
 
-fn cmd_init() -> Result<(), CliError> {
+fn cmd_init(update: bool, prune: bool) -> Result<(), CliError> {
     let dir = env::current_dir()?;
+    if update {
+        return cmd_init_update(&dir, prune);
+    }
     let summary = init::init(&dir)?;
+    let scan = &summary.scan;
 
     println!("wrote laplace.toml for `{}`", summary.name);
     if let Some(dir_name) = &summary.renamed_from {
@@ -209,62 +317,141 @@ fn cmd_init() -> Result<(), CliError> {
             manifest::PACKAGE_NAME_RULE,
         );
     }
-    if summary.source_files == 0 {
+    if scan.source_files == 0 {
         println!(
             "no .stan or .laplacelib files found in this directory -- exports is empty, add \
              entries by hand"
         );
-    } else if summary.included.is_empty() {
-        println!(
-            "none of the functions in the {} source {} has a `// @laplace` doc comment -- \
-             exports is empty, add entries by hand",
-            summary.source_files,
-            pluralize(summary.source_files, "file", "files"),
-        );
+    } else if summary.wrote_exports {
+        if scan.included.is_empty() {
+            println!(
+                "none of the {} {} in the .stan sources has a `// @laplace` doc comment -- \
+                 exports is empty, add entries by hand",
+                scan.stan_functions.len(),
+                pluralize(scan.stan_functions.len(), "function", "functions"),
+            );
+        } else {
+            println!(
+                "included {} exported {}: {}",
+                scan.included.len(),
+                pluralize(scan.included.len(), "function", "functions"),
+                scan.included.join(", "),
+            );
+        }
+        if !scan.excluded.is_empty() {
+            println!(
+                "note: {} undocumented {} left out of exports (add manually if this guess is \
+                 wrong): {}",
+                scan.excluded.len(),
+                pluralize(scan.excluded.len(), "function", "functions"),
+                scan.excluded.join(", "),
+            );
+        }
     } else {
         println!(
-            "included {} exported {}: {}",
-            summary.included.len(),
-            pluralize(summary.included.len(), "function", "functions"),
-            summary.included.join(", "),
+            "no `exports` key written: every source is .laplacelib, where `pub` decides what is \
+             public"
         );
     }
-    if !summary.excluded.is_empty() {
+    report_laplacelib_visibility(scan);
+    report_undeclared_imports(scan, &[]);
+    Ok(())
+}
+
+fn cmd_init_update(dir: &Path, prune: bool) -> Result<(), CliError> {
+    let summary = init::update(dir, prune)?;
+
+    for key in &summary.added_keys {
+        println!("added missing `{key}`");
+    }
+    if !summary.added_exports.is_empty() {
         println!(
-            "note: {} undocumented {} left out of exports (add manually if this guess is wrong): {}",
-            summary.excluded.len(),
-            pluralize(summary.excluded.len(), "function", "functions"),
-            summary.excluded.join(", "),
+            "added {} newly documented {} to exports: {}",
+            summary.added_exports.len(),
+            pluralize(summary.added_exports.len(), "function", "functions"),
+            summary.added_exports.join(", "),
         );
     }
-    if !summary.already_pub.is_empty() {
+    for (name, reason) in &summary.stale_exports {
+        let why = match reason {
+            init::StaleReason::Missing => "no .stan file defines it any more",
+            init::StaleReason::LaplacelibItem => {
+                "it is a .laplacelib item -- write `pub` in front of it instead"
+            }
+        };
+        if summary.pruned {
+            println!("removed `{name}` from exports: {why}");
+        } else {
+            eprintln!(
+                "warning: exports lists `{name}`, but {why} (run `laplace init --update --prune` \
+                 to remove it)"
+            );
+        }
+    }
+    if summary.changed {
+        println!("updated laplace.toml for `{}`", summary.name);
+    } else {
+        println!("laplace.toml is up to date");
+    }
+    report_laplacelib_visibility(&summary.scan);
+    let declared = manifest::read_package_manifest(&dir.join("laplace.toml"))
+        .map(|m| m.dependencies.into_keys().collect::<Vec<_>>())
+        .unwrap_or_default();
+    report_undeclared_imports(&summary.scan, &declared);
+    Ok(())
+}
+
+/// The pub/private summary for `.laplacelib` items, shared by `init` and
+/// `init --update`.
+fn report_laplacelib_visibility(scan: &init::SourceScan) {
+    let documented: Vec<&String> = scan
+        .already_pub
+        .iter()
+        .filter(|name| !scan.pub_undocumented.contains(name))
+        .collect();
+    if !documented.is_empty() {
         println!(
-            "note: {} `.laplacelib` {} already marked `pub` and need no manifest entry: {}",
-            summary.already_pub.len(),
-            pluralize(summary.already_pub.len(), "item is", "items are"),
-            summary.already_pub.join(", "),
+            "public (`pub`, documented): {}",
+            documented
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
         );
     }
-    if !summary.needs_pub.is_empty() {
+    if !scan.pub_undocumented.is_empty() {
         println!(
-            "note: {} `.laplacelib` {} private; write `pub` in front of {} in the source to \
-             publish {} (`exports` does not apply to `.laplacelib` items): {}",
-            summary.needs_pub.len(),
-            pluralize(summary.needs_pub.len(), "item is", "items are"),
-            pluralize(summary.needs_pub.len(), "it", "them"),
-            pluralize(summary.needs_pub.len(), "it", "them"),
-            summary.needs_pub.join(", "),
+            "public (`pub`) but undocumented -- `laplace doc` will have nothing to show until \
+             you add a `// @laplace` comment: {}",
+            scan.pub_undocumented.join(", "),
         );
     }
-    if !summary.imports.is_empty() {
+    if !scan.needs_pub.is_empty() {
+        println!(
+            "private (no `pub`; write `pub` in front of an item to publish it -- `exports` does \
+             not apply to .laplacelib items): {}",
+            scan.needs_pub.join(", "),
+        );
+    }
+}
+
+fn report_undeclared_imports(scan: &init::SourceScan, declared: &[String]) {
+    let missing: Vec<&String> = scan
+        .imports
+        .iter()
+        .filter(|i| !declared.contains(i))
+        .collect();
+    if !missing.is_empty() {
         println!(
             "note: the sources import {} -- add {} under [dependencies] in laplace.toml",
-            summary.imports.join(", "),
-            pluralize(summary.imports.len(), "it", "them"),
+            missing
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            pluralize(missing.len(), "it", "them"),
         );
     }
-
-    Ok(())
 }
 
 fn cmd_build(
@@ -274,6 +461,7 @@ fn cmd_build(
     validate: bool,
     split_functions: bool,
 ) -> Result<(), CliError> {
+    manifest::check_project_compiler_requirement(Path::new("laplace.toml"))?;
     let source = fs::read_to_string(file)?;
     let library_block = parse_library_block(&source)?;
     let imports: &[ImportStatement] = library_block
@@ -324,7 +512,9 @@ fn cmd_build(
                  the lockfile is inconsistent; re-run `laplace add`"
             ))
         })?;
-        let package_dir = cache_root.join(&locked.name).join(&locked.version);
+        let (package_dir, note) =
+            resolve::installed_package_dir(&lockfile_path, &cache_root, locked)?;
+        print_notes(note.as_slice());
         if !package_dir.is_dir() {
             return Err(CliError::Message(format!(
                 "`{}@{}` is in laplace.lock but not installed -- run `laplace install` first",
@@ -394,11 +584,7 @@ fn cmd_build(
 
     for file in &generated.function_files {
         let path = output_dir.join(&file.file_name);
-        println!(
-            "wrote {} ({})",
-            path.display(),
-            file.packages.join(", "),
-        );
+        println!("wrote {} ({})", path.display(), file.packages.join(", "),);
     }
     if !generated.function_files.is_empty() {
         println!(
@@ -463,23 +649,38 @@ fn pluralize(count: usize, singular: &'static str, plural: &'static str) -> &'st
     }
 }
 
-fn cmd_install() -> Result<(), CliError> {
+fn cmd_install(locked: bool) -> Result<(), CliError> {
+    manifest::check_project_compiler_requirement(Path::new("laplace.toml"))?;
     let lockfile_path = PathBuf::from("laplace.lock");
     let registry = Registry::new(registry_root());
     let cache_root = default_cache_root();
 
-    let installed = resolve::install(&lockfile_path, &registry, &cache_root)?;
+    let installed = resolve::install(&lockfile_path, &registry, &cache_root, locked)?;
+    print_notes(&installed.notes);
     println!(
         "installed {} {}",
-        installed.len(),
-        pluralize(installed.len(), "package", "packages"),
+        installed.packages.len(),
+        pluralize(installed.packages.len(), "package", "packages"),
     );
     Ok(())
+}
+
+/// Print what the resolver noticed: information to stdout, warnings to
+/// stderr.
+fn print_notes(notes: &[resolve::Note]) {
+    for note in notes {
+        if note.is_warning() {
+            eprintln!("warning: {note}");
+        } else {
+            println!("{note}");
+        }
+    }
 }
 
 fn cmd_add(
     spec: &str,
     git: Option<&str>,
+    path: Option<&str>,
     tag: Option<&str>,
     rev: Option<&str>,
     subdir: Option<&str>,
@@ -498,7 +699,7 @@ fn cmd_add(
 
     if let Some(url) = git {
         let registry = Registry::new(registry_root());
-        let locked = resolve::add_git(
+        let resolved = resolve::add_git(
             &project_manifest_path,
             &lockfile_path,
             &registry,
@@ -509,19 +710,47 @@ fn cmd_add(
             rev,
             subdir,
         )?;
+        print_notes(&resolved.notes);
+        let locked = resolved.locked;
         println!("added {}@{} (git)", locked.name, locked.version);
+        return Ok(());
+    }
+
+    if let Some(dir) = path {
+        if tag.is_some() || rev.is_some() {
+            return Err(CliError::Message(
+                "--tag/--rev only apply together with --git".to_string(),
+            ));
+        }
+        let registry = Registry::new(registry_root());
+        let resolved = resolve::add_path(
+            &project_manifest_path,
+            &lockfile_path,
+            &registry,
+            &cache_root,
+            spec,
+            dir,
+            subdir,
+        )?;
+        print_notes(&resolved.notes);
+        let locked = resolved.locked;
+        println!(
+            "added {}@{} ({})",
+            locked.name, locked.version, locked.source
+        );
         return Ok(());
     }
 
     if tag.is_some() || rev.is_some() || subdir.is_some() {
         return Err(CliError::Message(
-            "--tag/--rev/--subdir only apply together with --git".to_string(),
+            "--tag/--rev/--subdir only apply together with --git (or --path, for --subdir)"
+                .to_string(),
         ));
     }
 
     let (name, version) = parse_package_spec(spec);
     let registry = Registry::new(registry_root());
-    let locked = resolve::add(
+    let resolved = resolve::add(
         &project_manifest_path,
         &lockfile_path,
         &registry,
@@ -529,6 +758,8 @@ fn cmd_add(
         name,
         version,
     )?;
+    print_notes(&resolved.notes);
+    let locked = resolved.locked;
     println!("added {}@{}", locked.name, locked.version);
     Ok(())
 }
@@ -539,18 +770,21 @@ fn cmd_update(package: &str) -> Result<(), CliError> {
     let registry = Registry::new(registry_root());
     let cache_root = default_cache_root();
 
-    let locked = resolve::update(
+    let resolved = resolve::update(
         &project_manifest_path,
         &lockfile_path,
         &registry,
         &cache_root,
         package,
     )?;
+    print_notes(&resolved.notes);
+    let locked = resolved.locked;
     println!("updated {} to {}", locked.name, locked.version);
     Ok(())
 }
 
 fn cmd_doc(spec: &str, html: bool, output: Option<PathBuf>) -> Result<(), CliError> {
+    manifest::check_project_compiler_requirement(Path::new("laplace.toml"))?;
     let Some((package, func)) = spec.split_once("::") else {
         return Err(CliError::Message(format!(
             "expected `<package>::<function>`, got `{spec}`"
@@ -571,6 +805,153 @@ fn cmd_doc(spec: &str, html: bool, output: Option<PathBuf>) -> Result<(), CliErr
         print!("{}", docs::render_overloads(package, &overloads));
     }
     Ok(())
+}
+
+fn cmd_release(bump: &str, dry_run: bool, path: Option<PathBuf>) -> Result<(), CliError> {
+    let start = match path {
+        Some(path) => path,
+        None => env::current_dir()?,
+    };
+    let package_dir = release::find_package_dir(&start)?;
+    let plan = release::plan(&package_dir, bump)?;
+
+    for warning in &plan.warnings {
+        eprintln!("warning: {warning}");
+    }
+    println!(
+        "releasing {} {} -> {} (tag `{}`: {})",
+        plan.package, plan.current, plan.new, plan.tag, plan.tag_reason
+    );
+    let verb = if dry_run { "would" } else { "will" };
+    for (i, step) in plan.steps.iter().enumerate() {
+        println!("  {}. {verb} {step}", i + 1);
+    }
+    if dry_run {
+        println!("dry run: nothing was changed");
+        return Ok(());
+    }
+    release::execute(&plan)?;
+    println!(
+        "released {} {} -- depend on it with `laplace add {} --git <url> --tag {}`",
+        plan.package, plan.new, plan.package, plan.tag
+    );
+    Ok(())
+}
+
+fn cmd_self_update(
+    check: bool,
+    target_version: Option<&str>,
+    yes: bool,
+) -> Result<ExitCode, CliError> {
+    use laplace::version;
+    use self_update::InstallMethod;
+
+    let base = env::var("LAPLACE_RELEASES_URL")
+        .unwrap_or_else(|_| self_update::DEFAULT_RELEASES_URL.to_string());
+    let release = self_update::fetch_release(&base, target_version)?;
+    let running = version::current();
+    let Some(available) = release.version() else {
+        return Err(CliError::Message(format!(
+            "release `{}` is not tagged with a version",
+            release.tag_name
+        )));
+    };
+
+    let wanted = match target_version {
+        // An explicit version is taken as asked, downgrades included.
+        Some(_) => available != running,
+        None => available > running,
+    };
+    if !wanted {
+        println!("laplace {running} is up to date (latest release: {available})");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    println!("laplace {running} -> {available}");
+    if let Some(notes) = release
+        .body
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+    {
+        println!("\nwhat changed in {}:", release.tag_name);
+        for line in notes.lines() {
+            println!("  {line}");
+        }
+        println!();
+    }
+    if check {
+        println!("run `laplace self-update` to install it");
+        return Ok(ExitCode::from(EXIT_UPDATE_AVAILABLE));
+    }
+
+    // Overridable so tests can aim the replacement at a scratch file
+    // instead of the test binary itself.
+    let exe = match env::var_os("LAPLACE_SELF_UPDATE_EXE") {
+        Some(path) => PathBuf::from(path),
+        None => env::current_exe()?,
+    };
+    let exe = exe.canonicalize().unwrap_or(exe);
+    let cargo_home = env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")));
+    let has = |program: &str| {
+        env::var_os("PATH")
+            .is_some_and(|paths| env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
+    };
+
+    match self_update::install_method(&exe, cargo_home.as_deref(), has) {
+        InstallMethod::PackageManager { manager, command } => {
+            Err(self_update::SelfUpdateError::PackageManaged {
+                exe,
+                manager,
+                command,
+            }
+            .into())
+        }
+        InstallMethod::Cargo { command } => {
+            if !yes {
+                println!(
+                    "laplace was installed with cargo ({}); update it with:\n  {command}\n\
+                     (or run `laplace self-update --yes` to do that now)",
+                    exe.display()
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
+            println!("running: {command}");
+            self_update::cargo_install(&command)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        InstallMethod::Standalone => {
+            self_update::replace_binary(&release, version::TARGET, &exe)?;
+            println!("updated {} to laplace {available}", exe.display());
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+fn cmd_version(verbose: bool) {
+    use laplace::version;
+
+    println!("laplace {}", version::LONG_VERSION);
+    if !verbose {
+        return;
+    }
+    println!("version:    {}", version::VERSION);
+    println!(
+        "commit:     {}",
+        version::commit().unwrap_or("unknown (not built from a git checkout)")
+    );
+    println!("built:      {}", version::BUILD_DATE);
+    println!("target:     {}", version::TARGET);
+    println!("cache:      {}", default_cache_root().display());
+    let registry = registry_root();
+    let from_env = if env::var_os("LAPLACE_REGISTRY").is_some() {
+        " (from LAPLACE_REGISTRY)"
+    } else {
+        ""
+    };
+    println!("registry:   {}{from_env}", registry.display());
 }
 
 /// Split `<pkg>` or `<pkg>@<version>` into its parts.
@@ -609,10 +990,7 @@ mod tests {
     #[test]
     fn parses_bare_and_pinned_package_specs() {
         assert_eq!(parse_package_spec("gps"), ("gps", None));
-        assert_eq!(
-            parse_package_spec("gps@1.0.0"),
-            ("gps", Some("1.0.0"))
-        );
+        assert_eq!(parse_package_spec("gps@1.0.0"), ("gps", Some("1.0.0")));
     }
 
     #[test]
