@@ -18,6 +18,7 @@ use laplace::{docs, init, manifest, package, validate};
 #[derive(Parser)]
 #[command(
     name = "laplace",
+    version = laplace::version::LONG_VERSION,
     about = "Source-to-source preprocessor for Stan: package manager + namespaces + doc lookup"
 )]
 struct Cli {
@@ -27,8 +28,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Scan the current directory's .stan files and generate a starter
-    /// laplace.toml, guessing `exports` from @laplace-documented functions
+    /// Scan the current directory's .stan and .laplacelib files and
+    /// generate a starter laplace.toml. `exports` is guessed from
+    /// @laplace-documented .stan functions; .laplacelib items are public
+    /// when marked `pub` and need no manifest entry
     Init,
     /// Compile a .laplace file to .stan
     Build {
@@ -89,6 +92,12 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Print the compiler version (`--verbose` adds the commit, build date,
+    /// target and the directories laplace reads and writes)
+    Version {
+        #[arg(short, long)]
+        verbose: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -127,6 +136,10 @@ fn run() -> Result<(), CliError> {
         ),
         Command::Update { package } => cmd_update(&package),
         Command::Doc { spec, html, output } => cmd_doc(&spec, html, output),
+        Command::Version { verbose } => {
+            cmd_version(verbose);
+            Ok(())
+        }
     }
 }
 
@@ -567,6 +580,30 @@ fn cmd_doc(spec: &str, html: bool, output: Option<PathBuf>) -> Result<(), CliErr
         print!("{}", docs::render_overloads(package, &overloads));
     }
     Ok(())
+}
+
+fn cmd_version(verbose: bool) {
+    use laplace::version;
+
+    println!("laplace {}", version::LONG_VERSION);
+    if !verbose {
+        return;
+    }
+    println!("version:    {}", version::VERSION);
+    println!(
+        "commit:     {}",
+        version::commit().unwrap_or("unknown (not built from a git checkout)")
+    );
+    println!("built:      {}", version::BUILD_DATE);
+    println!("target:     {}", version::TARGET);
+    println!("cache:      {}", default_cache_root().display());
+    let registry = registry_root();
+    let from_env = if env::var_os("LAPLACE_REGISTRY").is_some() {
+        " (from LAPLACE_REGISTRY)"
+    } else {
+        ""
+    };
+    println!("registry:   {}{from_env}", registry.display());
 }
 
 /// Split `<pkg>` or `<pkg>@<version>` into its parts.

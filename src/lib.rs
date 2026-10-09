@@ -17,3 +17,4 @@ pub mod parser;
 pub mod pipeline;
 pub mod resolve;
 pub mod validate;
+pub mod version;
