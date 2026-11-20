@@ -7,7 +7,7 @@ project uses [Semantic Versioning](https://semver.org/).
 This file tracks *compiler* releases (the `laplace` binary). A Stan library's
 own versions are its business, tagged with `laplace release`.
 
-## [0.2.0] - Unreleased
+## [0.2.0] - 2026-11-20
 
 ### Read this first
 

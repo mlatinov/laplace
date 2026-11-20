@@ -15,6 +15,32 @@ Libraries can depend on other libraries: a package declares its own
 rejecting cycles), and pins it in `laplace.lock`. See [Libraries that depend on
 libraries](#libraries-that-depend-on-libraries).
 
+**Coming from Stan?** [the Laplace guide for Stan users (PDF)](docs/laplace-guide.pdf)
+is a guided tour of the language for Stan users: every construct, with the
+`.stan` it compiles to.
+
+## Syntax at a glance
+
+Everything Stan accepts, laplace accepts unchanged. On top of that:
+
+| Construct | Where | What it does |
+|---|---|---|
+| `library { import pkg }` | `.laplace`, `.laplacelib` | Brings a package into scope (`import pkg@1.2.0` pins a version) |
+| `pkg::func(...)` | anywhere | Calls a package's public function; compiles to `pkg__func(...)` |
+| `y ~ pkg::dist(...)` | `model` | Sampling statement with a library `_lpdf`/`_lpmf` |
+| `pub` | `.laplacelib` | Makes a function, template or macro public (private by default) |
+| `func(real) -> real f` | function parameter | A function passed as an argument (compiled by monomorphization) |
+| `vector[2] f(...)` | function return type | Sized return type, stripped from the output |
+| `@wait(f)`, `@wait(f).size` | inside a higher-order function | The bound function's concrete return type, or its size |
+| `pub @template name($x: ident, $e: expr) { ... }` | `.laplacelib` | Pieces of several blocks with typed placeholders |
+| `@use pkg::name(args);` | top level of a `.laplace` | Splices a template into the model's blocks |
+| `pub @macro name(each $p: ident, ...) : stmt in model { ... }` | `.laplacelib` | Statements expanded in place, optionally repeated over a list |
+| `@expand pkg::name([a, b], ...);` | inside a block | Expands a macro at that line |
+| `// @laplace` + `@brief`/`@param`/`@return`/`@example`/`@math` | above a definition | Documentation for `laplace doc` |
+
+Identifiers containing `__` are reserved for generated names and rejected in
+`.laplace` and `.laplacelib` sources.
+
 ## Installing laplace
 
 **Prebuilt binary** (Linux x86_64/aarch64, macOS, Windows): the installer
@@ -197,14 +223,40 @@ comment block starting with `// @laplace` directly above them:
 // @return An N x N positive semi-definite covariance matrix.
 // @example gps::rbf_cov(x, 1.0, 0.5)
 matrix rbf_cov(vector x, real alpha, real rho) {
-  return gp_exp_quad_cov(x, alpha, rho);
+  return gp_exp_quad_cov(to_array_1d(x), alpha, rho);
 }
 ```
 
-`@brief`, `@param` (repeatable, one per parameter), `@return`, and `@example`
-are all recognized. These are plain `//` Stan comments — `stanc` ignores them
-completely, so the file stays valid, usable Stan on its own even if you never
-run it through laplace.
+`@brief`, `@param` (repeatable, one per parameter), `@return`, `@example`
+and `@math` are all recognized. These are plain `//` Stan comments — `stanc`
+ignores them completely, so the file stays valid, usable Stan on its own even
+if you never run it through laplace.
+
+A few details of the format:
+
+- The marker may be written `// @laplace` or `//@laplace`. Ordinary comment
+  lines *above* the marker (a section banner, a note to maintainers) are not
+  part of the documentation and are ignored.
+- A tag continues onto the following comment lines until the next tag.
+  `@brief`, `@param` and `@return` are prose and are joined into one line;
+  `@example` and `@math` keep their line breaks, so a multi-statement example
+  or a LaTeX `cases` environment survives intact.
+- `@math` holds a LaTeX formula. `laplace doc` prints it as-is, and
+  `laplace doc --html` renders it with KaTeX:
+
+```stan
+// @laplace
+// @brief Squared exponential (RBF) covariance matrix.
+// @math k(x, x') = \alpha^2 \exp\left(
+//   -\frac{(x - x')^2}{2 \rho^2}
+// \right)
+// @param x Vector of input locations.
+// @return An N x N positive semi-definite covariance matrix.
+// @example matrix[N, N] K = gps::rbf_cov(x, 1.0, 0.5);
+matrix rbf_cov(vector x, real alpha, real rho) {
+  return gp_exp_quad_cov(to_array_1d(x), alpha, rho);
+}
+```
 
 ### Undocumented functions are still functions
 
@@ -881,6 +933,26 @@ library {
 ...then call its exported functions as `pkg::func(...)` anywhere in the rest
 of the file.
 
+Library distributions work like Stan's own, in either form:
+
+```stan
+model {
+  y ~ stats::skew_normal_alt(mu, sigma, alpha);                // sampling statement
+  target += stats::skew_normal_alt_lpdf(y | mu, sigma, alpha);  // explicit log density
+}
+```
+
+laplace rewrites only the `pkg::name(` prefix (to `pkg__name(`), so `~` finds
+`stats__skew_normal_alt_lpdf` exactly as Stan finds any user-defined
+distribution. The usual Stan rules still apply: an `_lpdf`/`_lpmf` call needs
+the `|` after its first argument, and `_rng` functions only work in
+`transformed data` and `generated quantities`.
+
+A model's top level can also hold `@use pkg::template(...);` lines (see
+[Templates](#templates-boilerplate-that-spans-blocks)), and a block can hold
+`@expand pkg::macro(...);` lines for macros that allow that block (see
+[Statement macros](#statement-macros-one-line-repeated)).
+
 Dependencies are tracked across two files:
 
 - **`laplace.toml`** — hand-edited, loose version ranges (`gps = "^1.0"`) or
@@ -912,7 +984,9 @@ laplace build <file.laplace> [-o build/model.stan]
 ```
 
 By default, output goes to `build/<stem>.stan` — e.g. `model.laplace` builds
-to `build/model.stan`. Override with `-o`/`--output`.
+to `build/model.stan`. Override with `-o`/`--output`: a file path is used
+as-is, while an existing directory (or any path ending in `/`) means
+`<dir>/<stem>.stan`.
 
 `--split-functions` changes the output *shape*. By default every imported
 function is inlined into the compiled `.stan` file, so you ship one
@@ -1031,6 +1105,19 @@ This reads a `docs.json` sidecar that's generated once, at install time —
 there's no network access or Stan re-parsing at lookup time. A function with
 no `@laplace` comment still prints its signature, with a note that no
 documentation is available for it.
+
+- **Overloads** are listed together under one heading
+  (`kinetics::hill has 3 overloads`), each with its own signature and docs.
+- **`@math`** is printed under a `Math:` heading, verbatim.
+- **HTML:** `laplace doc gps::rbf_cov --html -o rbf_cov.html` writes a
+  standalone page, with the `@math` formula rendered by KaTeX and the example
+  in a code block.
+- **Only public items are shown.** Asking for a private `.laplacelib` item is
+  an error that names the installed version (see
+  [Troubleshooting](#troubleshooting)).
+- `laplace doc` covers **functions**. Templates and macros carry `// @laplace`
+  comments too, but they can't be looked up with `laplace doc` yet. Read them
+  in the library's source.
 
 ## Troubleshooting
 
