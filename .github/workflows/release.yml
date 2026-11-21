@@ -59,10 +59,10 @@ jobs:
         include:
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04, test: true }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm, test: true }
-          - { target: aarch64-apple-darwin, os: macos-14, test: true }
+          - { target: aarch64-apple-darwin, os: macos-15, test: true }
           # Cross-compiled on Apple silicon: Intel macOS runners are being
           # retired, and the tests already ran on the arm64 build.
-          - { target: x86_64-apple-darwin, os: macos-14, test: false }
+          - { target: x86_64-apple-darwin, os: macos-15, test: false }
           # The integration tests use Unix file permissions; the Windows
           # binary is built and smoke-tested, not run through the suite.
           - { target: x86_64-pc-windows-msvc, os: windows-latest, test: false }
