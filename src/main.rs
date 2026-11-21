@@ -892,9 +892,12 @@ fn cmd_self_update(
         None => env::current_exe()?,
     };
     let exe = exe.canonicalize().unwrap_or(exe);
+    // Canonicalized like `exe`, so a symlinked $CARGO_HOME (or macOS's
+    // /var -> /private/var) still matches the resolved binary path.
     let cargo_home = env::var_os("CARGO_HOME")
         .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")));
+        .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")))
+        .map(|p| p.canonicalize().unwrap_or(p));
     let has = |program: &str| {
         env::var_os("PATH")
             .is_some_and(|paths| env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
