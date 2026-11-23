@@ -1,0 +1,50 @@
+$ laplace release patch --dry-run   # in a git copy of laplace-langevin (mala: the built-in mala's test file; barker: scaffold defaults)
+release gate: laplace sampler test laplace-langevin/kernels/barker.lapkernel --tier must-pass
+laplace sampler test: laplace-langevin/kernels/barker.lapkernel
+
+target            tier         verdict           max|z|   R-hat min ESS      grads      logps  ESS/grad     ESS/s  vs NUTS  (per s)
+std_normal_10     must pass    did-not-converge    1.78  1.0303     280       4000          0   0.07011      1524     0.64     0.01
+corr_gauss_10     must pass    did-not-converge    3.04  1.3734       9       4000          0   0.00229        48     0.11     0.00
+eight_schools_nc  must pass    did-not-converge    3.84  1.0311     180       4000          0   0.04489       953     0.66     0.02
+
+ESS = minimum bulk ESS over the checked quantities; grads and logps = gradient and density-only evaluations while sampling; ESS/s = per second of sampling, summed over chains; vs NUTS = ESS/grad ratio to plain NUTS on the same target (then ESS/s). Ratios are information, never a threshold.
+
+std_normal_10 did not converge (4 chains x 1000 draws, thin 1): the run says nothing either way. Give it more draws in tests/<kernel>.test.toml:
+  [targets.std_normal_10]
+  draws = 10000
+  thin = 10
+  E[x.2]: estimate -0.0493, truth 0.0000, z -1.03, R-hat 1.0303, bulk ESS 398
+  E[x.2^2]: estimate 0.9108, truth 1.0000, z -1.78, R-hat 1.0290, bulk ESS 312
+  E[x.3]: estimate 0.0171, truth 0.0000, z 0.36, R-hat 1.0108, bulk ESS 455
+  E[x.3^2]: estimate 1.0498, truth 1.0000, z 0.75, R-hat 1.0129, bulk ESS 470
+
+corr_gauss_10 did not converge (4 chains x 1000 draws, thin 1): the run says nothing either way. Give it more draws in tests/<kernel>.test.toml:
+  [targets.corr_gauss_10]
+  draws = 10000
+  thin = 10
+  E[x.1]: estimate -0.1539, truth 0.0000, z -0.27, R-hat 1.0242, bulk ESS 85
+  E[x.1^2]: estimate 26.5857, truth 35.1646, z -3.04, R-hat 1.0142, bulk ESS 197
+  E[x.2]: estimate 0.0450, truth 0.0000, z 0.06, R-hat 1.0884, bulk ESS 46
+  E[x.2^2]: estimate 23.5406, truth 25.6175, z -0.90, R-hat 1.0192, bulk ESS 119
+
+eight_schools_nc did not converge (4 chains x 1000 draws, thin 1): the run says nothing either way. Give it more draws in tests/<kernel>.test.toml:
+  [targets.eight_schools_nc]
+  draws = 10000
+  thin = 10
+  E[mu]: estimate 4.4710, truth 4.4007, z 0.27, R-hat 1.0296, bulk ESS 205
+  E[mu^2]: estimate 32.6276, truth 30.2444, z 1.32, R-hat 1.0171, bulk ESS 309
+  E[tau]: estimate 3.6860, truth 3.5957, z 0.34, R-hat 1.0259, bulk ESS 180
+  E[tau^2]: estimate 24.9813, truth 23.1980, z 0.47, R-hat 1.0259, bulk ESS 180
+
+result: a must-pass target did not pass (or the sampler runs on none of them: test its kernels instead)
+release gate: laplace sampler test laplace-langevin/kernels/mala.lapkernel --tier must-pass
+laplace sampler test: laplace-langevin/kernels/mala.lapkernel
+
+target            tier         verdict           max|z|   R-hat min ESS      grads      logps  ESS/grad     ESS/s  vs NUTS  (per s)
+std_normal_10     must pass    pass                1.45  1.0066     794       4000          0   0.19842     37284     1.82     0.23
+corr_gauss_10     must pass    pass                1.97  1.0036    1050     200000          0   0.00525       849     0.26     0.06
+eight_schools_nc  must pass    pass                2.05  1.0033    1542      20000          0   0.07708     12950     1.13     0.26
+
+ESS = minimum bulk ESS over the checked quantities; grads and logps = gradient and density-only evaluations while sampling; ESS/s = per second of sampling, summed over chains; vs NUTS = ESS/grad ratio to plain NUTS on the same target (then ESS/s). Ratios are information, never a threshold.
+error: not released: laplace-langevin/kernels/barker.lapkernel did not pass the must-pass sampler tests (the tables above say which target and why)
+  help: fix the kernel, or give it more draws in its tests/<kernel>.test.toml if it did not converge; --skip-sampler-tests releases without the gate

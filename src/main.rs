@@ -129,6 +129,10 @@ enum Command {
         /// only subdirectory holding a laplace.toml)
         #[arg(long)]
         path: Option<PathBuf>,
+        /// A kernel package: release without running each kernel through
+        /// `laplace sampler test --tier must-pass` (the release gate)
+        #[arg(long)]
+        skip_sampler_tests: bool,
     },
     /// Update the laplace compiler itself to the latest release (or
     /// `--version X`). Explicit only: laplace never checks for updates on
@@ -231,7 +235,8 @@ fn run_command(command: Command) -> Result<(), CliError> {
             version,
             dry_run,
             path,
-        } => cmd_release(&version, dry_run, path),
+            skip_sampler_tests,
+        } => cmd_release(&version, dry_run, path, skip_sampler_tests),
         Command::Version { verbose } => {
             cmd_version(verbose);
             Ok(())
@@ -887,13 +892,21 @@ fn cmd_doc(spec: &str, html: bool, output: Option<PathBuf>) -> Result<(), CliErr
     Ok(())
 }
 
-fn cmd_release(bump: &str, dry_run: bool, path: Option<PathBuf>) -> Result<(), CliError> {
+fn cmd_release(
+    bump: &str,
+    dry_run: bool,
+    path: Option<PathBuf>,
+    skip_sampler_tests: bool,
+) -> Result<(), CliError> {
     let start = match path {
         Some(path) => path,
         None => env::current_dir()?,
     };
     let package_dir = release::find_package_dir(&start)?;
     let plan = release::plan(&package_dir, bump)?;
+    if !plan.kernels.is_empty() {
+        sampler_release_gate(&plan, skip_sampler_tests)?;
+    }
 
     for warning in &plan.warnings {
         eprintln!("warning: {warning}");
@@ -916,6 +929,53 @@ fn cmd_release(bump: &str, dry_run: bool, path: Option<PathBuf>) -> Result<(), C
         plan.package, plan.new, plan.package, plan.tag
     );
     Ok(())
+}
+
+/// The release gate for a kernel package (Phase 5.3, D6): every kernel must
+/// pass the reference suite's must-pass tier. Runs before anything is
+/// printed as a step, so `--dry-run` answers "would this release pass" too.
+fn sampler_release_gate(plan: &release::ReleasePlan, skip: bool) -> Result<(), CliError> {
+    if skip {
+        eprintln!(
+            "warning: --skip-sampler-tests: {} kernel(s) of `{}` are released without the must-pass \
+             sampler tests",
+            plan.kernels.len(),
+            plan.package
+        );
+        return Ok(());
+    }
+    let binary = find_on_path(SAMPLER_BINARY).ok_or_else(|| {
+        CliError::Message(format!(
+            "`{}` is a kernel package: releasing it runs each kernel through `laplace sampler test \
+             --tier must-pass`, which needs the `laplace-sample` binary on PATH\n  help: install it \
+             (`cargo install --path laplace-sample`), or pass --skip-sampler-tests",
+            plan.package
+        ))
+    })?;
+    let mut failed = vec![];
+    for kernel in &plan.kernels {
+        println!(
+            "release gate: laplace sampler test {} --tier must-pass",
+            kernel.display()
+        );
+        let status = std::process::Command::new(&binary)
+            .args(["sampler", "test"])
+            .arg(kernel)
+            .args(["--tier", "must-pass"])
+            .status()?;
+        if !status.success() {
+            failed.push(kernel.display().to_string());
+        }
+    }
+    if failed.is_empty() {
+        return Ok(());
+    }
+    Err(CliError::Message(format!(
+        "not released: {} did not pass the must-pass sampler tests (the tables above say which target and \
+         why)\n  help: fix the kernel, or give it more draws in its tests/<kernel>.test.toml if it did not \
+         converge; --skip-sampler-tests releases without the gate",
+        failed.join(", ")
+    )))
 }
 
 fn cmd_self_update(

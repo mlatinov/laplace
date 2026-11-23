@@ -107,6 +107,10 @@ pub struct ReleasePlan {
     pub warnings: Vec<String>,
     /// Human-readable steps, in order.
     pub steps: Vec<String>,
+    /// A kernel package's `kernels/*.lapkernel` files, which the release
+    /// gate runs through `laplace sampler test --tier must-pass` (Phase
+    /// 5.3, D6); empty for a function library.
+    pub kernels: Vec<PathBuf>,
 }
 
 /// Find the package directory: `dir` itself if it holds a `laplace.toml`,
@@ -256,7 +260,24 @@ pub fn plan(package_dir: &Path, bump: &str) -> Result<ReleasePlan, ReleaseError>
         format!("push tag `{tag}` to `{remote}`"),
     ];
 
+    let kernels = if pkg_manifest.kind.is_kernels() {
+        package::kernel_names(package_dir)
+            .map_err(|source| ReleaseError::Io {
+                path: package_dir.join(package::KERNELS_DIR),
+                source,
+            })?
+            .into_iter()
+            .map(|k| {
+                package_dir
+                    .join(package::KERNELS_DIR)
+                    .join(format!("{k}.{}", package::LAPKERNEL_EXTENSION))
+            })
+            .collect()
+    } else {
+        vec![]
+    };
     Ok(ReleasePlan {
+        kernels,
         package: pkg_manifest.name,
         manifest_path,
         repo,
@@ -381,6 +402,11 @@ fn validate_package(
 ) -> Result<(), ReleaseError> {
     let mut problems = Vec::new();
 
+    if pkg_manifest.kind.is_kernels() {
+        if let Err(problem) = package::check_kernel_package(dir, pkg_manifest) {
+            problems.push(format!("`{}` {problem}", pkg_manifest.name));
+        }
+    }
     if let Err(err) = package::load_with_manifest(dir, &pkg_manifest.name, pkg_manifest) {
         problems.push(err.to_string());
     }

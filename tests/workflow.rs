@@ -1406,3 +1406,118 @@ fn a_function_library_cannot_depend_on_a_kernel_package() {
         "{err}"
     );
 }
+
+// -- Sampler Phase 5.3: the release gate for kernel packages ------------------------
+
+/// A kernel package in a git repo with an upstream, plus a fake
+/// `laplace-sample` that logs its arguments and exits with `code`, on a
+/// PATH that still has git.
+fn kernel_release_env(code: Option<i32>) -> (Env, PathBuf, PathBuf) {
+    let mut env = setup();
+    let (work, _bare) = git_repo(
+        &env,
+        "langevin",
+        &[
+            ("laplace.toml", KERNEL_MANIFEST),
+            ("kernels/mala.lapkernel", MALA_KERNEL),
+            (
+                "kernels/barker.lapkernel",
+                &MALA_KERNEL.replace("mala", "barker"),
+            ),
+        ],
+    );
+    let bin = env.dir("bin");
+    let log = env.root.join("sampler-calls.log");
+    if let Some(code) = code {
+        let script = bin.join("laplace-sample");
+        write(
+            &script,
+            &format!("#!/bin/sh\necho \"$*\" >> {}\nexit {code}\n", log.display()),
+        );
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        fs::set_permissions(&script, perms).unwrap();
+    }
+    let git_dir = Path::new(&git(&env.root, &["--exec-path"])).to_path_buf();
+    let path = format!("{}:/usr/bin:/bin:{}", bin.display(), git_dir.display());
+    env.extra_env.push(("PATH".into(), path));
+    (env, work, log)
+}
+
+#[test]
+fn releasing_a_kernel_package_runs_every_kernel_through_the_must_pass_tier() {
+    let (env, work, log) = kernel_release_env(Some(0));
+    let out = env.run_in(&work, &["release", "patch", "--dry-run"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let calls = read(&log);
+    let lines: Vec<&str> = calls.lines().collect();
+    assert_eq!(lines.len(), 2, "{calls}");
+    assert!(
+        lines[0].starts_with("sampler test ")
+            && lines[0].ends_with("kernels/barker.lapkernel --tier must-pass"),
+        "{calls}"
+    );
+    assert!(
+        lines[1].ends_with("kernels/mala.lapkernel --tier must-pass"),
+        "{calls}"
+    );
+    assert!(
+        stdout(&out).contains("releasing langevin 0.1.0 -> 0.1.1"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn a_kernel_failing_the_must_pass_tier_blocks_the_release() {
+    let (env, work, _log) = kernel_release_env(Some(1));
+    let head = git(&work, &["rev-parse", "HEAD"]);
+    let out = env.run_in(&work, &["release", "patch"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("not released:"), "{err}");
+    assert!(err.contains("--skip-sampler-tests"), "{err}");
+    assert_eq!(
+        git(&work, &["rev-parse", "HEAD"]),
+        head,
+        "nothing committed"
+    );
+    assert_eq!(git(&work, &["tag", "--list"]), "", "nothing tagged");
+
+    // --skip-sampler-tests releases without the gate, and says so.
+    let out = env.run_in(
+        &work,
+        &["release", "patch", "--dry-run", "--skip-sampler-tests"],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("released without the must-pass sampler tests"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn releasing_a_kernel_package_without_laplace_sample_explains() {
+    let (env, work, log) = kernel_release_env(None);
+    let out = env.run_in(&work, &["release", "patch", "--dry-run"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(
+        err.contains("needs the `laplace-sample` binary on PATH"),
+        "{err}"
+    );
+    assert!(!log.exists());
+}
+
+#[test]
+fn a_function_library_release_runs_no_sampler_tests() {
+    let mut env = setup();
+    let bin = env.dir("bin");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    env.extra_env.push(("PATH".into(), path));
+    let (work, _bare) = release_repo(&env);
+    let out = env.run_in(&work, &["release", "minor", "--dry-run"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(!stdout(&out).contains("release gate"));
+}
