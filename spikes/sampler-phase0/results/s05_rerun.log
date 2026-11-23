@@ -1,0 +1,6 @@
+A std_normal: 4 chains x (1000+1000) in 0.04s, 39868 gradient evals
+A         gp: 4 chains x (1000+1000) in 7.35s, 32849 gradient evals
+B        reference: block-a step size on the fixed conditional mean=1.1333
+B SetPosition: block-a step size in sampling mean=0.8693 sd=0.6530; total gradient evals=299215
+B Stale: block-a step size in sampling mean=0.2778 sd=0.4822; total gradient evals=12087523
+B Refresh: block-a step size in sampling mean=0.7519 sd=0.0438; total gradient evals=97468

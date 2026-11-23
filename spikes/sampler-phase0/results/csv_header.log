@@ -1,0 +1,42 @@
+== Minimal header (chain 1):
+# model = std_normal_model
+# method = sample (Default)
+#     num_samples = 1000 (Default)
+#     save_warmup = false (Default)
+#     thin = 1 (Default)
+#         metric = diag_e (Default)
+# id = 1 (Default)
+minimal passes: TRUE  summary identical to full: TRUE 
+diagnostic_summary on minimal:
+List of 3
+ $ num_divergent    : num [1:4] 0 0 0 0
+ $ num_max_treedepth: int [1:4] 0 0 0 0
+ $ ebfmi            : num [1:4] 1.16 1.09 1.12 1.05
+
+== Probes
+P0 nuts-rs draws, minimal header, NUTS columns          OK
+P1 + '# laplace_sampler/laplace_kernel = ...' lines     OK
+   metadata()$laplace_sampler = hybrid (./hybrid.lapsampler sha256:0123abcd) | laplace_kernel = sigma,tau: langevin::mala 0.1.0 sha256:89ab (last one wins)
+P2 + extra columns n_grad__, accept_stat_beta__         OK
+   sampler_diagnostics: accept_stat__,stepsize__,treedepth__,n_leapfrog__,divergent__,energy__,n_grad__,accept_stat_beta__ 
+   summary variables:   lp__,x[1],x[2],x[3],x[4],x[5],x[6],x[7],x[8],x[9],x[10] 
+P3 non-NUTS column set (lp, accept, stepsize, n_grad)   FAIL: subscript out of bounds
+P4 'algorithm = laplace' + non-NUTS columns             FAIL: subscript out of bounds
+P5 'algorithm = laplace' + NUTS columns                 OK
+P6 no comment header at all                             FAIL: argument is of length zero
+
+== Example out/csv/example-*.csv summary
+# A tibble: 11 × 10
+   variable      mean    median    sd   mad    q5   q95  rhat ess_bulk ess_tail
+   <chr>        <dbl>     <dbl> <dbl> <dbl> <dbl> <dbl> <dbl>    <dbl>    <dbl>
+ 1 lp__     -5.02     -4.66     2.25  2.10  -9.26 -1.98 1.01     1936.    2291.
+ 2 x[1]      0.00803   0.0147   0.996 0.982 -1.66  1.64 1.00     6068.    3340.
+ 3 x[2]      0.000855  0.00638  0.995 0.958 -1.63  1.65 1.00     4904.    2995.
+ 4 x[3]      0.00340   0.000536 1.00  1.02  -1.60  1.64 1.00     5840.    3270.
+ 5 x[4]      0.00654   0.0102   0.994 0.998 -1.61  1.62 1.000    5428.    3217.
+ 6 x[5]      0.000586 -0.00449  1.01  1.01  -1.61  1.62 1.00     7045.    3269.
+ 7 x[6]     -0.00974  -0.00928  1.02  1.000 -1.69  1.67 1.00     5514.    3162.
+ 8 x[7]      0.00661   0.000219 1.01  0.978 -1.66  1.66 1.00     6144.    2860.
+ 9 x[8]     -0.00913  -0.00816  0.982 0.981 -1.60  1.61 1.00     5848.    3301.
+10 x[9]      0.000694 -0.00673  1.02  1.03  -1.67  1.69 1.00     5748.    3243.
+11 x[10]    -0.0281   -0.0107   0.999 1.02  -1.69  1.60 1.00     5357.    3273.

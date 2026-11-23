@@ -1,0 +1,141 @@
+// The .lapkernel grammar (Phase 2.1). One kernel per file:
+//
+//   //@laplace
+//   //@brief ...
+//   kernel <name> {
+//     tuning    { <declarations, optionally tagged @adapt(...)> }
+//     state     { <declarations> }            // optional, kept across iterations
+//     init      { <statements> }              // optional, runs once
+//     functions { <function definitions> }    // optional, Stan syntax
+//     step      { <statements> }              // one transition
+//   }
+//
+// Statements and expressions are a Stan-like subset. Doc comments (`//@`)
+// are ordinary comments here; they are read by parse::doc_comments.
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT    = _{ ("//" ~ (!"\n" ~ ANY)*) | ("/*" ~ (!"*/" ~ ANY)* ~ "*/") }
+
+file   = { SOI ~ kernel ~ EOI }
+kernel = { kw_kernel ~ ident ~ "{" ~ section* ~ "}" }
+
+section         = _{ tuning_block | state_block | init_block | functions_block | step_block }
+tuning_block    =  { kw_tuning ~ "{" ~ decl* ~ "}" }
+state_block     =  { kw_state ~ "{" ~ decl* ~ "}" }
+init_block      =  { kw_init ~ block }
+functions_block =  { kw_functions ~ "{" ~ fundef* ~ "}" }
+step_block      =  { kw_step ~ block }
+
+// ---- types ---------------------------------------------------------------
+sized_type  = { int_type | real_type | vector_type | matrix_type | tuple_type }
+int_type    = { kw_int ~ bounds? }
+real_type   = { kw_real ~ bounds? }
+vector_type = { kw_vector ~ bounds? ~ "[" ~ expr ~ "]" }
+matrix_type = { kw_matrix ~ bounds? ~ "[" ~ expr ~ "," ~ expr ~ "]" }
+tuple_type  = { kw_tuple ~ "(" ~ sized_type ~ ("," ~ sized_type)* ~ ")" }
+bounds      = { "<" ~ bound ~ ("," ~ bound)? ~ ">" }
+bound       = { (kw_lower | kw_upper) ~ "=" ~ arith_expr }
+
+// Function signatures use unsized types, as in Stan.
+fun_type       = { kw_void | kw_int | kw_real | kw_vector | kw_matrix | fun_tuple_type }
+fun_tuple_type = { kw_tuple ~ "(" ~ fun_type ~ ("," ~ fun_type)* ~ ")" }
+
+// ---- declarations --------------------------------------------------------
+decl      = { sized_type ~ ident ~ ("=" ~ expr)? ~ adapt_tag? ~ ";" }
+adapt_tag = { "@adapt" ~ "(" ~ ident ~ ("," ~ adapt_arg)* ~ ")" }
+adapt_arg = { ident ~ "=" ~ expr }
+
+fundef = { fun_type ~ ident ~ "(" ~ (param ~ ("," ~ param)*)? ~ ")" ~ block }
+param  = { fun_type ~ ident }
+
+// ---- statements ----------------------------------------------------------
+block = { "{" ~ stmt* ~ "}" }
+stmt  = { decl | destructure | if_stmt | for_stmt | while_stmt | return_stmt
+        | block | assign | expr_stmt }
+
+destructure = { "(" ~ dtarget ~ ("," ~ dtarget)+ ~ ")" ~ "=" ~ expr ~ ";" }
+dtarget     = { sized_type ~ ident | ident }
+assign      = { lvalue ~ assign_op ~ expr ~ ";" }
+assign_op   = { "+=" | "-=" | "*=" | "/=" | "=" ~ !"=" }
+lvalue      = { ident ~ index? }
+if_stmt     = { kw_if ~ "(" ~ expr ~ ")" ~ stmt ~ (kw_else ~ stmt)? }
+for_stmt    = { kw_for ~ "(" ~ ident ~ kw_in ~ expr ~ ":" ~ expr ~ ")" ~ stmt }
+while_stmt  = { kw_while ~ "(" ~ expr ~ ")" ~ stmt }
+return_stmt = { kw_return ~ expr? ~ ";" }
+expr_stmt   = { expr ~ ";" }
+
+// ---- expressions (precedence climbing in parse.rs) -----------------------
+expr       = { operand ~ (infix ~ operand)* }
+arith_expr = { operand ~ (arith_infix ~ operand)* }
+operand    = { prefix* ~ primary ~ postfix* }
+
+infix       = _{ or | and | eq | ne | le | ge | lt | gt | arith_infix }
+arith_infix = _{ add | sub | elmul | eldiv | mul | div | modulo | pow }
+or     = { "||" }
+and    = { "&&" }
+eq     = { "==" }
+ne     = { "!=" }
+le     = { "<=" }
+ge     = { ">=" }
+lt     = { "<" }
+gt     = { ">" }
+add    = { "+" }
+sub    = { "-" }
+elmul  = { ".*" }
+eldiv  = { "./" }
+mul    = { "*" }
+div    = { "/" }
+modulo = { "%" }
+pow    = { "^" }
+
+prefix = _{ neg | not }
+neg    = { "-" }
+not    = { "!" }
+
+postfix   = _{ index | tuple_idx }
+index     = { "[" ~ expr ~ ("," ~ expr)* ~ "]" }
+tuple_idx = ${ "." ~ ASCII_DIGIT+ }
+
+primary  = _{ real_lit | int_lit | call | ident | tuple_lit | "(" ~ expr ~ ")" }
+tuple_lit = { "(" ~ expr ~ ("," ~ expr)+ ~ ")" }
+call     = { ident ~ "(" ~ args? ~ ")" }
+args     = { expr ~ (cond_bar ~ expr)? ~ ("," ~ expr)* }
+cond_bar = { "|" ~ !"|" }
+
+int_lit  = @{ ASCII_DIGIT+ ~ !("." ~ !"*" ~ !"/") ~ !(^"e") }
+real_lit = @{
+    ( ASCII_DIGIT+ ~ "." ~ !("*" | "/") ~ ASCII_DIGIT* ~ exponent?
+    | "." ~ ASCII_DIGIT+ ~ exponent?
+    | ASCII_DIGIT+ ~ exponent )
+}
+exponent = @{ ^"e" ~ ("+" | "-")? ~ ASCII_DIGIT+ }
+
+// ---- identifiers and keywords --------------------------------------------
+ident_char = _{ ASCII_ALPHANUMERIC | "_" }
+keyword = @{
+    ( "kernel" | "tuning" | "state" | "init" | "functions" | "step"
+    | "int" | "real" | "vector" | "matrix" | "tuple" | "void" | "lower" | "upper"
+    | "if" | "else" | "for" | "in" | "while" | "return" ) ~ !ident_char
+}
+ident = @{ !keyword ~ (ASCII_ALPHA | "_") ~ ident_char* }
+
+kw_kernel    = @{ "kernel" ~ !ident_char }
+kw_tuning    = @{ "tuning" ~ !ident_char }
+kw_state     = @{ "state" ~ !ident_char }
+kw_init      = @{ "init" ~ !ident_char }
+kw_functions = @{ "functions" ~ !ident_char }
+kw_step      = @{ "step" ~ !ident_char }
+kw_int       = @{ "int" ~ !ident_char }
+kw_real      = @{ "real" ~ !ident_char }
+kw_vector    = @{ "vector" ~ !ident_char }
+kw_matrix    = @{ "matrix" ~ !ident_char }
+kw_tuple     = @{ "tuple" ~ !ident_char }
+kw_void      = @{ "void" ~ !ident_char }
+kw_lower     = @{ "lower" ~ !ident_char }
+kw_upper     = @{ "upper" ~ !ident_char }
+kw_if        = @{ "if" ~ !ident_char }
+kw_else      = @{ "else" ~ !ident_char }
+kw_for       = @{ "for" ~ !ident_char }
+kw_in        = @{ "in" ~ !ident_char }
+kw_while     = @{ "while" ~ !ident_char }
+kw_return    = @{ "return" ~ !ident_char }

@@ -1,0 +1,10 @@
+RESULT target=corr_gauss_10 sampler=hmc chains=4 warmup=1000 draws=1000 thin=1 max|z|=1.26 max_rhat=1.0028 min_ess_bulk=1298 grads=39688 ess_per_grad=0.03269 verdict=pass
+RESULT target=std_normal_10 sampler=hmc chains=4 warmup=1000 draws=1000 thin=1 max|z|=2.22 max_rhat=1.0058 min_ess_bulk=1375 grads=39688 ess_per_grad=0.03465 verdict=pass
+RESULT mala post-warmup mean accept_stat = 0.7182 (target 0.574)
+RESULT target=corr_gauss_10 sampler=mala chains=4 warmup=5000 draws=50000 thin=50 max|z|=1.60 max_rhat=1.0027 min_ess_bulk=997 grads=200000 ess_per_grad=0.00498 verdict=pass
+RESULT target=std_normal_10 sampler=mala chains=4 warmup=1000 draws=1000 thin=1 max|z|=1.71 max_rhat=1.0067 min_ess_bulk=634 grads=4000 ess_per_grad=0.15854 verdict=pass
+RESULT target=corr_gauss_10 sampler=nuts chains=4 warmup=1000 draws=1000 thin=1 max|z|=1.50 max_rhat=1.0044 min_ess_bulk=995 grads=49540 ess_per_grad=0.02009 verdict=pass
+RESULT target=std_normal_10 sampler=nuts chains=4 warmup=1000 draws=1000 thin=1 max|z|=2.28 max_rhat=1.0031 min_ess_bulk=2158 grads=19786 ess_per_grad=0.10907 verdict=pass
+RESULT target=corr_gauss_10 sampler=rwm chains=4 warmup=5000 draws=100000 thin=100 max|z|=2.14 max_rhat=1.0048 min_ess_bulk=696 grads=400000 ess_per_grad=0.00174 verdict=pass
+RESULT target=std_normal_10 sampler=rwm chains=4 warmup=1000 draws=10000 thin=10 max|z|=1.52 max_rhat=1.0029 min_ess_bulk=865 grads=40000 ess_per_grad=0.02162 verdict=pass
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.04s

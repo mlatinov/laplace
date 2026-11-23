@@ -1,0 +1,9 @@
+test mala_default_adaptation ... EQUIV mala [] on std normal 10: max |difference| = 0e0
+EQUIV mala [] on scaled 5: max |difference| = 0e0
+test mala_fixed_tuning ... EQUIV mala ["step_size=0.3", "adapt=false"] on std normal 10: max |difference| = 0e0
+EQUIV mala ["step_size=0.3", "adapt=false"] on scaled 5: max |difference| = 0e0
+test rwm_default_adaptation ... EQUIV rwm [] on std normal 10: max |difference| = 0e0
+EQUIV rwm [] on scaled 5: max |difference| = 0e0
+test rwm_fixed_tuning ... EQUIV rwm ["step_size=0.3", "adapt=false"] on std normal 10: max |difference| = 0e0
+EQUIV rwm ["step_size=0.3", "adapt=false"] on scaled 5: max |difference| = 0e0
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s

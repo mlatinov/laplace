@@ -1,0 +1,25 @@
+RESULT target=corr_gauss_10 sampler=hmc chains=4 warmup=1000 draws=1000 thin=1 max|z|=1.26 max_rhat=1.0028 min_ess_bulk=1298 grads=39688 ess_per_grad=0.03269 verdict=pass
+RESULT target=std_normal_10 sampler=hmc chains=4 warmup=1000 draws=1000 thin=1 max|z|=2.22 max_rhat=1.0058 min_ess_bulk=1375 grads=39688 ess_per_grad=0.03465 verdict=pass
+RESULT hybrid=hybrid_eight_schools.lapsampler target=eight_schools_nc chains=4 warmup=1000 draws=1000 thin=1 max|z|=1.69 max_rhat=1.0062 min_ess_bulk=630 grads=29589 ess_per_grad=0.02131 verdict=pass
+RESULT nuts target=eight_schools_nc (comparison) max|z|=2.77 max_rhat=1.0038 min_ess_bulk=1793 grads=26256 ess_per_grad=0.06827 verdict=pass
+RESULT hybrid=hybrid_corr.lapsampler target=corr_gauss_split chains=4 warmup=1000 draws=20000 thin=20 max|z|=1.64 max_rhat=1.0022 min_ess_bulk=1429 grads=638025 ess_per_grad=0.00224 verdict=pass
+RESULT nuts target=corr_gauss_split (comparison) max|z|=1.48 max_rhat=1.0008 min_ess_bulk=3714 grads=987806 ess_per_grad=0.00376 verdict=pass
+RESULT hybrid=hybrid_simplex.lapsampler target=simplex_hybrid chains=4 warmup=1000 draws=1000 thin=1 max|z|=1.73 max_rhat=1.0046 min_ess_bulk=724 grads=23257 ess_per_grad=0.03111 verdict=pass
+RESULT nuts target=simplex_hybrid (comparison) max|z|=1.21 max_rhat=1.0016 min_ess_bulk=2331 grads=17640 ess_per_grad=0.13216 verdict=pass
+RESULT overhead gp: rust mala 147.8 us/step, lapkernel mala 152.9 us/step, interpreter 5.1 us/step = 3.5% of a gradient (147.8 us, 3000 grads)
+RESULT mala post-warmup mean accept_stat over 5 seeds = 0.6793 (target 0.574, per seed [0.6833, 0.7544, 0.6568, 0.6754, 0.6266])
+RESULT target=corr_gauss_10 sampler=mala chains=4 warmup=5000 draws=50000 thin=50 max|z|=1.97 max_rhat=1.0036 min_ess_bulk=1050 grads=200000 ess_per_grad=0.00525 verdict=pass
+RESULT target=std_normal_10 sampler=mala chains=4 warmup=1000 draws=1000 thin=1 max|z|=1.45 max_rhat=1.0066 min_ess_bulk=794 grads=4000 ess_per_grad=0.19842 verdict=pass
+RESULT target=corr_gauss_10 sampler=nuts chains=4 warmup=1000 draws=1000 thin=1 max|z|=1.50 max_rhat=1.0044 min_ess_bulk=995 grads=49540 ess_per_grad=0.02009 verdict=pass
+RESULT target=std_normal_10 sampler=nuts chains=4 warmup=1000 draws=1000 thin=1 max|z|=2.28 max_rhat=1.0031 min_ess_bulk=2158 grads=19786 ess_per_grad=0.10907 verdict=pass
+RESULT target=corr_gauss_10 sampler=rwm chains=4 warmup=5000 draws=100000 thin=100 max|z|=2.14 max_rhat=1.0048 min_ess_bulk=696 grads=400000 ess_per_grad=0.00174 verdict=pass
+RESULT target=std_normal_10 sampler=rwm chains=4 warmup=1000 draws=10000 thin=10 max|z|=1.52 max_rhat=1.0029 min_ess_bulk=865 grads=40000 ess_per_grad=0.02162 verdict=pass
+RESULT equivalence mala [] on std_normal_10: max |difference| = 0e0
+RESULT equivalence mala [] on corr_gauss_10: max |difference| = 0e0
+RESULT equivalence mala ["step_size=0.3", "adapt=false"] on std_normal_10: max |difference| = 0e0
+RESULT equivalence mala ["step_size=0.3", "adapt=false"] on corr_gauss_10: max |difference| = 0e0
+RESULT equivalence rwm [] on std_normal_10: max |difference| = 0e0
+RESULT equivalence rwm [] on corr_gauss_10: max |difference| = 0e0
+RESULT equivalence rwm ["step_size=0.3", "adapt=false"] on std_normal_10: max |difference| = 0e0
+RESULT equivalence rwm ["step_size=0.3", "adapt=false"] on corr_gauss_10: max |difference| = 0e0
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 4.55s

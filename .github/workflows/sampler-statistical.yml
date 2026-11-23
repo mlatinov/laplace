@@ -1,0 +1,39 @@
+# laplace-sample's statistical tests (tests/statistical.rs, all #[ignore]):
+# every built-in kernel on the reference targets through real BridgeStan
+# builds, judged by the moment-check harness (pass / fail /
+# did-not-converge). Slow and needs a C++ toolchain, so weekly and on demand
+# rather than on every push.
+name: sampler-statistical
+
+on:
+  schedule:
+    - cron: "17 4 * * 1" # Mondays 04:17 UTC
+  workflow_dispatch:
+  # TEMPORARY: schedule and workflow_dispatch only work once this file is on
+  # the default branch, so this runs it on pushes to the sampler branches
+  # until then, to check the BridgeStan download and cache on GitHub's
+  # runners. Remove when the sampler work merges.
+  push:
+    branches: ["sampler/**"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  statistical:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # The BridgeStan source tree: the pinned tarball, the stanc binary its
+      # Makefile downloads on first use, and the TBB it builds. Keyed on the
+      # pinned version, so a version bump starts a fresh cache.
+      - name: Cache BridgeStan
+        uses: actions/cache@v4
+        with:
+          path: ~/.laplace/bridgestan/
+          key: bridgestan-2.9.0-${{ runner.os }}
+      - name: Statistical tests
+        run: >
+          cargo test -p laplace-sample --release --locked --test statistical
+          -- --ignored --nocapture --test-threads 1

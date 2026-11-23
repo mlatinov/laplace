@@ -1,0 +1,31 @@
+--- a/nuts-rs-0.19.1/src/chain.rs (crates.io)
++++ b/nuts-rs-0.19.1/src/chain.rs (vendor/)
+@@ -30,6 +30,14 @@
+     /// This fails if the logp function returns an error.
+     fn set_position(&mut self, position: &[f64]) -> Result<()>;
+ 
++    /// LAPLACE SPIKE PATCH: move the chain to `position` and recompute the
++    /// cached logp/gradient there, WITHOUT re-initialising step size or mass
++    /// matrix. Needed when the log density itself changes between draws
++    /// (block/Gibbs sweeps: other blocks moved).
++    fn refresh_position(&mut self, position: &[f64]) -> Result<()> {
++        self.set_position(position)
++    }
++
+     /// Draw a new sample and return the position and some diagnosic information.
+     fn draw(&mut self) -> Result<(Box<[f64]>, Progress)>;
+ 
+@@ -155,6 +163,13 @@
+         self.state = self.hamiltonian.init_state(math, position)?;
+         Ok(())
+     }
++
++    fn refresh_position(&mut self, position: &[f64]) -> Result<()> {
++        let mut math_ = self.math.borrow_mut();
++        let math = math_.deref_mut();
++        self.state = self.hamiltonian.init_state(math, position)?;
++        Ok(())
++    }
+ 
+     fn draw(&mut self) -> Result<(Box<[f64]>, Progress)> {
+         let mut math_ = self.math.borrow_mut();

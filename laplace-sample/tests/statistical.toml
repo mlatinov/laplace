@@ -1,0 +1,81 @@
+# Statistical checks of the built-in kernels on the reference targets
+# (tests/statistical.rs). One [[run]] per kernel x target; fields not given
+# come from [defaults].
+#
+# A moment check only counts when every checked quantity is healthy:
+# rank-normalised R-hat < 1.01 and bulk ESS > 400
+# (docs/sampler/laplace_kernels.md, section 4). Otherwise the result is
+# did-not-converge, which these tests treat as a failure: give the pair more
+# draws here, never a looser threshold.
+#
+# `thin` only thins what the diagnostics see (every iteration still runs and
+# counts towards gradients); it keeps the O(n^2) autocovariance cheap.
+
+[defaults]
+chains = 4
+warmup = 1000
+draws = 1000
+thin = 1
+
+[[run]]
+target = "std_normal_10"
+kernel = "rwm"
+# 1000 draws: bulk ESS 88.
+draws = 10000
+thin = 10
+
+[[run]]
+target = "std_normal_10"
+kernel = "mala"
+
+[[run]]
+target = "std_normal_10"
+kernel = "hmc"
+
+[[run]]
+target = "std_normal_10"
+kernel = "nuts"
+
+[[run]]
+target = "corr_gauss_10"
+kernel = "rwm"
+# Rotated, condition 100: a diagonal metric cannot help and RWM has no
+# momentum. 1000 draws: R-hat 1.56, bulk ESS 7.
+warmup = 5000
+draws = 100000
+thin = 100
+
+[[run]]
+target = "corr_gauss_10"
+kernel = "mala"
+# As for rwm. 1000 draws: R-hat 1.25, bulk ESS 12.
+warmup = 5000
+draws = 50000
+thin = 50
+
+[[run]]
+target = "corr_gauss_10"
+kernel = "hmc"
+
+[[run]]
+target = "corr_gauss_10"
+kernel = "nuts"
+
+# ---- Phase 3.7: hybrids (.lapsampler) on their models ---------------------
+# Same verdict rules; constrained draws are compared (simplex values, tau > 0).
+
+[[hybrid]]
+sampler = "hybrid_corr.lapsampler"
+target = "corr_gauss_split"
+# Block Gibbs across two strongly correlated blocks mixes slowly whatever
+# each block's kernel: 1000 draws gave R-hat 1.09, bulk ESS 37.
+draws = 20000
+thin = 20
+
+[[hybrid]]
+sampler = "hybrid_eight_schools.lapsampler"
+target = "eight_schools_nc"
+
+[[hybrid]]
+sampler = "hybrid_simplex.lapsampler"
+target = "simplex_hybrid"

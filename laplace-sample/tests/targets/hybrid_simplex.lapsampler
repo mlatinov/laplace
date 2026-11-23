@@ -1,0 +1,7 @@
+// Phase 3 extra check: a constrained parameter (a simplex) in a block.
+sampler hybrid_simplex {
+  kernel {
+    block(theta) as simplex : adapt(./../../kernels/mala.lapkernel)
+    rest                    : nuts()
+  }
+}

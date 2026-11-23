@@ -1,0 +1,56 @@
+Chain 1 Informational Message: The current Metropolis proposal is about to be rejected because of the following issue:
+Chain 1 Exception: multi_normal_lpdf: LDLT_Factor of covariance parameter is not positive definite.  last conditional variance is -nan. (in '/tmp/RtmpgkNmId/model-291da27d1c1a37.stan', line 41, column 2 to column 40)
+Chain 1 If this warning occurs sporadically, such as for highly constrained variable types like covariance matrices, then the sampler is fine,
+Chain 1 but if this warning occurs often then your model may be either severely ill-conditioned or misspecified.
+Chain 1 
+Chain 2 Informational Message: The current Metropolis proposal is about to be rejected because of the following issue:
+Chain 2 Exception: multi_normal_lpdf: Covariance matrix is not symmetric. Covariance matrix[1,2] = inf, but Covariance matrix[2,1] = inf (in '/tmp/RtmpgkNmId/model-291da27d1c1a37.stan', line 41, column 2 to column 40)
+Chain 2 If this warning occurs sporadically, such as for highly constrained variable types like covariance matrices, then the sampler is fine,
+Chain 2 but if this warning occurs often then your model may be either severely ill-conditioned or misspecified.
+Chain 2 
+Chain 4 Informational Message: The current Metropolis proposal is about to be rejected because of the following issue:
+Chain 4 Exception: multi_normal_lpdf: LDLT_Factor of covariance parameter is not positive definite.  last conditional variance is 0. (in '/tmp/RtmpgkNmId/model-291da27d1c1a37.stan', line 41, column 2 to column 40)
+Chain 4 If this warning occurs sporadically, such as for highly constrained variable types like covariance matrices, then the sampler is fine,
+Chain 4 but if this warning occurs often then your model may be either severely ill-conditioned or misspecified.
+Chain 4 
+# A tibble: 11 × 10
+   variable     mean    median    sd   mad    q5   q95  rhat ess_bulk ess_tail
+   <chr>       <dbl>     <dbl> <dbl> <dbl> <dbl> <dbl> <dbl>    <dbl>    <dbl>
+ 1 lp__     -4.93    -4.55     2.30  2.09  -9.27 -1.93  1.00    1733.    2275.
+ 2 x[1]     -0.00275 -0.00262  0.971 0.969 -1.59  1.62  1.00    8359.    3230.
+ 3 x[2]      0.00615  0.0106   0.989 0.986 -1.65  1.62  1.00    7754.    2802.
+ 4 x[3]     -0.00242 -0.00682  0.980 0.953 -1.65  1.60  1.00    7538.    3136.
+ 5 x[4]     -0.0128  -0.00750  1.03  1.07  -1.69  1.66  1.00    8983.    2944.
+ 6 x[5]      0.0123   0.0210   0.991 0.984 -1.64  1.66  1.00    8073.    2476.
+ 7 x[6]     -0.0108  -0.00988  0.991 1.00  -1.64  1.62  1.00    8412.    3137.
+ 8 x[7]     -0.00477  0.00778  1.00  1.01  -1.67  1.61  1.00    8323.    2867.
+ 9 x[8]      0.00258  0.000428 1.00  0.973 -1.64  1.65  1.00    8637.    2938.
+10 x[9]     -0.00737  0.00581  0.976 0.970 -1.60  1.58  1.00    8915.    2821.
+11 x[10]     0.0142   0.0177   1.000 0.980 -1.63  1.69  1.00    8322.    3114.
+# A tibble: 4 × 10
+  variable   mean median     sd    mad     q5    q95  rhat ess_bulk ess_tail
+  <chr>     <dbl>  <dbl>  <dbl>  <dbl>  <dbl>  <dbl> <dbl>    <dbl>    <dbl>
+1 lp__     16.1   16.5   1.22   0.964  13.7   17.4    1.00    2186.    2944.
+2 alpha     0.837  0.792 0.253  0.222   0.518  1.32   1.00    2677.    2617.
+3 rho       1.25   1.23  0.271  0.257   0.847  1.72   1.00    2627.    2414.
+4 sigma     0.269  0.266 0.0359 0.0340  0.218  0.335  1.00    2706.    2414.
+$num_divergent
+[1] 0 0 0 0
+
+$num_max_treedepth
+[1] 0 0 0 0
+
+$ebfmi
+[1] 1.209494 1.191234 1.030288 1.124324
+
+
+std_normal csvs:
+/home/metodi/Data_Science_Projects/laplace/spikes/sampler-phase0/out/cmdstan/std_normal-1.csv
+/home/metodi/Data_Science_Projects/laplace/spikes/sampler-phase0/out/cmdstan/std_normal-2.csv
+/home/metodi/Data_Science_Projects/laplace/spikes/sampler-phase0/out/cmdstan/std_normal-3.csv
+/home/metodi/Data_Science_Projects/laplace/spikes/sampler-phase0/out/cmdstan/std_normal-4.csv
+gp csvs:
+/home/metodi/Data_Science_Projects/laplace/spikes/sampler-phase0/out/cmdstan/gp-1.csv
+/home/metodi/Data_Science_Projects/laplace/spikes/sampler-phase0/out/cmdstan/gp-2.csv
+/home/metodi/Data_Science_Projects/laplace/spikes/sampler-phase0/out/cmdstan/gp-3.csv
+/home/metodi/Data_Science_Projects/laplace/spikes/sampler-phase0/out/cmdstan/gp-4.csv

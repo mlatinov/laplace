@@ -1,0 +1,10 @@
+// Phase 3.7: non-centred eight schools, NUTS on the school effects,
+// adapted MALA on the hyperparameters.
+sampler hybrid_eight_schools {
+  kernel {
+    block(theta_tilde)       : nuts()
+    block(mu, tau) as hyper  : adapt(mala())
+  }
+  warmup { iterations = 1000; }
+  draws  { iterations = 1000; }
+}
