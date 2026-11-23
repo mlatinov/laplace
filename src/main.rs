@@ -298,10 +298,8 @@ fn sampler_version_mismatch(binary: &Path) -> Option<String> {
     if reported.as_deref() == Some(ours) {
         return None;
     }
-    let theirs = reported.map_or(
-        "of unknown version (`--version` did not answer)".to_string(),
-        |v| v,
-    );
+    let theirs =
+        reported.unwrap_or_else(|| "of unknown version (`--version` did not answer)".to_string());
     Some(format!(
         "warning: this is laplace {ours}, but laplace-sample at {} is {theirs}; the two are released \
          together and should be the same version\n  help: install laplace-sample {ours}: `cargo install \
