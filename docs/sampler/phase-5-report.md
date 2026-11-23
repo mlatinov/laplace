@@ -21,9 +21,31 @@ merged, tagged or released. The merge itself is planned in
   model plain NUTS was the most efficient sampler. The only wins over NUTS
   are on toy geometry it handles poorly, and the docs say exactly that.
 
-**Verification:** every Phase 5 commit was checked out alone, built and
-tested, with fmt and clippy (`-D warnings`) clean. Tests grow from 980 to
-996, plus 21 slow ones.
+**Verification:** each Phase 5 commit, including this review's, was
+checked out on its own in a scratch worktree and built
+(`cargo build --workspace --locked`), tested (`cargo test --workspace
+--locked`), and checked with `cargo fmt --check` and `cargo clippy
+--workspace --all-targets --locked -- -D warnings`. Every one passes:
+
+| Commit | Subject | Build | Tests | fmt, clippy |
+| --- | --- | --- | --- | --- |
+| `7031b53` | ci: TEMPORARY push trigger for sampler-statistical on sampler/** branc | build-ok | 980 passed, 0 failed, 18 ignored | fmt-ok, clippy-ok |
+| `8e3d085` | sampler: Q18 — laplace new kernel --package; Q10, Q17-Q19 answered | build-ok | 980 passed, 0 failed, 18 ignored | fmt-ok, clippy-ok |
+| `953b630` | sampler: editor-support API — diagnostics for .lapkernel and .lapsampl | build-ok | 984 passed, 0 failed, 18 ignored | fmt-ok, clippy-ok |
+| `d137ca5` | sampler: phase 5.1 — laplace sampler test, the reference suite | build-ok | 988 passed, 0 failed, 18 ignored | fmt-ok, clippy-ok |
+| `3f74d0c` | sampler: phase 5.2 — simulation-based calibration (laplace sampler tes | build-ok | 992 passed, 0 failed, 21 ignored | fmt-ok, clippy-ok |
+| `6def695` | sampler: phase 5.3 — release gate for kernel packages | build-ok | 996 passed, 0 failed, 21 ignored | fmt-ok, clippy-ok |
+| `7aabe3e` | sampler: phase 5.4 — docs: README sections and wiki drafts for the thr | build-ok | 996 passed, 0 failed, 21 ignored | fmt-ok, clippy-ok |
+| `0274794` | ci: prepared (not in use) — laplace-sample release assets (Q10) | build-ok | 996 passed, 0 failed, 21 ignored | fmt-ok, clippy-ok |
+| `a8c3bde` | ci: run the SBC checks in sampler-statistical | build-ok | 996 passed, 0 failed, 21 ignored | fmt-ok, clippy-ok |
+| `1f5c273` | sampler: merge plan | build-ok | 996 passed, 0 failed, 21 ignored | fmt-ok, clippy-ok |
+| `be433c0` | sampler: phase 5 final report and open questions Q20-Q21 | build-ok | 996 passed, 0 failed, 21 ignored | fmt-ok, clippy-ok |
+| `8177f32` | sampler: Q21 — barker passes SBC; tuned, it passes its release gate | build-ok | 996 passed, 0 failed, 21 ignored | fmt-ok, clippy-ok |
+| `afa8001` | sampler: Q20 — laplace-sample takes the compiler's version, in lockste | build-ok | 997 passed, 0 failed, 21 ignored | fmt-ok, clippy-ok |
+| `52755de` | sampler: merge plan — cmdlaplacer merges together, needs laplace-sampl | build-ok | 997 passed, 0 failed, 21 ignored | fmt-ok, clippy-ok |
+| `6d04764` | sampler: merge plan — anchor the trigger check to the commit subject | build-ok | 997 passed, 0 failed, 21 ignored | fmt-ok, clippy-ok |
+
+This report's own commit changes only this file.
 
 ## Done (Phase 5)
 | Step | Commit |
@@ -37,6 +59,10 @@ tested, with fmt and clippy (`-D warnings`) clean. Tests grow from 980 to
 | Release workflow for laplace-sample, prepared (Q10) | `0274794` |
 | SBC in the statistical workflow | `a8c3bde` |
 | Merge plan | `1f5c273` |
+| Final report and Q20–Q21 | `be433c0` |
+| Review: Q21, barker passes SBC; tuned, passes its release gate | `8177f32` |
+| Review: Q20, lockstep versions and the mismatch warning | `afa8001` |
+| Review: merge plan, cmdlaplacer; the anchored trigger check | `52755de`, `6d04764` |
 
 ## Checks
 | Check | Result | Numbers |
@@ -133,14 +159,40 @@ geometry; the docs present them that way.
 - **The prepared release workflow** runs by hand only and covers no
   Windows build (BridgeStan's build path is untested there).
 
-## Open questions for Metodi
-Both are in `open-questions.md`.
+## Phase 5 review (answers to Q20 and Q21)
+- **Q21, barker: slow mixing, not a bug.**
+  - SBC on `langevin::barker`, with the MALA run's settings (200
+    replicates, 500 warmup, thinned 1:4): ranks are uniform on all ten
+    quantities (`phase-5/sbc-barker.txt`).
+  - So I tuned its test file in the local `laplace-langevin` library:
+    10000 draws thinned 1:10, and 100000 thinned 1:100 on the correlated
+    Gaussian.
+  - It now passes the must-pass tier, and a git copy of the library
+    passes `laplace release --dry-run`'s gate for both kernels
+    (`phase-5/release-gate-tuned.txt`).
+  - The kernel and its test file document that acceptance settles at
+    0.25–0.37, below the 0.4 target.
+- **Q20, lockstep versions.**
+  - `laplace-sample` inherits the compiler's version (0.3.0) from the
+    root `[workspace.package]`, so the two cannot drift.
+  - When `laplace` hands a command to `laplace-sample` (dispatch and the
+    release gate), it runs `laplace-sample --version`. On a mismatch it
+    warns with both versions and the install command, and still runs the
+    command. Tested: match, mismatch, and no answer.
+  - Built-in kernels' provenance now reads `<kernel> 0.3.0`, checked in a
+    real CSV.
+- **cmdlaplacer:** `merge-plan.md` now says it merges together with
+  this, and that its `laplace_sample()` needs `laplace-sample >= 0.3.0`.
+  Its tests pass against the 0.3.0 binary.
+  - It calls `laplace-sample` directly, so it does not get the version
+    warning.
+  - A version check in `cmdlaplacer` is recommended there, not done.
+- **The merge plan's trigger check was wrong**, and is fixed. Grepping
+  for `TEMPORARY` also matched the plan's own commit message, so its
+  "must print nothing" step would have failed after a correct rebase. It
+  now greps the subject `^ci: TEMPORARY`, rehearsed again.
 
-- **Q20, laplace-sample's version and distribution:** it reports 0.1.0
-  beside compiler 0.3.0, and the installer knows only `laplace`.
-  **Recommend:** version it with the compiler; installer support later.
-- **Q21, Barker's adaptation:** it settles below its acceptance target.
-  **Recommend:** leave it for v1 and document it in the kernel.
+No open questions remain from Phase 5.
 
 ## Risks
 - **Interpreted kernels lose on cheap models**, by design until v1 (Q19);
@@ -150,5 +202,5 @@ Both are in `open-questions.md`.
 - **The slow suite has run only on this machine** since the push-trigger
   runs. Run `sampler-statistical` once by hand after the merge.
 - **The laplace-langevin library** is a local folder with no repository.
-  Its `barker` needs a tuned `tests/barker.test.toml` before it could pass
-  its own release gate (the gate correctly refuses it now).
+  Its tuned test files (and the release-gate run) live there, not in this
+  repo; `phase-5/release-gate-tuned.txt` records them.
