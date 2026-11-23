@@ -9,6 +9,12 @@ on:
   schedule:
     - cron: "17 4 * * 1" # Mondays 04:17 UTC
   workflow_dispatch:
+  # TEMPORARY: schedule and workflow_dispatch only work once this file is on
+  # the default branch, so this runs it on pushes to the sampler branches
+  # until then, to check the BridgeStan download and cache on GitHub's
+  # runners. Remove when the sampler work merges.
+  push:
+    branches: ["sampler/**"]
 
 env:
   CARGO_TERM_COLOR: always
