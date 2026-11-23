@@ -615,9 +615,11 @@ dependencies = [
  "nuts-rs",
  "rand",
  "rand_distr",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "toml",
 ]
 
 [[package]]

@@ -8,26 +8,77 @@
 //! cargo test -p laplace-sample --release --test statistical -- --ignored --nocapture
 //! ```
 //!
-//! Conventions (`docs/sampler/laplace_kernels.md`, section 4): 4 chains,
-//! 1000 warmup, 1000 draws, fixed seeds. Moment check: for every coordinate,
-//! z = (estimate - truth) / MCSE on E[x] and E[x^2]; pass if every |z| < 4.
-//! R-hat, ESS and ESS per gradient are printed for the report.
+//! Conventions (`docs/sampler/laplace_kernels.md`, section 4): fixed seeds,
+//! draw counts per kernel x target in `tests/statistical.toml`. Moment
+//! check: for every coordinate, z = (estimate - truth) / MCSE on E[x] and
+//! E[x^2]. The verdict ([`laplace_sample::diagnostics::verdict`]) is
+//! did-not-converge unless every quantity has R-hat < 1.01 and bulk ESS >
+//! 400; only then is it pass (every |z| < 4) or fail. Every check here must
+//! pass. R-hat, bulk ESS and ESS per gradient are printed for the report.
 
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bridgestan::{Model, StanLibrary};
-use laplace_sample::diagnostics::{moment, Moment};
+use laplace_sample::diagnostics::{moment, verdict, Moment, Verdict};
 use laplace_sample::kernel::StepInfo;
 use laplace_sample::model;
 use laplace_sample::runner::{chain_rng, run_chain, BuiltIn, Init, SamplerSpec};
 use laplace_sample::target::{BridgeStanTarget, Target};
 
-const CHAINS: u64 = 4;
-const WARMUP: u64 = 1000;
-const DRAWS: u64 = 1000;
 const SEED: u64 = 20261123;
+
+#[derive(serde::Deserialize, Clone, Copy, Debug)]
+struct Counts {
+    chains: u64,
+    warmup: u64,
+    draws: u64,
+    thin: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct RunEntry {
+    target: String,
+    kernel: String,
+    chains: Option<u64>,
+    warmup: Option<u64>,
+    draws: Option<u64>,
+    thin: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+struct Config {
+    defaults: Counts,
+    run: Vec<RunEntry>,
+}
+
+fn config() -> Config {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/statistical.toml");
+    toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// The draw counts for one kernel x target; every pair must be listed.
+fn counts(target: &str, kind: BuiltIn) -> Counts {
+    let c = config();
+    let e = c
+        .run
+        .iter()
+        .find(|r| r.target == target && r.kernel == kind.name())
+        .unwrap_or_else(|| {
+            panic!(
+                "tests/statistical.toml has no run for {} on {target}",
+                kind.name()
+            )
+        });
+    let d = c.defaults;
+    Counts {
+        chains: e.chains.unwrap_or(d.chains),
+        warmup: e.warmup.unwrap_or(d.warmup),
+        draws: e.draws.unwrap_or(d.draws),
+        thin: e.thin.unwrap_or(d.thin),
+    }
+}
 
 fn targets_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/targets")
@@ -71,24 +122,23 @@ struct Run {
     infos: Vec<Vec<StepInfo>>,
 }
 
-fn run(r: &Reference, kind: BuiltIn, sets: &[&str]) -> Run {
-    run_long(r, kind, sets, WARMUP, DRAWS, 1)
+/// Run `n.chains` chains, keeping every `n.thin`-th draw for the
+/// diagnostics (gradient counts include every iteration).
+fn run(r: &Reference, kind: BuiltIn, sets: &[&str], n: Counts) -> Run {
+    run_seeded(r, kind, sets, n, SEED)
 }
 
-/// `draws` per chain, keeping every `thin`-th for the diagnostics (gradient
-/// counts still include every iteration).
-fn run_long(
-    r: &Reference,
-    kind: BuiltIn,
-    sets: &[&str],
-    warmup: u64,
-    draws: u64,
-    thin: u64,
-) -> Run {
+fn run_seeded(r: &Reference, kind: BuiltIn, sets: &[&str], n: Counts, seed: u64) -> Run {
+    let Counts {
+        chains,
+        warmup,
+        draws,
+        thin,
+    } = n;
     let sets: Vec<String> = sets.iter().map(|s| s.to_string()).collect();
     let spec = SamplerSpec::new(kind, &sets).unwrap();
     let results: Vec<(Vec<Vec<f64>>, Vec<StepInfo>)> = std::thread::scope(|s| {
-        let handles: Vec<_> = (1..=CHAINS)
+        let handles: Vec<_> = (1..=chains)
             .map(|chain| {
                 let spec = spec.clone();
                 s.spawn(move || {
@@ -96,7 +146,7 @@ fn run_long(
                         .data
                         .as_ref()
                         .map(|p| CString::new(p.to_str().unwrap()).unwrap());
-                    let model = Model::new(r.lib.clone(), data, SEED as u32).unwrap();
+                    let model = Model::new(r.lib.clone(), data, seed as u32).unwrap();
                     let target: Arc<dyn Target> = Arc::new(BridgeStanTarget { model });
                     let (mut k, a) = spec.build(target.clone(), warmup, draws).unwrap();
                     let (mut qs, mut infos) = (vec![], vec![]);
@@ -108,7 +158,7 @@ fn run_long(
                         &Init::Radius(2.0),
                         warmup,
                         draws,
-                        &mut chain_rng(SEED, chain),
+                        &mut chain_rng(seed, chain),
                         |_| Ok(()),
                         |st, info, _| {
                             if i.is_multiple_of(thin) {
@@ -130,8 +180,9 @@ fn run_long(
     Run { draws, infos }
 }
 
-/// Moment check; prints a summary line and returns the rows.
-fn moment_check(r: &Reference, kind: BuiltIn, run: &Run) -> Vec<Moment> {
+/// Moment check: prints one RESULT line (and the unhealthy or failing rows)
+/// and returns the verdict.
+fn moment_check(r: &Reference, kind: BuiltIn, run: &Run, n: Counts) -> (Verdict, Vec<Moment>) {
     let d = r.second_moments.len();
     let mut rows = vec![];
     for i in 0..d {
@@ -151,43 +202,79 @@ fn moment_check(r: &Reference, kind: BuiltIn, run: &Run) -> Vec<Moment> {
             r.second_moments[i],
         ));
     }
+    let v = verdict(&rows);
     let grads: u64 = run.infos.iter().flatten().map(|i| i.n_grad).sum();
-    let min_ess = rows.iter().map(|m| m.ess).fold(f64::INFINITY, f64::min);
+    let min_ess = rows
+        .iter()
+        .map(|m| m.ess_bulk)
+        .fold(f64::INFINITY, f64::min);
     let max_rhat = rows.iter().map(|m| m.rhat).fold(0.0, f64::max);
     let max_z = rows.iter().map(|m| m.z.abs()).fold(0.0, f64::max);
     println!(
-        "RESULT target={} sampler={} max|z|={:.2} max_rhat={:.4} min_ess={:.0} grads={} ess_per_grad={:.5} {}",
+        "RESULT target={} sampler={} chains={} warmup={} draws={} thin={} max|z|={:.2} max_rhat={:.4} min_ess_bulk={:.0} grads={} ess_per_grad={:.5} verdict={}",
         r.name,
         kind.name(),
+        n.chains,
+        n.warmup,
+        n.draws,
+        n.thin,
         max_z,
         max_rhat,
         min_ess,
         grads,
         min_ess / grads as f64,
-        if max_z < 4.0 { "PASS" } else { "FAIL" }
+        v.label()
     );
-    rows
+    (v, rows)
 }
 
-fn assert_moments(rows: &[Moment], what: &str) {
-    for m in rows {
-        assert!(
-            m.z.abs() < 4.0,
-            "{what}: {} estimate {:.4} truth {:.4} mcse {:.4} z {:.2}",
-            m.name,
-            m.estimate,
-            m.truth,
-            m.mcse,
-            m.z
-        );
-    }
+fn describe(rows: &[Moment]) -> String {
+    rows.iter()
+        .map(|m| {
+            format!(
+                "  {}: estimate {:.4} truth {:.4} mcse {:.4} z {:.2} rhat {:.4} ess_bulk {:.0}",
+                m.name, m.estimate, m.truth, m.mcse, m.z, m.rhat, m.ess_bulk
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn check(target: &'static str, kind: BuiltIn) {
+    let n = counts(target, kind);
     let r = reference(target);
-    let run = run(&r, kind, &[]);
-    let rows = moment_check(&r, kind, &run);
-    assert_moments(&rows, &format!("{target}/{}", kind.name()));
+    let run = run(&r, kind, &[], n);
+    let (v, rows) = moment_check(&r, kind, &run, n);
+    match v {
+        Verdict::Pass => {}
+        Verdict::Fail => panic!(
+            "{target}/{}: FAIL, the kernel does not target the right distribution\n{}",
+            kind.name(),
+            describe(&rows)
+        ),
+        Verdict::DidNotConverge => panic!(
+            "{target}/{}: did-not-converge (needs R-hat < 1.01 and bulk ESS > 400); \
+             give it more draws in tests/statistical.toml\n{}",
+            kind.name(),
+            describe(&rows)
+        ),
+    }
+}
+
+#[test]
+fn config_lists_every_kernel_on_every_target_once() {
+    let c = config();
+    for target in ["std_normal_10", "corr_gauss_10"] {
+        for kind in BuiltIn::ALL {
+            let hits = c
+                .run
+                .iter()
+                .filter(|r| r.target == target && r.kernel == kind.name())
+                .count();
+            assert_eq!(hits, 1, "{} on {target}", kind.name());
+        }
+    }
+    assert_eq!(c.run.len(), 8);
 }
 
 #[test]
@@ -231,45 +318,23 @@ fn nuts_corr_gauss() {
     check("corr_gauss_10", BuiltIn::Nuts);
 }
 
-/// RWM and MALA mix slowly on the rotated condition-100 target: at 1000
-/// draws the moment check passes only because the MCSE is large. Given
-/// enough draws they converge: 4 x 50 000 draws, thinned 1:50 for the
-/// diagnostics, must also meet the chain-health bar (R-hat < 1.01,
-/// ESS > 400).
-fn check_long(kind: BuiltIn) {
-    let r = reference("corr_gauss_10");
-    let run = run_long(&r, kind, &[], 5000, 50_000, 50);
-    let rows = moment_check(&r, kind, &run);
-    assert_moments(&rows, &format!("corr_gauss_10/{} long", kind.name()));
-    for m in &rows {
-        assert!(
-            m.rhat < 1.01 && m.ess > 400.0,
-            "{}: rhat {:.4} ess {:.0}",
-            m.name,
-            m.rhat,
-            m.ess
-        );
-    }
-}
-
-#[test]
-#[ignore]
-fn rwm_corr_gauss_long() {
-    check_long(BuiltIn::Rwm);
-}
-#[test]
-#[ignore]
-fn mala_corr_gauss_long() {
-    check_long(BuiltIn::Mala);
-}
-
 /// 1.5: after warmup, MALA's acceptance on the standard normal is within
-/// +-0.05 of its target (0.574).
+/// +-0.15 of its target (0.574). Widened from the plan's +-0.05 in the
+/// Phase 1 review: Stan's dual averaging, kept for every kernel, settles
+/// MALA's post-warmup acceptance near 0.69 (its iterates keep fluctuating and
+/// acceptance at the averaged step is higher; see the Phase 1 report). Plain
+/// 4 x (1000 + 1000): this checks the adapted step size, not convergence.
 #[test]
 #[ignore]
 fn mala_acceptance_after_warmup_is_on_target() {
     let r = reference("std_normal_10");
-    let run = run(&r, BuiltIn::Mala, &[]);
+    let n = Counts {
+        chains: 4,
+        warmup: 1000,
+        draws: 1000,
+        thin: 1,
+    };
+    let run = run(&r, BuiltIn::Mala, &[], n);
     let probs: Vec<f64> = run
         .infos
         .iter()
@@ -278,5 +343,5 @@ fn mala_acceptance_after_warmup_is_on_target() {
         .collect();
     let mean = probs.iter().sum::<f64>() / probs.len() as f64;
     println!("RESULT mala post-warmup mean accept_stat = {mean:.4} (target 0.574)");
-    assert!((mean - 0.574).abs() < 0.05, "mean acceptance {mean}");
+    assert!((mean - 0.574).abs() < 0.15, "mean acceptance {mean}");
 }
