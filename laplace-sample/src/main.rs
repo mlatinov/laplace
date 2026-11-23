@@ -154,6 +154,17 @@ enum SamplerAction {
         /// Skip the plain-NUTS runs (no ratios)
         #[arg(long)]
         no_compare: bool,
+        /// Run simulation-based calibration instead: N replicates of a
+        /// built-in hierarchical normal, ranks tested for uniformity with
+        /// simultaneous ECDF bands
+        #[arg(long, value_name = "N")]
+        sbc: Option<usize>,
+        /// SBC: warmup iterations per replicate
+        #[arg(long, default_value_t = 500)]
+        sbc_warmup: u64,
+        /// SBC: iterations per kept draw (99 kept draws per replicate)
+        #[arg(long, default_value_t = 4)]
+        sbc_thin: u64,
     },
 }
 
@@ -194,15 +205,29 @@ fn main() -> ExitCode {
                     tier,
                     seed,
                     no_compare,
+                    sbc,
+                    sbc_warmup,
+                    sbc_thin,
                 },
-        } => sampler_test(
-            &sampler,
-            config.as_deref(),
-            &set,
-            tier.as_deref(),
-            seed,
-            !no_compare,
-        ),
+        } => match sbc {
+            Some(n) => sampler_sbc(
+                &sampler,
+                config.as_deref(),
+                &set,
+                seed,
+                n,
+                sbc_warmup,
+                sbc_thin,
+            ),
+            None => sampler_test(
+                &sampler,
+                config.as_deref(),
+                &set,
+                tier.as_deref(),
+                seed,
+                !no_compare,
+            ),
+        },
         Command::New {
             what:
                 NewWhat::Kernel {
@@ -329,6 +354,60 @@ fn sampler_test(
                     "\nresult: a must-pass target did not pass (or the sampler runs on none of them: test its \
                      kernels instead)"
                 );
+                ExitCode::FAILURE
+            }
+        }
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `laplace sampler test --sbc N`: exit 0 when every quantity's ranks are
+/// uniform.
+fn sampler_sbc(
+    spec: &str,
+    config: Option<&std::path::Path>,
+    sets: &[String],
+    seed: u64,
+    replicates: usize,
+    warmup: u64,
+    thin: u64,
+) -> ExitCode {
+    use laplace_sample::{sbc, suite};
+    let project = laplace_sample::libraries::Project::current();
+    let prepared = match suite::prepare(spec, sets, config, &project) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if replicates < 10 || thin < 1 {
+        eprintln!("error: --sbc needs at least 10 replicates and --sbc-thin at least 1");
+        return ExitCode::FAILURE;
+    }
+    let settings = sbc::SbcSettings {
+        replicates,
+        warmup,
+        thin,
+        seed,
+        ..Default::default()
+    };
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    let result = sbc::run_sbc(&prepared.sampler, settings, |_| {
+        let d = done.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        if d.is_multiple_of(50) || d == replicates {
+            eprintln!("sbc: {d}/{replicates} replicates");
+        }
+    });
+    match result {
+        Ok(r) => {
+            print!("{}", sbc::render(spec, &r));
+            if r.pass() {
+                ExitCode::SUCCESS
+            } else {
                 ExitCode::FAILURE
             }
         }

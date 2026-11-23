@@ -1,0 +1,21 @@
+//@laplace
+//@brief DELIBERATELY BROKEN: MALA with the Metropolis-Hastings correction dropped
+//@param eps Step size (adapted toward 0.574 acceptance)
+//@param m Diagonal inverse metric (adapted in warmup)
+//
+// A test fixture (Phase 5.2), never a kernel to use. It is the shipped
+// kernels/mala.lapkernel with propose()'s correction set to 0: the
+// Langevin proposal is not symmetric, so accepting with lp(q_new) - lp(q)
+// alone leaves the wrong distribution invariant. `laplace sampler test
+// --sbc` must fail it; the built-in NUTS must pass.
+kernel broken_mala {
+  tuning {
+    real<lower=0> eps = 1 @adapt(step_size, target_accept = 0.574);
+    vector<lower=0>[dim] m = rep_vector(1, dim) @adapt(metric);
+  }
+  step {
+    vector[dim] mu_fwd = q + 0.5 * eps^2 * m .* grad;
+    vector[dim] q_new = mu_fwd + eps * sqrt(m) .* std_normal_rng(dim);
+    propose(q_new, 0);
+  }
+}

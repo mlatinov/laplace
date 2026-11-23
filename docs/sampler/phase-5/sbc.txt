@@ -1,0 +1,68 @@
+   Compiling laplace-sample v0.1.0 (/home/metodi/Data_Science_Projects/laplace/laplace-sample)
+    Finished `release` profile [optimized] target(s) in 9.28s
+     Running tests/sbc.rs (target/release/deps/sbc-f07aaabebec2b444)
+
+running 3 tests
+test sbc_fails_mala_without_its_correction ... Compiler: clang++ (from CmdStan's /home/metodi/.cmdstan/cmdstan-2.39.0/make/local)
+laplace sampler test --sbc: /home/metodi/Data_Science_Projects/laplace/laplace-sample/tests/fixtures/broken_mala.lapkernel
+
+200 replicates of a hierarchical normal (J = 8), 500 warmup, 99 kept draws thinned 1:4; family-wise alpha 0.01 (Bonferroni over 10 quantities)
+
+quantity result   min tail p       band  at rank   ECDF - uniform at deciles (x0.01)
+mu       FAIL       3.07e-10    2.97e-5       98   +4 +5 +4 +3 +1 -4 -7 -9 -9
+tau      FAIL         0.00e0    2.97e-5        8   +9 +9 +9 +9 +9 +9 +9 +9 +4
+eta.1    FAIL       6.22e-14    2.97e-5        1   +9 +9 +7 +2 -2 -4 -9 -9 -9
+eta.2    FAIL       2.36e-18    2.97e-5       99   +7 +3 +2 -2 -7 -9 -9 -9 -9
+eta.3    FAIL       6.22e-14    2.97e-5        1   +9 +8 +7 +1 -2 -5 -7 -7 -9
+eta.4    FAIL       1.67e-19    2.97e-5       99   +9 +9 +9 +6 +2 -3 -4 -7 -9
+eta.5    FAIL       1.83e-14    2.97e-5       98   +9 +9 +8 +4 +4 -2 -7 -9 -9
+eta.6    FAIL       3.18e-17    2.97e-5       99   +7 +3 +3 -2 -7 -9 -9 -9 -9
+eta.7    FAIL       5.97e-10    2.97e-5       99   +9 +9 +9 +5 +5 -1 -6 -9 -9
+eta.8    FAIL       1.13e-20    2.97e-5       99   +9 +9 +5 +1 -3 -7 -9 -9 -9
+
+result: ranks are NOT uniform: the sampler does not target the posterior. Reading the deciles: positive throughout = true values rank low, the sampler's draws sit too high (negative: too low); positive then negative = too many extreme ranks, its draws are too narrow (negative then positive: too wide)
+
+ok
+test sbc_passes_the_built_in_nuts ... Compiler: clang++ (from CmdStan's /home/metodi/.cmdstan/cmdstan-2.39.0/make/local)
+laplace sampler test --sbc: nuts
+
+200 replicates of a hierarchical normal (J = 8), 500 warmup, 99 kept draws thinned 1:4; family-wise alpha 0.01 (Bonferroni over 10 quantities)
+
+quantity result   min tail p       band  at rank   ECDF - uniform at deciles (x0.01)
+mu       pass        1.81e-2    2.97e-5        5   -3 -3 +1 +1 -1 +1 +2 -1 +1
+tau      pass        3.20e-2    2.97e-5        1   +3 +4 +3 -1 +2 +2 +1 -2 -1
+eta.1    pass        1.61e-1    2.97e-5       92    0  0 -2 -2 -3 -1 -1 -2 -3
+eta.2    pass        8.17e-3    2.97e-5       29   -5 -4 -7 -6 -7 -7 -3 -6 -6
+eta.3    pass        1.59e-2    2.97e-5       92   +2 -1 -1 +1  0 +1 +1 +2 +3
+eta.4    pass        3.11e-1    2.97e-5       71   -2 -2 +1 -1 +1 +1 +3  0 -2
+eta.5    pass        1.40e-1    2.97e-5       16   -2 -4 -1  0 +3 +1 +1 -1 -1
+eta.6    pass        5.72e-3    2.97e-5       22   -2 -8 -7 -7 -7 -6 -6 -3 -2
+eta.7    pass        1.31e-1    2.97e-5       11   -3 -1  0 +4 +1 +4 +2  0 +2
+eta.8    pass        3.20e-2    2.97e-5       99    0  0 -5 -5 -4 -3 -3 -2 -4
+
+result: ranks are uniform: no evidence the sampler targets the wrong posterior
+
+ok
+test sbc_passes_the_shipped_mala_kernel ... Compiler: clang++ (from CmdStan's /home/metodi/.cmdstan/cmdstan-2.39.0/make/local)
+laplace sampler test --sbc: /home/metodi/Data_Science_Projects/laplace/laplace-sample/kernels/mala.lapkernel
+
+200 replicates of a hierarchical normal (J = 8), 500 warmup, 99 kept draws thinned 1:4; family-wise alpha 0.01 (Bonferroni over 10 quantities)
+
+quantity result   min tail p       band  at rank   ECDF - uniform at deciles (x0.01)
+mu       pass        4.03e-2    2.97e-5       98   -4 -4 -1 +2  0 -4 -1 -1 +1
+tau      pass        2.03e-3    2.97e-5        1   +6 +5 +5 +2 +5  0  0 -1 -3
+eta.1    pass        3.56e-2    2.97e-5       92   +3 +1  0 -2 -1  0  0 -4 -4
+eta.2    pass        1.22e-3    2.97e-5       70   -3 -7 -4 -6 -8 -8 -9 -6 -2
+eta.3    pass        1.13e-1    2.97e-5       90   +2 +1 -2 -1 -1 +3 +4 +2 +4
+eta.4    pass        6.56e-2    2.97e-5       94    0 +1 +1  0 +3 -1 +1 -1 -3
+eta.5    pass        3.27e-2    2.97e-5       90   -3 -3 -2  0  0 +1 +1 -4 -5
+eta.6    pass        8.65e-3    2.97e-5       15   -3 -6 -4 -5 -8 -5 -5 -4 -3
+eta.7    pass        6.78e-2    2.97e-5       61   -2  0  0  0 +3 +6 +2 +1 -2
+eta.8    pass        1.46e-2    2.97e-5       79   +2 -1 +1 -4 -3 -4 -7 -7 -3
+
+result: ranks are uniform: no evidence the sampler targets the wrong posterior
+
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+

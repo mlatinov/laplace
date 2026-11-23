@@ -25,6 +25,7 @@ pub mod libraries;
 pub mod model;
 pub mod runner;
 pub mod sample;
+pub mod sbc;
 pub mod state;
 pub mod suite;
 pub mod target;
