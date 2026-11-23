@@ -8,6 +8,7 @@
 //! The `laplace` compiler never links this crate; `laplace sample ...` finds
 //! the `laplace-sample` binary on `PATH` and forwards its arguments (D1).
 
+pub mod adapt;
 pub mod bridgestan_src;
 pub mod kernel;
 pub mod kernels;
