@@ -1,0 +1,49 @@
+$ laplace release patch --dry-run   # git copy of laplace-langevin after tuning tests/barker.test.toml (Q21)
+release gate: laplace sampler test laplace-langevin/kernels/barker.lapkernel --tier must-pass
+laplace sampler test: laplace-langevin/kernels/barker.lapkernel
+
+target            tier         verdict           max|z|   R-hat min ESS      grads      logps  ESS/grad     ESS/s  vs NUTS  (per s)
+std_normal_10     must pass    pass                1.92  1.0024    2363      40000          0   0.05908      1273     0.54     0.01
+corr_gauss_10     must pass    pass                2.80  1.0015    1615     400000          0   0.00404        85     0.20     0.01
+eight_schools_nc  must pass    pass                2.24  1.0030    1687      40000          0   0.04218       886     0.62     0.02
+
+ESS = minimum bulk ESS over the checked quantities; grads and logps = gradient and density-only evaluations while sampling; ESS/s = per second of sampling, summed over chains; vs NUTS = ESS/grad ratio to plain NUTS on the same target (then ESS/s). Ratios are information, never a threshold.
+release gate: laplace sampler test laplace-langevin/kernels/mala.lapkernel --tier must-pass
+laplace sampler test: laplace-langevin/kernels/mala.lapkernel
+
+target            tier         verdict           max|z|   R-hat min ESS      grads      logps  ESS/grad     ESS/s  vs NUTS  (per s)
+std_normal_10     must pass    pass                1.45  1.0066     794       4000          0   0.19842     37867     1.82     0.23
+corr_gauss_10     must pass    pass                1.97  1.0036    1050     200000          0   0.00525       866     0.26     0.06
+eight_schools_nc  must pass    pass                2.05  1.0033    1542      20000          0   0.07708     13055     1.13     0.27
+
+ESS = minimum bulk ESS over the checked quantities; grads and logps = gradient and density-only evaluations while sampling; ESS/s = per second of sampling, summed over chains; vs NUTS = ESS/grad ratio to plain NUTS on the same target (then ESS/s). Ratios are information, never a threshold.
+releasing langevin 0.1.0 -> 0.1.1 (tag `0.1.1`: no version tags yet, so the bare version is used (laplace's convention))
+  1. would set version = "0.1.1" in laplace.toml (was 0.1.0)
+  2. would commit it: "release 0.1.1"
+  3. would tag the commit `0.1.1`
+  4. would push branch `main` to `origin`
+  5. would push tag `0.1.1` to `origin`
+dry run: nothing was changed
+
+# laplace-langevin/tests/barker.test.toml:
+    # How `laplace sampler test` runs langevin::barker (laplace-sample suite.rs).
+    #
+    # Barker passes simulation-based calibration (200 replicates, uniform ranks
+    # on all ten quantities), so a target that does not converge needs more
+    # draws, never a looser threshold. Its moves are bounded and per-coordinate,
+    # and under adapt() its acceptance settles at about 0.25-0.37, below the
+    # 0.4 target: dual averaging assumes acceptance falls steadily with the step
+    # size, and Barker's barely moves. So it mixes slowly and needs long runs.
+    kernel = "barker"
+    adapt = true
+    
+    [defaults]
+    warmup = 1000
+    draws = 10000
+    thin = 10
+    
+    # Rotated, condition 100: a diagonal metric cannot help.
+    [targets.corr_gauss_10]
+    warmup = 5000
+    draws = 100000
+    thin = 100

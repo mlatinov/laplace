@@ -37,18 +37,6 @@ registry unit tests (value and RNG use) like the v1 entries.
 names the compiler release that produced a run. The installer support can
 wait until custom samplers stop being experimental.
 
-### Q21 — Barker's adaptation lands below its target (Phase 4.6)
-Under `adapt()`, `langevin::barker` settles at 0.25–0.37 acceptance against
-its 0.4 target. Dual averaging assumes acceptance falls steadily as the
-step size grows, and Barker's acceptance barely changes with step size.
-The kernel is correct (moment checks pass); it is only tuned below its
-target.
-- (a) Leave it; document it in the kernel.
-- (b) Let a kernel opt out of the averaged step size (use the last
-  iterate).
-
-**Recommendation: (a)** for v1. It affects efficiency, not correctness.
-
 ## Answered
 
 ### Q2 — How to carry the nuts-rs `refresh_position` patch
@@ -176,3 +164,12 @@ labelled "experimental" in all 0.3.0 docs. Nothing is tagged or released.
 ### Q19 — Interpreter overhead on cheap densities
 **Answer:** agreed, no interpreter optimization before v1. The docs state
 the measured overhead and when to write a Rust `Kernel` instead.
+
+### Q21 — Barker's adaptation lands below its target
+**Answer (Phase 5 review):** run SBC on langevin::barker; if it passes, the
+suite failures are slow mixing: tune its test file and document the
+adaptation. **Done:** SBC passes (200 replicates, same settings as MALA's;
+`phase-5/sbc-barker.txt`). With `tests/barker.test.toml` at 10000 draws
+(100000 on the correlated Gaussian) barker passes the must-pass tier and
+its release gate (`phase-5/release-gate-tuned.txt`); the kernel and the
+test file document that acceptance settles at 0.25-0.37, below 0.4.
