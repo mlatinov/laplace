@@ -10,6 +10,7 @@
 
 pub mod bridgestan_src;
 pub mod kernel;
+pub mod kernels;
 pub mod model;
 pub mod state;
 pub mod target;
