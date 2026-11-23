@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use bridgestan::{Model, StanLibrary};
 
-use crate::csv::{adaptation_lines, sampler_values, Header, KernelLine, Writer};
+use crate::csv::{adaptation_lines, sampler_values, Header, Writer};
 use crate::model;
 use crate::runner::{chain_rng, gq_seed, run_chain, Init, Sampler};
 use crate::target::{BridgeStanTarget, Target};
@@ -21,8 +21,12 @@ pub struct SampleArgs {
     pub sampler: String,
     pub chains: u64,
     pub parallel_chains: Option<u64>,
-    pub warmup: u64,
-    pub draws: u64,
+    /// `None`: the .lapsampler's value, else 1000.
+    pub warmup: Option<u64>,
+    /// `None`: the .lapsampler's value, else 1000.
+    pub draws: Option<u64>,
+    /// Keep every `thin`-th draw. `None`: the .lapsampler's, else 1.
+    pub thin: Option<u64>,
     pub seed: Option<u64>,
     /// Empty: radius 2. One value: a radius (number) or a JSON file for every
     /// chain. `chains` values: one JSON file per chain.
@@ -70,11 +74,35 @@ fn names(s: &str) -> Vec<String> {
     }
 }
 
+/// Run lengths after the CLI overrides the `.lapsampler` defaults.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Run {
+    pub warmup: u64,
+    pub draws: u64,
+    pub thin: u64,
+}
+
+pub const DEFAULT_WARMUP: u64 = 1000;
+pub const DEFAULT_DRAWS: u64 = 1000;
+
+/// CLI value, else the sampler file's, else the default.
+pub fn resolve_run(args: &SampleArgs, spec: &Sampler) -> anyhow::Result<Run> {
+    let (fw, fd, ft) = spec.file_run();
+    let run = Run {
+        warmup: args.warmup.or(fw).unwrap_or(DEFAULT_WARMUP),
+        draws: args.draws.or(fd).unwrap_or(DEFAULT_DRAWS),
+        thin: args.thin.or(ft).unwrap_or(1),
+    };
+    anyhow::ensure!(run.draws >= 1, "draws must be at least 1");
+    anyhow::ensure!(run.thin >= 1, "thin must be at least 1");
+    Ok(run)
+}
+
 /// Run the sampler; returns the CSV paths, in chain order.
 pub fn sample(args: &SampleArgs) -> anyhow::Result<Vec<PathBuf>> {
     anyhow::ensure!(args.chains >= 1, "--chains must be at least 1");
-    anyhow::ensure!(args.draws >= 1, "--draws must be at least 1");
     let spec = Sampler::from_arg(&args.sampler, &args.set)?;
+    let run = resolve_run(args, &spec)?;
     let init = parse_init(&args.init, args.chains)?;
     let seed = args.seed.unwrap_or_else(|| rand::random::<u32>() as u64);
     if let Some(d) = &args.data {
@@ -103,7 +131,16 @@ pub fn sample(args: &SampleArgs) -> anyhow::Result<Vec<PathBuf>> {
                 if i as u64 >= args.chains {
                     break;
                 }
-                let r = run_one_chain(args, &spec, &init, seed, i as u64 + 1, &lib, &prepared.stem);
+                let r = run_one_chain(
+                    args,
+                    &spec,
+                    run,
+                    &init,
+                    seed,
+                    i as u64 + 1,
+                    &lib,
+                    &prepared.stem,
+                );
                 results.lock().unwrap()[i] = Some(r);
             });
         }
@@ -124,10 +161,16 @@ fn data_arg(data: &Option<PathBuf>) -> anyhow::Result<Option<CString>> {
         .transpose()
 }
 
+/// The model's parameters, from BridgeStan's unconstrained names.
+pub fn model_params(model: &Model<Arc<StanLibrary>>) -> anyhow::Result<Vec<crate::blocks::Param>> {
+    crate::blocks::parameters(&names(model.param_unc_names()))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_one_chain(
     args: &SampleArgs,
     spec: &Sampler,
+    run: Run,
     init: &InitSpec,
     seed: u64,
     chain_id: u64,
@@ -151,27 +194,24 @@ fn run_one_chain(
         }
     };
     let param_names = names(model.param_names(true, true));
+    let params = model_params(&model)?;
     let model_name = model.name()?.to_string();
     let mut gq_rng = bridgestan::Rng::new(lib.clone(), gq_seed(seed, chain_id))?;
     let target = Arc::new(BridgeStanTarget { model });
     let dyn_target: Arc<dyn Target> = target.clone();
-    let mut kernel = spec.build(dyn_target, args.warmup, args.draws)?;
+    let built = spec.build_chain(dyn_target, &params, run.warmup, run.draws)?;
+    let mut kernel = built.kernel;
 
     let header = Header {
         model: model_name,
         chain_id,
         seed,
-        warmup: args.warmup,
-        draws: args.draws,
+        warmup: run.warmup,
+        draws: run.draws,
+        thin: run.thin,
         sampler: spec.name(),
         settings: spec.settings_text(),
-        // Level 1: one kernel over the whole model, i.e. `rest : <kernel>`.
-        kernels: vec![KernelLine {
-            label: "rest".to_string(),
-            name: kernel.name().to_string(),
-            version: kernel.version(),
-            source: kernel.source().into_owned(),
-        }],
+        kernels: built.lines,
     };
     let path = args.output_dir.join(format!("{stem}-{chain_id}.csv"));
     let file = std::io::BufWriter::new(std::fs::File::create(&path)?);
@@ -183,26 +223,31 @@ fn run_one_chain(
     // byte-identical across runs.
     let started = std::time::Instant::now();
     let warmup_done = std::cell::Cell::new(None);
+    let mut i = 0u64;
     let summary = run_chain(
         target.as_ref(),
         kernel.as_mut(),
         &init,
-        args.warmup,
-        args.draws,
+        run.warmup,
+        run.draws,
         &mut rng,
         |t| {
             warmup_done.set(Some(std::time::Instant::now()));
-            if adapted && args.warmup > 0 {
+            if adapted && run.warmup > 0 {
                 w.borrow_mut().comment_lines(&adaptation_lines(t))?;
             }
             Ok(())
         },
         |state, info, tuning| {
-            target
-                .model
-                .param_constrain(&state.q, true, true, &mut out, Some(&mut gq_rng))?;
-            w.borrow_mut()
-                .row(&sampler_values(state.lp, info, tuning), &out)?;
+            let keep = i.is_multiple_of(run.thin);
+            i += 1;
+            if keep {
+                target
+                    .model
+                    .param_constrain(&state.q, true, true, &mut out, Some(&mut gq_rng))?;
+                w.borrow_mut()
+                    .row(&sampler_values(state.lp, info, tuning), &out)?;
+            }
             Ok(())
         },
     )?;
@@ -212,8 +257,8 @@ fn run_one_chain(
     eprintln!(
         "chain {chain_id}: {} warmup + {} draws, {} + {} gradient evaluations; \
          {warmup_secs:.2} s warmup, {sampling:.2} s sampling ({:.1} us per gradient, sampler and output included)",
-        args.warmup,
-        args.draws,
+        run.warmup,
+        run.draws,
         summary.warmup_grads,
         summary.draw_grads,
         1e6 * sampling / summary.draw_grads.max(1) as f64
@@ -229,4 +274,47 @@ pub fn display(p: &Path) -> String {
         .unwrap_or_else(|| p.to_path_buf())
         .display()
         .to_string()
+}
+
+/// `laplace sampler check <file> [--model m --data d]`: a summary on
+/// success; every error (each `file:line:col`) on failure.
+pub fn check_sampler(
+    file: &Path,
+    model_path: Option<&Path>,
+    data: Option<&Path>,
+) -> anyhow::Result<String> {
+    let f = crate::lapsampler::SamplerFile::load(file).map_err(crate::lapsampler::errors)?;
+    let mut out = format!(
+        "ok: {} ({} kernel line(s); kernels resolve, settings and adapt() contracts check)",
+        f.path,
+        f.ast.lines.len()
+    );
+    match model_path {
+        None => {
+            out +=
+                "\nblocks not checked against a model: pass --model (and --data) to check coverage"
+        }
+        Some(m) => {
+            let stan = model::stan_file_for(m)?;
+            let prepared = model::prepare(&stan)?;
+            let lib = Arc::new(bridgestan::open_library(&prepared.library)?);
+            let data = data.map(Path::to_path_buf);
+            let model = Model::new(lib, data_arg(&data)?, 1)?;
+            let params = model_params(&model)?;
+            let blocks = f.blocks(&params).map_err(crate::lapsampler::errors)?;
+            for b in blocks {
+                out += &format!(
+                    "\n  block {}: {} ({} unconstrained coordinate(s))",
+                    b.label,
+                    b.params.join(", "),
+                    b.dim()
+                );
+            }
+            out += &format!(
+                "\nevery parameter of {} is in exactly one block",
+                stan.display()
+            );
+        }
+    }
+    Ok(out)
 }

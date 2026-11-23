@@ -38,6 +38,7 @@ pub struct Header {
     pub seed: u64,
     pub warmup: u64,
     pub draws: u64,
+    pub thin: u64,
     /// `--sampler` name.
     pub sampler: String,
     /// `key:value ...` of every resolved setting.
@@ -81,7 +82,7 @@ impl Header {
             format!("# num_samples = {}", self.draws),
             format!("# num_warmup = {}", self.warmup),
             "# save_warmup = false".to_string(),
-            "# thin = 1".to_string(),
+            format!("# thin = {}", self.thin),
             "# metric = diag_e".to_string(),
             format!("# id = {}", self.chain_id),
             format!("# seed = {}", self.seed),
@@ -214,6 +215,7 @@ mod tests {
             seed: 11,
             warmup: 100,
             draws: 50,
+            thin: 1,
             sampler: "mala".into(),
             settings: "adapt:true step_size:1 target_accept:0.574".into(),
             kernels: vec![KernelLine {

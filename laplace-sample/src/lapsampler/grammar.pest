@@ -1,0 +1,74 @@
+// The .lapsampler grammar (Phase 3.5):
+//
+//   sampler hybrid {
+//     library { import langevin }          // optional; used from Phase 4
+//     kernel {
+//       block(beta)              : nuts()
+//       block(sigma, tau) as sc  : adapt(mala(), target_accept = 0.57)
+//       rest                     : rwm()
+//     }
+//     warmup { iterations = 1000; }
+//     draws  { iterations = 1000; thin = 1; }
+//   }
+//
+// A kernel line is `<block> : <kernel expression>`; `kernel { }` is sugar
+// for seq(on(block, k), ...). Kernel expressions are built-in kernels with
+// optional settings (`mala(step_size = 0.1)`), local `.lapkernel` paths with
+// optional tuning values (`./kernels/mala.lapkernel(eps = 0.05)`), library
+// kernels (`langevin::mala`, Phase 4), and the combinators seq, mix, repeat,
+// adapt and on.
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT    = _{ ("//" ~ (!"\n" ~ ANY)*) | ("/*" ~ (!"*/" ~ ANY)* ~ "*/") }
+
+file    = { SOI ~ sampler ~ EOI }
+sampler = { kw_sampler ~ ident ~ "{" ~ section* ~ "}" }
+
+section       = _{ library_block | kernel_block | warmup_block | draws_block }
+library_block =  { kw_library ~ "{" ~ import* ~ "}" }
+import        =  { kw_import ~ ident ~ ("@" ~ version)? ~ ";"? }
+version       = @{ (ASCII_ALPHANUMERIC | "." | "-" | "+")+ }
+kernel_block  =  { kw_kernel ~ "{" ~ kernel_line* ~ "}" }
+warmup_block  =  { kw_warmup ~ "{" ~ setting* ~ "}" }
+draws_block   =  { kw_draws ~ "{" ~ setting* ~ "}" }
+setting       =  { ident ~ "=" ~ number ~ ";" }
+
+kernel_line = { line_target ~ ":" ~ kexpr ~ ";"? }
+line_target = { kw_rest | block_ref ~ (kw_as ~ ident)? }
+block_ref   = { kw_block ~ "(" ~ ident ~ ("," ~ ident)* ~ ")" }
+
+kexpr       = { seq_call | mix_call | repeat_call | adapt_call | on_call
+              | namespaced | path_ref | named_call }
+seq_call    = { kw_seq ~ "(" ~ kexpr ~ ("," ~ kexpr)* ~ ")" }
+mix_call    = { kw_mix ~ "(" ~ mix_item ~ ("," ~ mix_item)* ~ ")" }
+mix_item    = { number ~ ":" ~ kexpr }
+repeat_call = { kw_repeat ~ "(" ~ number ~ "," ~ kexpr ~ ")" }
+adapt_call  = { kw_adapt ~ "(" ~ kexpr ~ ("," ~ arg)* ~ ")" }
+on_call     = { kw_on ~ "(" ~ block_ref ~ "," ~ kexpr ~ ")" }
+namespaced  = { ident ~ "::" ~ ident ~ ("(" ~ args? ~ ")")? }
+path_ref    = { path ~ ("(" ~ args? ~ ")")? }
+path        = @{ ("./" | "../" | "/") ~ (!("(" | ")" | "," | ";" | " " | "\t" | "\r" | "\n") ~ ANY)+ }
+named_call  = { ident ~ "(" ~ args? ~ ")" }
+args        = { arg ~ ("," ~ arg)* }
+arg         = { ident ~ "=" ~ value }
+value       = { boolean | number }
+boolean     = @{ ("true" | "false") ~ !ident_char }
+number      = @{ "-"? ~ (ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT*)? | "." ~ ASCII_DIGIT+) ~ (^"e" ~ ("+" | "-")? ~ ASCII_DIGIT+)? }
+
+ident_char = _{ ASCII_ALPHANUMERIC | "_" }
+ident      = @{ (ASCII_ALPHA | "_") ~ ident_char* }
+
+kw_sampler = @{ "sampler" ~ !ident_char }
+kw_library = @{ "library" ~ !ident_char }
+kw_import  = @{ "import" ~ !ident_char }
+kw_kernel  = @{ "kernel" ~ !ident_char }
+kw_warmup  = @{ "warmup" ~ !ident_char }
+kw_draws   = @{ "draws" ~ !ident_char }
+kw_rest    = @{ "rest" ~ !ident_char }
+kw_as      = @{ "as" ~ !ident_char }
+kw_block   = @{ "block" ~ !ident_char }
+kw_seq     = @{ "seq" ~ !ident_char }
+kw_mix     = @{ "mix" ~ !ident_char }
+kw_repeat  = @{ "repeat" ~ !ident_char }
+kw_adapt   = @{ "adapt" ~ !ident_char }
+kw_on      = @{ "on" ~ !ident_char }

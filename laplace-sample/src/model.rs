@@ -222,10 +222,11 @@ pub fn prepare_with(
     std::fs::create_dir_all(&staging)?;
     let staged = staging.join(format!("{stem}.stan"));
     std::fs::copy(stan, &staged)?;
-    let src_dir = stan
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+    // A bare file name's parent is the *empty* path, not None.
+    let src_dir = match stan.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
     let built = match compile(&staged, &src_dir.canonicalize()?) {
         Ok(p) => p,
         Err(e) => {
@@ -358,6 +359,22 @@ mod tests {
         assert_ne!(k(&gcc), k(&clang));
         assert_ne!(k(&gcc), k(&local));
         assert_eq!(k(&gcc), k(&gcc));
+    }
+
+    #[test]
+    fn a_bare_relative_file_name_builds() {
+        // `laplace sampler check x.lapsampler --model m.stan` from m.stan's
+        // own directory: the parent of "m.stan" is the empty path.
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("cache");
+        std::fs::write(tmp.path().join("m.stan"), "model {}").unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let calls = Cell::new(0);
+        let r = prepare_with(Path::new("m.stan"), &cache, &[], fake_compile(&calls));
+        std::env::set_current_dir(cwd).unwrap();
+        r.unwrap();
+        assert_eq!(calls.get(), 1);
     }
 
     #[test]

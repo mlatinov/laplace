@@ -355,6 +355,16 @@ impl SamplerSpec {
 pub enum Sampler {
     BuiltIn(SamplerSpec),
     File(FileSampler),
+    /// A `.lapsampler` (Level 2): kernels composed over parameter blocks.
+    Composite(Arc<crate::lapsampler::SamplerFile>),
+}
+
+/// One chain's kernel tree, with what the CSV header and columns need.
+pub struct ChainKernel {
+    pub kernel: Box<dyn Kernel>,
+    pub lines: Vec<crate::csv::KernelLine>,
+    /// Block labels in update order; empty for a kernel on the whole model.
+    pub blocks: Vec<String>,
 }
 
 /// A `.lapkernel` file plus its `--set` values.
@@ -373,6 +383,15 @@ pub struct FileSampler {
 impl Sampler {
     /// `--sampler` value: a path ending in `.lapkernel`, or a built-in name.
     pub fn from_arg(arg: &str, sets: &[String]) -> anyhow::Result<Self> {
+        if arg.ends_with(".lapsampler") {
+            anyhow::ensure!(
+                sets.is_empty(),
+                "--set does not apply to a .lapsampler: kernel settings go in the file, e.g. mala(step_size = 0.1)"
+            );
+            let f = crate::lapsampler::SamplerFile::load(std::path::Path::new(arg))
+                .map_err(crate::lapsampler::errors)?;
+            return Ok(Sampler::Composite(Arc::new(f)));
+        }
         if !arg.ends_with(".lapkernel") {
             return Ok(Sampler::BuiltIn(SamplerSpec::new(
                 BuiltIn::parse(arg)?,
@@ -437,6 +456,7 @@ impl Sampler {
     /// step size and metric, as CmdStan does).
     pub fn adapts(&self) -> bool {
         match self {
+            Sampler::Composite(_) => false, // per-block tuning: see the stepsize_<label>__ columns
             Sampler::BuiltIn(s) => s.kind == BuiltIn::Nuts || s.bool("adapt").unwrap_or(false),
             Sampler::File(f) => {
                 f.adapt
@@ -451,11 +471,55 @@ impl Sampler {
         match self {
             Sampler::BuiltIn(s) => s.kind.name().to_string(),
             Sampler::File(f) => f.file.path.clone(),
+            Sampler::Composite(f) => f.path.clone(),
         }
+    }
+
+    /// The file's `warmup`/`draws`/`thin` (defaults the CLI overrides).
+    pub fn file_run(&self) -> (Option<u64>, Option<u64>, Option<u64>) {
+        match self {
+            Sampler::Composite(f) => (f.warmup(), f.draws(), f.thin()),
+            _ => (None, None, None),
+        }
+    }
+
+    /// One chain's kernel tree. `params` are the model's parameters (only
+    /// a `.lapsampler` uses them).
+    pub fn build_chain(
+        &self,
+        target: Arc<dyn Target>,
+        params: &[crate::blocks::Param],
+        warmup: u64,
+        draws: u64,
+    ) -> anyhow::Result<ChainKernel> {
+        if let Sampler::Composite(f) = self {
+            let b = f.instantiate(params, target, warmup, draws)?;
+            return Ok(ChainKernel {
+                kernel: b.kernel,
+                lines: b.lines,
+                blocks: b.labels,
+            });
+        }
+        let kernel = self.build(target, warmup, draws)?;
+        // Level 1: one kernel over the whole model, i.e. `rest : <kernel>`.
+        let lines = vec![crate::csv::KernelLine {
+            label: "rest".to_string(),
+            name: kernel.name().to_string(),
+            version: kernel.version(),
+            source: kernel.source().into_owned(),
+        }];
+        Ok(ChainKernel {
+            kernel,
+            lines,
+            blocks: vec![],
+        })
     }
 
     pub fn settings_text(&self) -> String {
         match self {
+            Sampler::Composite(f) => {
+                format!("file_sha256:{}", crate::sha256_hex(f.source.as_bytes()))
+            }
             Sampler::BuiltIn(s) => s.settings_text(),
             Sampler::File(f) => {
                 let mut items: Vec<String> = vec![format!("adapt:{}", f.adapt)];
@@ -480,6 +544,9 @@ impl Sampler {
         let f = match self {
             Sampler::BuiltIn(s) => return s.build(target, warmup, draws),
             Sampler::File(f) => f,
+            Sampler::Composite(f) => {
+                anyhow::bail!("{} needs the model's parameters: use build_chain", f.path)
+            }
         };
         let kernel = InterpretedKernel::new(f.file.clone(), target.dim(), &f.sets)?;
         let adaptable = kernel.adapts(AdaptKind::StepSize) || kernel.adapts(AdaptKind::Metric);
