@@ -5,7 +5,10 @@
 //!   and the `Kernel` implementation (2.4) build on it.
 
 pub mod ast;
+pub mod builtins;
+pub mod check;
 pub mod parse;
+pub mod types;
 
 use std::fmt;
 
