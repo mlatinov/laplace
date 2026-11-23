@@ -1,0 +1,90 @@
+# Editor support: the `laplace_sample::editor` API
+
+Custom samplers are **experimental** in laplace 0.3.0.
+
+An editor integration (the laplace language server in `laplace_tools`, for
+example) can report errors in `.lapkernel` and `.lapsampler` files as they
+are typed, by calling one Rust library API. This document describes that
+API. It does not describe any LSP features: none are built here.
+
+## What it needs
+
+- The `laplace-sample` crate as a library dependency (crate name
+  `laplace_sample`).
+- **No BridgeStan, no C++ toolchain, no compiled model.**
+  - The `bridgestan` crate is compiled in, but it loads BridgeStan only at
+    run time and only when sampling, which these functions never do.
+  - Nothing is downloaded or built.
+
+## The API
+
+```rust
+use laplace_sample::editor::{check_lapkernel, check_lapsampler, Diagnostic, Project, Severity};
+
+// A .lapkernel, as the editor holds it (unsaved text is fine).
+let ds: Vec<Diagnostic> = check_lapkernel("kernels/mala.lapkernel", &text, None);
+
+// A .lapsampler. `dir` is the file's directory (local kernel paths resolve
+// against it); `project` says where laplace.lock is and where packages are
+// installed, for `library { import ... }`.
+let project = Project { dir: workspace_root, cache_root: home.join(".laplace/packages") };
+let ds = check_lapsampler("samplers/hybrid.lapsampler", &text, &dir, &project);
+```
+
+`Project::current()` gives the command-line behaviour: the current directory
+and `~/.laplace/packages`.
+
+### `Diagnostic`
+
+| Field | Meaning |
+| --- | --- |
+| `file` | The file the problem is in. Usually the path you passed. A `.lapsampler` diagnostic about a library kernel names it `<package>/kernels/<name>.lapkernel`, never a machine-specific cache path. |
+| `line`, `column` | 1-based; columns count characters. Where the problem **starts**: a point, not a range. Highlight the token or line there. `0, 0` means the whole file (it could not be read). |
+| `severity` | `Error` or `Warning`. Every diagnostic today is an `Error`: the file would be refused by `laplace sample`. `Warning` is in the API so adding warnings later is not a breaking change. |
+| `message` | One line, apart from one case below. |
+
+**The multi-line case:** a `.lapsampler` that refers to a kernel file that
+does not check gets one diagnostic at the reference. Its message is
+`<kernel> does not check:`, followed by that kernel's own diagnostics, one
+per indented line, each with its own `file:line:column`. An editor can show
+the first line at the reference and offer the rest as related information,
+or call `check_lapkernel` on that file directly.
+
+Diagnostics come sorted by file and position.
+
+### What is checked
+
+- **`check_lapkernel`:**
+  - syntax, where a syntax error stops parsing, so there is exactly one;
+  - types;
+  - names, including built-ins from the kernel context;
+  - `propose()`/`move()` ending the step;
+  - the tuning/state/init rules;
+  - `@adapt` tags, including the required `target_accept`.
+
+  `dim` is the size of the block the kernel will update. Pass `None` in an
+  editor; it only sharpens size checks.
+- **`check_lapsampler`:**
+  - syntax and structure: duplicate sections, `rest` last, unique labels;
+  - run settings;
+  - built-in kernels and their settings;
+  - local `.lapkernel` files, read from disk relative to `dir` and checked;
+  - library kernels: `import` resolved in `project`'s `laplace.lock`,
+    exactly as `laplace sample` resolves them; a path dependency is
+    re-synced into the cache;
+  - the `adapt()` contracts;
+  - `nuts()` not under `mix()`.
+
+### What is not checked
+
+**Block coverage** is not checked: every model parameter in exactly one
+block (D2). It needs the model's parameter list, which means compiling the
+model with BridgeStan. `laplace sampler check file.lapsampler --model
+model.laplace` does it on the command line.
+
+## Stability
+
+These two functions, `Diagnostic`, `Severity` and `Project` are the
+supported surface. Everything else in `laplace_sample` is internal and may
+change. Message wording may change; positions and severities are tested
+(`laplace-sample/src/editor.rs`).

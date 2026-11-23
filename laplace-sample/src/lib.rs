@@ -16,6 +16,7 @@ pub mod combinators;
 pub mod compiler;
 pub mod csv;
 pub mod diagnostics;
+pub mod editor;
 pub mod kernel;
 pub mod kernels;
 pub mod lapkernel;
