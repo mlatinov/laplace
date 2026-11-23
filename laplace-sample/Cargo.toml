@@ -19,7 +19,9 @@ pest_derive = "2.9"
 # crate's FFI matches exactly one BridgeStan release's C header (D9).
 bridgestan = "=2.9.0"
 clap = { version = "4", features = ["derive"] }
-# Upstream nuts-rs, unpatched: Phase 1 runs NUTS on the whole model only (Q2).
+# nuts-rs 0.19.1 plus Chain::refresh_position: the workspace root patches
+# this to the in-repo copy in vendor/ (Q2, vendor/VENDORED.md); nuts() as one
+# block of a sweep needs it (Phase 3.4).
 nuts-rs = "=0.19.1"
 rand = { version = "0.10", features = ["chacha"] }
 rand_distr = "0.6"

@@ -5,20 +5,6 @@ and a recommendation. Answered questions move to the bottom with the answer.
 
 ## Open
 
-### Q2 — How to carry the nuts-rs `refresh_position` patch (D8) — **deferred to Phase 3**
-nuts-rs's `set_position` re-initialises step size and mass matrix, which
-biases block sweeps (Phase 0 report, 0.5). A 5-line `Chain::refresh_position`
-fixes it.
-- (a) Open an upstream PR to `pymc-devs/nuts-rs`, and depend on a pinned git fork until it merges.
-- (b) Keep a vendored copy permanently.
-- (c) Port NUTS.
-
-**Status (after STOP 0):** deferred. Phase 1 runs NUTS on the whole model
-only, so it uses **upstream nuts-rs, unpatched**. Do not contact upstream. The
-vendored patch stays on the spike branch (`sampler/phase-0`,
-`spikes/sampler-phase0/vendor/`) for Phase 3.4, where this question is
-decided.
-
 ### Q11 — Post-v1 built-ins for the kernel context (Phase 2.3)
 The built-in kernel context is one registry
 (`laplace-sample/src/lapkernel/builtins.rs`). Each entry is a name, a type
@@ -38,38 +24,33 @@ addition. **Not in v1**, recorded as candidates:
 **Recommendation:** add them only when a kernel needs one, each with
 registry unit tests (value and RNG use) like the v1 entries.
 
-### Q12 — The `mala` Metropolis-ratio regrouping (Phase 2.5)
-To make the adapted `.lapkernel` twin bit-identical, the Rust `mala` now
-groups its ratio as `(lp' - lp) + (B - A)` (the `propose()` form) instead of
-`lp' - lp - A + B`. The mathematics and the RNG call order are unchanged;
-only rounding (~1e-16) changes. Without it, dual averaging amplified the
-rounding difference past 1e-10 within ~100 warmup iterations.
-- (a) Keep the regrouping.
-- (b) Revert it; the adapted MALA twin then matches only in distribution.
-
-**Recommendation: (a).**
-
-### Q13 — `metric` in the context vs `@adapt(metric)` (Phase 2.3)
-The context's `metric` is the kernel's `@adapt(metric)` tuning value if it
-has one, else all ones.
-- (a) Keep that.
-- (b) Drop the context entry; kernels always declare their metric.
-- (c) Make `metric` the only metric and let `@adapt(metric)` stand alone.
-
-**Recommendation: (a).**
-
-### Q14 — Default `target_accept` for a `.lapkernel` (Phase 2.4)
-A kernel with `@adapt(step_size)` and no `target_accept` adapts toward 0.8
-(Stan's `adapt_delta`).
-- (a) Keep 0.8.
-- (b) Require `@adapt(step_size, target_accept = ...)` whenever step size is
-  adapted.
-
-**Recommendation: (b).** The right target is kernel-specific (0.234 RWM,
-0.574 MALA, ~0.8 HMC), and a silent 0.8 is wrong for most single-proposal
-kernels.
-
 ## Answered
+
+### Q2 — How to carry the nuts-rs `refresh_position` patch
+**Answer (Phase 3):** vendor nuts-rs with the patch inside the repo, keeping
+its MIT license file; no GitHub fork, no contact with upstream. Whether to
+upstream it or keep a fork is decided before merge.
+**Done:** `laplace-sample/vendor/nuts-rs-0.19.1` (+ `VENDORED.md` and the
+patch), wired as `nuts-rs = "=0.19.1"` patched to the vendored copy by the
+workspace root's `[patch.crates-io]`, so it is not a workspace member and
+fmt/clippy never touch upstream code.
+
+### Q12 — The `mala` Metropolis-ratio regrouping
+**Answer:** not reviewed; go with the recommendation unless it affects
+Phase 3. It does not (it only changes rounding inside `mala`), so (a): the
+regrouping stays. Explained in the Phase 3 report.
+
+### Q13 — `metric` in the context
+**Answer:** (a). Context `metric` is the kernel's own `@adapt(metric)` value,
+else all ones. In Phase 3 it is per block, sized to the block dimension.
+
+### Q14 — `target_accept` for a `.lapkernel`
+**Answer:** (b), required. `@adapt(step_size, target_accept = 0.574)` carries
+the author's default; `adapt(k, target_accept = ...)` in a `.lapsampler`
+overrides it; a missing one is a check error.
+**Done:** the `.lapkernel` checker rejects `@adapt(step_size)` without
+`target_accept` (so `laplace sampler check` reports it); the 0.8 fallback is
+gone.
 
 ### Q6 — CI for `laplace-sample`
 **Answer:** CI runs clippy and the fast `laplace-sample` tests on every push;

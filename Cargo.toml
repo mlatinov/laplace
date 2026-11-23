@@ -5,6 +5,14 @@ members = [".", "laplace-sample"]
 # Phase 0 spike crates carry their own [workspace] and are never members.
 exclude = ["spikes"]
 
+# laplace-sample's nuts-rs = "=0.19.1" is the vendored, patched copy (Q2,
+# laplace-sample/vendor/VENDORED.md). A [patch] source is not a workspace
+# member, so fmt and clippy leave the upstream code alone (a plain path
+# dependency inside the workspace would be a member; `exclude` cannot
+# change that).
+[patch.crates-io]
+nuts-rs = { path = "laplace-sample/vendor/nuts-rs-0.19.1" }
+
 [package]
 name = "laplace"
 version = "0.2.0"
