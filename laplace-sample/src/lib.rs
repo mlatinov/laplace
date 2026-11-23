@@ -11,6 +11,7 @@
 pub mod adapt;
 pub mod bridgestan_src;
 pub mod csv;
+pub mod diagnostics;
 pub mod kernel;
 pub mod kernels;
 pub mod model;
