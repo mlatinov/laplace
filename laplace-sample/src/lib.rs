@@ -11,6 +11,7 @@
 pub mod adapt;
 pub mod blocks;
 pub mod bridgestan_src;
+pub mod combinators;
 pub mod compiler;
 pub mod csv;
 pub mod diagnostics;

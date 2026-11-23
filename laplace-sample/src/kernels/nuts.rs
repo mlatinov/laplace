@@ -210,7 +210,7 @@ impl Kernel for Nuts {
             energy: Some(kinetic_energy - stats.point.logp),
             treedepth: Some(stats.depth),
             n_leapfrog: Some(progress.num_steps),
-            extra: vec![],
+            ..Default::default()
         })
     }
 

@@ -29,6 +29,19 @@ pub struct StepInfo {
     pub treedepth: Option<u64>,
     pub n_leapfrog: Option<u64>,
     pub extra: Vec<(&'static str, f64)>,
+    /// Per-block statistics of a composite step (Phase 3), in the order the
+    /// blocks were updated; empty for a kernel on the whole model.
+    pub blocks: Vec<BlockInfo>,
+}
+
+/// One block update inside a composite step.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BlockInfo {
+    pub label: String,
+    /// The block kernel's own statistics (its `blocks` is empty).
+    pub info: StepInfo,
+    /// The block kernel's step size when it ran.
+    pub step_size: Option<f64>,
 }
 
 /// The values adaptation may change. Named after the `@adapt` tags of the
@@ -81,6 +94,19 @@ pub trait Kernel {
     /// runner must not wrap it in [`crate::adapt::Adapter`].
     fn adapts_itself(&self) -> bool {
         false
+    }
+
+    /// Called exactly once, after the last warmup step and before the first
+    /// saved one. Adaptation freezes here; combinators pass it on.
+    fn end_warmup(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Every component's tuning, each with its path in the kernel tree
+    /// (`seq[1]/on(beta)/mala`). The "never re-tune after warmup" tests
+    /// compare this at every saved iteration.
+    fn tunings(&self) -> Vec<(String, Tuning)> {
+        vec![(self.name().to_string(), self.tuning())]
     }
 }
 
