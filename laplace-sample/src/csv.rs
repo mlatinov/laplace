@@ -146,6 +146,88 @@ fn opt_u(x: Option<u64>) -> String {
         .unwrap_or_else(|| "NaN".to_string())
 }
 
+/// The per-block diagnostic columns of a composite sampler (Phase 3.6):
+/// six per block, in block order, after [`SAMPLER_COLUMNS`].
+pub const BLOCK_STATS: [&str; 6] = [
+    "accept_stat",
+    "stepsize",
+    "divergent",
+    "energy",
+    "treedepth",
+    "n_leapfrog",
+];
+
+pub fn block_columns(labels: &[String]) -> Vec<String> {
+    labels
+        .iter()
+        .flat_map(|l| BLOCK_STATS.iter().map(move |s| format!("{s}_{l}__")))
+        .collect()
+}
+
+/// One block's statistics this iteration: all its updates folded together
+/// (gradients and leapfrog steps add, acceptance averages, a divergence
+/// counts, tree depth is the largest, energy and step size the last).
+fn block_stats(info: &StepInfo, label: &str) -> (StepInfo, Option<f64>) {
+    let mine: Vec<&crate::kernel::BlockInfo> =
+        info.blocks.iter().filter(|b| b.label == label).collect();
+    let folded = crate::combinators::fold(&mine.iter().map(|b| b.info.clone()).collect::<Vec<_>>());
+    (folded, mine.iter().rev().find_map(|b| b.step_size))
+}
+
+pub fn block_values(info: &StepInfo, labels: &[String]) -> Vec<String> {
+    let mut out = vec![];
+    for l in labels {
+        let (s, eps) = block_stats(info, l);
+        out.push(opt_f(s.accept_prob));
+        out.push(opt_f(eps));
+        out.push(opt_u(s.divergent.map(u64::from)));
+        out.push(opt_f(s.energy));
+        out.push(opt_u(s.treedepth));
+        out.push(opt_u(s.n_leapfrog));
+    }
+    out
+}
+
+/// The standard columns of a composite row: NaN where a single value
+/// cannot describe several kernels, except `divergent__` (a divergence in
+/// any block, so cmdstanr's count stays meaningful) and `n_grad__` (total).
+pub fn composite_values(lp: f64, info: &StepInfo) -> Vec<String> {
+    let divergent = info
+        .blocks
+        .iter()
+        .filter_map(|b| b.info.divergent)
+        .reduce(|a, b| a || b);
+    vec![
+        num(lp),
+        "NaN".into(),
+        "NaN".into(),
+        "NaN".into(),
+        "NaN".into(),
+        opt_u(divergent.map(u64::from)),
+        "NaN".into(),
+        info.n_grad.to_string(),
+    ]
+}
+
+/// A single block covering the whole model writes its own statistics in
+/// the standard columns, unsuffixed, so `diagnostic_summary()` works.
+pub fn single_block_values(lp: f64, info: &StepInfo) -> Vec<String> {
+    let (s, eps) = match info.blocks.first() {
+        Some(b) => (b.info.clone(), b.step_size),
+        None => (info.clone(), None),
+    };
+    vec![
+        num(lp),
+        opt_f(s.accept_prob),
+        opt_f(eps),
+        opt_u(s.treedepth),
+        opt_u(s.n_leapfrog),
+        opt_u(s.divergent.map(u64::from)),
+        opt_f(s.energy),
+        info.n_grad.to_string(),
+    ]
+}
+
 /// The sampler columns of one row, in [`SAMPLER_COLUMNS`] order.
 pub fn sampler_values(lp: f64, info: &StepInfo, tuning: &Tuning) -> Vec<String> {
     vec![
@@ -165,11 +247,23 @@ pub struct Writer<W: Write> {
 }
 
 impl<W: Write> Writer<W> {
-    pub fn new(mut out: W, header: &Header, param_names: &[String]) -> std::io::Result<Self> {
+    pub fn new(out: W, header: &Header, param_names: &[String]) -> std::io::Result<Self> {
+        Self::with_block_columns(out, header, &[], param_names)
+    }
+
+    /// Standard columns, then `block_cols` (per-block diagnostics), then the
+    /// model's quantities.
+    pub fn with_block_columns(
+        mut out: W,
+        header: &Header,
+        block_cols: &[String],
+        param_names: &[String],
+    ) -> std::io::Result<Self> {
         for l in header.lines() {
             writeln!(out, "{l}")?;
         }
         let mut cols: Vec<String> = SAMPLER_COLUMNS.iter().map(|s| s.to_string()).collect();
+        cols.extend(block_cols.iter().cloned());
         cols.extend(param_names.iter().cloned());
         writeln!(out, "{}", cols.join(","))?;
         Ok(Self { out })
@@ -280,6 +374,80 @@ mod tests {
         assert_eq!(
             sampler_values(-1.5, &info, &t),
             vec!["-1.5", "0.5", "0.25", "NaN", "NaN", "NaN", "NaN", "1"]
+        );
+    }
+
+    fn block(
+        label: &str,
+        accept: f64,
+        div: Option<bool>,
+        n_grad: u64,
+        eps: f64,
+    ) -> crate::kernel::BlockInfo {
+        crate::kernel::BlockInfo {
+            label: label.into(),
+            info: StepInfo {
+                accept_prob: Some(accept),
+                divergent: div,
+                n_grad,
+                n_leapfrog: div.map(|_| 7),
+                treedepth: div.map(|_| 3),
+                energy: div.map(|_| 1.5),
+                ..Default::default()
+            },
+            step_size: Some(eps),
+        }
+    }
+
+    #[test]
+    fn per_block_columns_and_values() {
+        let labels: Vec<String> = vec!["beta".into(), "sc".into()];
+        assert_eq!(
+            block_columns(&labels)[..6],
+            [
+                "accept_stat_beta__",
+                "stepsize_beta__",
+                "divergent_beta__",
+                "energy_beta__",
+                "treedepth_beta__",
+                "n_leapfrog_beta__"
+            ]
+        );
+        assert_eq!(block_columns(&labels).len(), 12);
+        // beta: nuts (divergence applies); sc: mala, updated twice (repeat).
+        let info = StepInfo {
+            n_grad: 12,
+            blocks: vec![
+                block("beta", 0.9, Some(true), 8, 0.4),
+                block("sc", 0.2, None, 2, 1.1),
+                block("sc", 0.6, None, 2, 1.1),
+            ],
+            ..Default::default()
+        };
+        let v = block_values(&info, &labels);
+        assert_eq!(v[..6], ["0.9", "0.4", "1", "1.5", "3", "7"]);
+        assert_eq!(
+            v[6..],
+            ["0.4", "1.1", "NaN", "NaN", "NaN", "NaN"],
+            "mean acceptance; NaN where n/a"
+        );
+        assert_eq!(
+            composite_values(-2.0, &info),
+            vec!["-2", "NaN", "NaN", "NaN", "NaN", "1", "NaN", "12"],
+            "divergent__ = any block; n_grad__ = total"
+        );
+    }
+
+    #[test]
+    fn a_single_block_writes_unsuffixed_columns() {
+        let info = StepInfo {
+            n_grad: 8,
+            blocks: vec![block("rest", 0.8, Some(false), 8, 0.3)],
+            ..Default::default()
+        };
+        assert_eq!(
+            single_block_values(-1.0, &info),
+            vec!["-1", "0.8", "0.3", "3", "7", "0", "1.5", "8"]
         );
     }
 

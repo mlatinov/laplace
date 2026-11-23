@@ -1,0 +1,7 @@
+// Phase 3.6: one block covering the whole model writes the standard,
+// unsuffixed columns, so cmdstanr's diagnostic_summary() works.
+sampler single_nuts {
+  kernel {
+    rest : nuts()
+  }
+}

@@ -115,7 +115,7 @@ pub fn run_chain(
     warmup: u64,
     draws: u64,
     rng: &mut ChainRng,
-    mut on_end_of_warmup: impl FnMut(&Tuning) -> anyhow::Result<()>,
+    mut on_end_of_warmup: impl FnMut(&dyn Kernel) -> anyhow::Result<()>,
     mut on_draw: impl FnMut(&ChainState, &StepInfo, &Tuning) -> anyhow::Result<()>,
 ) -> anyhow::Result<ChainSummary> {
     let mut ev = Evaluator::new(target);
@@ -125,7 +125,7 @@ pub fn run_chain(
     for it in 0..warmup + draws {
         if it == warmup {
             kernel.end_warmup()?;
-            on_end_of_warmup(&kernel.tuning())?;
+            on_end_of_warmup(&*kernel)?;
         }
         let tuning = kernel.tuning();
         let info = kernel.step(&mut state, &mut ev, rng)?;
@@ -138,7 +138,7 @@ pub fn run_chain(
     }
     if draws == 0 {
         kernel.end_warmup()?;
-        on_end_of_warmup(&kernel.tuning())?;
+        on_end_of_warmup(&*kernel)?;
     }
     Ok(ChainSummary {
         final_tuning: kernel.tuning(),
@@ -365,6 +365,8 @@ pub struct ChainKernel {
     pub lines: Vec<crate::csv::KernelLine>,
     /// Block labels in update order; empty for a kernel on the whole model.
     pub blocks: Vec<String>,
+    /// Each block's number of unconstrained coordinates.
+    pub block_dims: Vec<usize>,
 }
 
 /// A `.lapkernel` file plus its `--set` values.
@@ -498,6 +500,7 @@ impl Sampler {
                 kernel: b.kernel,
                 lines: b.lines,
                 blocks: b.labels,
+                block_dims: b.dims,
             });
         }
         let kernel = self.build(target, warmup, draws)?;
@@ -512,6 +515,7 @@ impl Sampler {
             kernel,
             lines,
             blocks: vec![],
+            block_dims: vec![],
         })
     }
 
