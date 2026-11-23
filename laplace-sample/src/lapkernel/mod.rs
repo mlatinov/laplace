@@ -7,6 +7,7 @@
 pub mod ast;
 pub mod builtins;
 pub mod check;
+pub mod interp;
 pub mod parse;
 pub mod types;
 
@@ -268,3 +269,6 @@ kernel everything {
         );
     }
 }
+
+#[cfg(test)]
+mod tests;

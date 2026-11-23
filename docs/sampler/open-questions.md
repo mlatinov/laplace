@@ -19,6 +19,25 @@ vendored patch stays on the spike branch (`sampler/phase-0`,
 `spikes/sampler-phase0/vendor/`) for Phase 3.4, where this question is
 decided.
 
+### Q11 — Post-v1 built-ins for the kernel context (Phase 2.3)
+The built-in kernel context is one registry
+(`laplace-sample/src/lapkernel/builtins.rs`). Each entry is a name, a type
+rule, an implementation and its documented RNG use, so each of these is one
+addition. **Not in v1**, recorded as candidates:
+- `hessian(vector x)`: the dense Hessian at x (BridgeStan
+  `log_density_hessian`). Opens Riemannian/Newton-type kernels; cost is
+  O(dim) gradients or autodiff Hessian, so it needs a documented cost model.
+- `hessian_vector_product(vector x, vector v)`: BridgeStan
+  `log_density_hessian_vector_product`. Cheaper than the full Hessian.
+- `is_warmup`: int, 1 during warmup. Lets a kernel behave differently while
+  adapting. Note the Phase 0 lesson: anything that changes behaviour after
+  warmup based on the current state breaks invariance, so a kernel using it
+  must not re-tune after warmup.
+- `iteration`: int, the iteration number. Same caution as `is_warmup`.
+
+**Recommendation:** add them only when a kernel needs one, each with
+registry unit tests (value and RNG use) like the v1 entries.
+
 ## Answered
 
 ### Q6 — CI for `laplace-sample`
