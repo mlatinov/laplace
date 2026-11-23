@@ -9,6 +9,10 @@ publish = false
 
 [dependencies]
 bridgestan = "=2.9.0"
+nuts-rs = "=0.19.1"
 rand = { version = "0.10", features = ["chacha"] }
 anyhow = "1"
 
+# 0.5 experiment: nuts-rs 0.19.1 + one added method (Chain::refresh_position).
+[patch.crates-io]
+nuts-rs = { path = "vendor/nuts-rs-0.19.1" }
