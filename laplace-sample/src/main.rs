@@ -6,6 +6,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+use laplace_sample::runner::BuiltIn;
+use laplace_sample::sample::{display, sample, SampleArgs};
+
 #[derive(Parser)]
 #[command(
     name = "laplace-sample",
@@ -63,7 +66,47 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    let Command::Sample { .. } = Cli::parse().command;
-    eprintln!("error: laplace-sample: sampling is not wired up yet in this build");
-    ExitCode::FAILURE
+    let Command::Sample {
+        model,
+        data,
+        sampler,
+        chains,
+        parallel_chains,
+        warmup,
+        draws,
+        seed,
+        init,
+        set,
+        output_dir,
+    } = Cli::parse().command;
+    let args = SampleArgs {
+        model,
+        data,
+        sampler,
+        chains,
+        parallel_chains,
+        warmup,
+        draws,
+        seed,
+        init,
+        set,
+        output_dir,
+    };
+    // Fail on a bad --sampler before compiling anything.
+    if let Err(e) = BuiltIn::parse(&args.sampler) {
+        eprintln!("error: {e}");
+        return ExitCode::FAILURE;
+    }
+    match sample(&args) {
+        Ok(paths) => {
+            for p in paths {
+                println!("{}", display(&p));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
 }
