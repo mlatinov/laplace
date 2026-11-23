@@ -8,6 +8,9 @@
 //! The `laplace` compiler never links this crate; `laplace sample ...` finds
 //! the `laplace-sample` binary on `PATH` and forwards its arguments (D1).
 
+pub mod bridgestan_src;
+pub mod model;
+
 /// Version recorded in every CSV this binary writes.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
