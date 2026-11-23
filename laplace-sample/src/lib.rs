@@ -9,7 +9,10 @@
 //! the `laplace-sample` binary on `PATH` and forwards its arguments (D1).
 
 pub mod bridgestan_src;
+pub mod kernel;
 pub mod model;
+pub mod state;
+pub mod target;
 
 /// Version recorded in every CSV this binary writes.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
