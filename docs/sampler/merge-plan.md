@@ -18,7 +18,7 @@ ancestor of it, so the merge can be a fast-forward.
 | `sampler/phase-2` (pushed) | 33 | superseded: delete locally and on `origin` |
 | `sampler/phase-3` (pushed) | 43 | superseded: delete locally and on `origin` |
 | `sampler/phase-4` | 53 | superseded: delete |
-| `sampler/phase-5` | 61 at the time of writing (plus the report commits) | **merge this one** |
+| `sampler/phase-5` | 65 at the time of writing | **merge this one** |
 
 The other local branches (`ecosystem-test-fixes`,
 `patch-1-visibility-hofs-templates-macros`, `patch-1.1-availability-support`)
@@ -112,12 +112,42 @@ and `release.yml` are untouched):
   0.3.0 (Q20). It appears in `laplace-sample --version` and in built-in
   kernels' CSV provenance.
 
-## The R wrapper (`cmdlaplacer`, separate repo)
+## The R wrapper: `cmdlaplacer` merges together with this
 
-Branch `laplace-sample` holds `laplace_sample()` (`1ff42c7`, `c5144f2`,
-`c3dbd86`). It shells out to `laplace sample`, so it works with any compiler
-that dispatches to `laplace-sample`. Merge it after the laplace merge. Its
-docs should carry the same "experimental" label.
+`cmdlaplacer`'s branch `laplace-sample` (three commits on its `main`) adds
+`laplace_sample()`:
+
+- `1ff42c7`: `laplace_sample()` runs a model with a custom sampler and
+  returns a cmdstanr fit.
+- `c5144f2`: it builds the "diagnostics that don't apply" note from the
+  data.
+- `c3dbd86`: it documents `n_logp__`.
+
+**The two merge together.** `laplace_sample()` exists to call
+`laplace-sample`, and its docs describe what this branch's `laplace-sample`
+writes. Merge `cmdlaplacer`'s `laplace-sample` branch into its `main` in the
+same session as the laplace merge, with the same "experimental" label in
+its docs. Neither is useful released without the other.
+
+| `cmdlaplacer` | needs `laplace-sample` | why |
+| --- | --- | --- |
+| `main` today (no `laplace_sample()`) | none | |
+| `main` after this merge (`laplace_sample()`) | **0.3.0 or newer** | It relies on `sample` with `--warmup`, `--draws`, `--set` and `--output-dir`; CSV paths on stdout; NaN in columns a sampler doesn't have (its diagnostics note); and the `n_logp__` column its docs describe, which first appears in 0.3.0. There is no earlier released `laplace-sample`: 0.3.0 is the first. |
+
+**Checked:** `cmdlaplacer`'s `laplace_sample()` tests, run against the
+0.3.0 binary built from this branch, all pass, including the ones that
+run real chains (they skip when no `laplace-sample` is on PATH).
+
+**Bump `cmdlaplacer`'s `DESCRIPTION` version when merging.** It is
+`0.0.0.9000` on both branches. The first version with `laplace_sample()`
+should say "requires laplace-sample >= 0.3.0" in its docs and NEWS.
+
+**A gap to close:** `laplace_sample()` calls `laplace-sample` directly
+(`Sys.which`), not through `laplace`. So the compiler's version-mismatch
+warning (Q20) does not cover R users. Recommended follow-up in
+`cmdlaplacer`: run `laplace-sample --version` once and stop with the
+install command when it is older than 0.3.0. Not done here; the go message
+asked for the plan only.
 
 ## Leave alone
 
