@@ -318,15 +318,20 @@ fn nuts_corr_gauss() {
     check("corr_gauss_10", BuiltIn::Nuts);
 }
 
-/// 1.5: after warmup, MALA's acceptance on the standard normal is within
-/// +-0.15 of its target (0.574). Widened from the plan's +-0.05 in the
+/// 1.5: after warmup, MALA's mean acceptance on the standard normal is
+/// within +-0.15 of its target (0.574). Widened from the plan's +-0.05 in the
 /// Phase 1 review: Stan's dual averaging, kept for every kernel, settles
 /// MALA's post-warmup acceptance near 0.69 (its iterates keep fluctuating and
-/// acceptance at the averaged step is higher; see the Phase 1 report). Plain
-/// 4 x (1000 + 1000): this checks the adapted step size, not convergence.
+/// acceptance at the averaged step is higher; see the Phase 1 report).
+///
+/// Averaged over 5 seeds (each 4 x (1000 + 1000)) rather than one fixed
+/// seed: a single seed's acceptance varies by several hundredths (0.718 on
+/// the seed this test used before), which put one seed 0.006 from the
+/// bound. This checks the adapted step size, not convergence.
 #[test]
 #[ignore]
 fn mala_acceptance_after_warmup_is_on_target() {
+    const SEEDS: [u64; 5] = [11, 22, 33, 44, 55];
     let r = reference("std_normal_10");
     let n = Counts {
         chains: 4,
@@ -334,14 +339,24 @@ fn mala_acceptance_after_warmup_is_on_target() {
         draws: 1000,
         thin: 1,
     };
-    let run = run(&r, BuiltIn::Mala, &[], n);
-    let probs: Vec<f64> = run
-        .infos
+    let per_seed: Vec<f64> = SEEDS
         .iter()
-        .flatten()
-        .map(|i| i.accept_prob.unwrap())
+        .map(|&seed| {
+            let run = run_seeded(&r, BuiltIn::Mala, &[], n, seed);
+            let probs: Vec<f64> = run
+                .infos
+                .iter()
+                .flatten()
+                .map(|i| i.accept_prob.unwrap())
+                .collect();
+            probs.iter().sum::<f64>() / probs.len() as f64
+        })
         .collect();
-    let mean = probs.iter().sum::<f64>() / probs.len() as f64;
-    println!("RESULT mala post-warmup mean accept_stat = {mean:.4} (target 0.574)");
+    let mean = per_seed.iter().sum::<f64>() / per_seed.len() as f64;
+    println!(
+        "RESULT mala post-warmup mean accept_stat over {} seeds = {mean:.4} (target 0.574, per seed {:?})",
+        SEEDS.len(),
+        per_seed.iter().map(|p| (p * 1e4).round() / 1e4).collect::<Vec<_>>()
+    );
     assert!((mean - 0.574).abs() < 0.15, "mean acceptance {mean}");
 }
