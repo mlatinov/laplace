@@ -1,8 +1,9 @@
 # gp: laplace-sample vs CmdStan 2.39.0
 
-Reference: CmdStan, 4 x 25000 draws (seed 1). Runs: 4 x 1000 warmup + 1000 draws.
+Reference: CmdStan, 4 x 25000 draws (seed 1). Runs: 4 x 1000 warmup + the draws shown.
+Verdict: did-not-converge unless every quantity has R-hat < 1.01 and bulk ESS > 400; then pass if every |z| < 4.
 
-## nuts — max |z| = 2.59 (PASS), max R-hat 1.0031, min ESS 1915
+## nuts — pass (4 x 1000 draws): max |z| = 2.59, max R-hat 1.0031, min bulk ESS 1915
 
 |variable | ref_mean|    mean|  z_mean| ref_sd|     sd|   z_sd|   rhat| ess_bulk|
 |:--------|--------:|-------:|-------:|------:|------:|------:|------:|--------:|
@@ -11,14 +12,14 @@ Reference: CmdStan, 4 x 25000 draws (seed 1). Runs: 4 x 1000 warmup + 1000 draws
 |rho      |   1.2431|  1.2417| -0.2270| 0.2753| 0.2764| 0.2434| 1.0020| 2358.178|
 |sigma    |   0.2702|  0.2718|  2.5853| 0.0369| 0.0384| 1.9604| 0.9997| 4466.247|
 
-## mala — max |z| = 2.44 (PASS), max R-hat 1.0036, min ESS 837
+## mala — pass (4 x 1000 draws): max |z| = 1.60, max R-hat 1.0059, min bulk ESS 836
 
 |variable | ref_mean|    mean|  z_mean| ref_sd|     sd|    z_sd|   rhat|  ess_bulk|
 |:--------|--------:|-------:|-------:|------:|------:|-------:|------:|---------:|
-|lp__     |  16.0684| 16.1037|  1.0439| 1.2439| 1.1730| -2.4359| 1.0036| 1099.0969|
-|alpha    |   0.8365|  0.8307| -0.6492| 0.2577| 0.2533| -0.5547| 1.0024|  836.8791|
-|rho      |   1.2431|  1.2291| -1.5724| 0.2753| 0.2696| -1.1466| 1.0025|  916.4379|
-|sigma    |   0.2702|  0.2708|  0.5140| 0.0369| 0.0366| -0.3263| 1.0017| 1006.6136|
+|lp__     |  16.0684| 16.0907|  0.6039| 1.2439| 1.1989| -1.5891| 1.0059| 1021.7526|
+|alpha    |   0.8365|  0.8238| -1.4589| 0.2577| 0.2491| -1.0989| 1.0047|  835.9365|
+|rho      |   1.2431|  1.2288| -1.5602| 0.2753| 0.2662| -1.6014| 1.0041|  843.1715|
+|sigma    |   0.2702|  0.2712|  0.8650| 0.0369| 0.0373|  0.5488| 1.0020| 1028.9262|
 
 ## Cost (sampling phase only)
 
@@ -26,7 +27,7 @@ Reference: CmdStan, 4 x 25000 draws (seed 1). Runs: 4 x 1000 warmup + 1000 draws
 
 |sampler             | min_ess_bulk| grads| ess_per_grad| us_per_grad|
 |:-------------------|------------:|-----:|------------:|-----------:|
-|CmdStan NUTS        |         1840| 22358|      0.08230|       164.1|
-|laplace-sample nuts |         1915| 14876|      0.12871|       207.0|
-|laplace-sample mala |          837|  4000|      0.20922|       207.5|
+|CmdStan NUTS        |         1840| 22358|      0.08230|       162.8|
+|laplace-sample nuts |         1915| 14876|      0.12871|       148.6|
+|laplace-sample mala |          836|  4000|      0.20898|       152.5|
 

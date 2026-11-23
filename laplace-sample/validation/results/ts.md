@@ -1,8 +1,9 @@
 # ts: laplace-sample vs CmdStan 2.39.0
 
-Reference: CmdStan, 4 x 25000 draws (seed 1). Runs: 4 x 1000 warmup + 1000 draws.
+Reference: CmdStan, 4 x 25000 draws (seed 1). Runs: 4 x 1000 warmup + the draws shown.
+Verdict: did-not-converge unless every quantity has R-hat < 1.01 and bulk ESS > 400; then pass if every |z| < 4.
 
-## nuts — max |z| = 1.49 (PASS), max R-hat 1.0023, min ESS 2048
+## nuts — pass (4 x 1000 draws): max |z| = 1.49, max R-hat 1.0023, min bulk ESS 2048
 
 |variable |  ref_mean|      mean|  z_mean| ref_sd|     sd|    z_sd|   rhat| ess_bulk|
 |:--------|---------:|---------:|-------:|------:|------:|-------:|------:|--------:|
@@ -11,14 +12,14 @@ Reference: CmdStan, 4 x 25000 draws (seed 1). Runs: 4 x 1000 warmup + 1000 draws
 |phi[1]   |    0.4880|    0.4868| -1.1061| 0.0508| 0.0507| -0.1701| 1.0003| 2358.947|
 |sigma    |    0.4793|    0.4797|  1.2275| 0.0197| 0.0202|  1.4872| 1.0023| 4779.986|
 
-## mala — max |z| = 1.83 (PASS), max R-hat 1.0067, min ESS 545
+## mala — pass (4 x 1000 draws): max |z| = 1.92, max R-hat 1.0055, min bulk ESS 496
 
-|variable |  ref_mean|      mean|  z_mean| ref_sd|     sd|    z_sd|   rhat| ess_bulk|
-|:--------|---------:|---------:|-------:|------:|------:|-------:|------:|--------:|
-|lp__     | -203.8914| -203.9236| -0.7921| 1.2171| 1.2837|  1.6673| 1.0030| 962.3373|
-|alpha    |    0.2164|    0.2189|  1.5856| 0.0351| 0.0366|  1.8329| 1.0067| 569.1051|
-|phi[1]   |    0.4880|    0.4849| -1.4215| 0.0508| 0.0520|  0.9593| 1.0059| 545.1302|
-|sigma    |    0.4793|    0.4795|  0.3007| 0.0197| 0.0196| -0.1675| 1.0018| 899.7938|
+|variable |  ref_mean|      mean|  z_mean| ref_sd|     sd|   z_sd|   rhat|  ess_bulk|
+|:--------|---------:|---------:|-------:|------:|------:|------:|------:|---------:|
+|lp__     | -203.8914| -203.9008| -0.2335| 1.2171| 1.2828| 1.6089| 1.0022| 1015.0495|
+|alpha    |    0.2164|    0.2181|  1.0467| 0.0351| 0.0367| 1.9190| 1.0055|  517.1176|
+|phi[1]   |    0.4880|    0.4842| -1.6462| 0.0508| 0.0514| 0.4145| 1.0047|  496.0556|
+|sigma    |    0.4793|    0.4798|  0.7554| 0.0197| 0.0197| 0.0484| 1.0032|  870.2485|
 
 ## Cost (sampling phase only)
 
@@ -26,7 +27,7 @@ Reference: CmdStan, 4 x 25000 draws (seed 1). Runs: 4 x 1000 warmup + 1000 draws
 
 |sampler             | min_ess_bulk| grads| ess_per_grad| us_per_grad|
 |:-------------------|------------:|-----:|------------:|-----------:|
-|CmdStan NUTS        |         2035| 21474|      0.09475|        23.8|
-|laplace-sample nuts |         2048| 14926|      0.13718|        24.1|
-|laplace-sample mala |          545|  4000|      0.13628|        60.0|
+|CmdStan NUTS        |         2035| 21474|      0.09475|        23.7|
+|laplace-sample nuts |         2048| 14926|      0.13718|        26.8|
+|laplace-sample mala |          496|  4000|      0.12401|        67.5|
 

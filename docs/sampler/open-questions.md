@@ -19,59 +19,47 @@ vendored patch stays on the spike branch (`sampler/phase-0`,
 `spikes/sampler-phase0/vendor/`) for Phase 3.4, where this question is
 decided.
 
-### Q6 — CI for `laplace-sample` (Phase 1)
-CI's clippy and tests run on the root package only; `cargo fmt --check`
-already covers the workspace. `laplace-sample`'s unit tests need no
-BridgeStan.
-- (a) Add `cargo clippy -p laplace-sample --all-targets -- -D warnings` and
-  `cargo test -p laplace-sample` to `ci.yml`.
-- (b) Leave CI as it is.
+## Answered
 
-**Recommendation: (a).**
+### Q6 — CI for `laplace-sample`
+**Answer:** CI runs clippy and the fast `laplace-sample` tests on every push;
+the `--ignored` statistical tests run on a weekly schedule and on manual
+dispatch, with `~/.laplace/bridgestan/` cached.
+**Done:** `.github/workflows/sampler.yml` (every push and PR, Ubuntu and
+macOS) and `.github/workflows/sampler-statistical.yml` (Mondays 04:17 UTC
+and `workflow_dispatch`; cache key `bridgestan-<version>-<os>`, guarded by a
+unit test against the pinned version). `ci.yml` is unchanged.
 
-### Q7 — Two deviations from the plan's adaptation and HMC (Phase 1.4, 1.5)
-- **Robbins–Monro finish.** Stan's dual averaging left MALA's post-warmup
-  acceptance at about 0.69 against 0.574, failing the 1.5 check. rwm, mala
-  and hmc keep Stan's windows and dual averaging, then settle the step size
-  with Robbins–Monro over a 100-iteration term buffer.
-- **HMC path-length jitter.** Fixed L gave R-hat 1.36 on the standard
-  normal. L is now drawn uniformly from 1..=2·steps−1 by default
-  (`--set jitter=false` turns it off).
+### Q7 — Robbins–Monro finish and HMC path-length jitter
+**Answer:** HMC jitter accepted. Robbins–Monro was to be kept only if its ESS
+per gradient was at least dual averaging's for mala and hmc on both
+reference targets.
+**Outcome: reverted.** Over 5 seeds, RM won on three pairs and lost on hmc /
+standard normal (0.0274 vs 0.0311 ESS per gradient, about 2.6 standard errors).
+All of rwm, mala and hmc use Stan's dual averaging again, and the 1.5 check
+is widened to +-0.15 (MALA now settles at 0.718 on the test seed). Numbers
+are in the Phase 1 report, "Follow-up".
 
-Options:
-- (a) Accept both.
-- (b) Revert to pure Stan dual averaging and relax the 1.5 check.
-- (c) Other.
+### Q8 — The non-NUTS note in cmdlaplacer
+**Answer:** build the message from the data: name only the NUTS columns that
+are all-NaN, and always mention tree depth when its column is NaN.
+**Done:** `laplace_sample()` reads the sampler diagnostics after the fit,
+runs cmdstanr's divergence / tree-depth / E-BFMI checks only for columns
+with values, and names the all-NaN ones (mala: all four; hmc: tree depth
+only).
 
-**Recommendation: (a).** Details in the Phase 1 report.
-
-### Q8 — The Q5 message wording for `hmc` (cmdlaplacer)
-Static HMC reports real divergences; only tree depth is NaN. The specified
-text says divergences don't apply.
-- (a) Use per-sampler wording ("Tree depth doesn't apply to hmc; …").
-- (b) Keep the exact text for every non-NUTS sampler.
-
-**Recommendation: (a).**
-
-### Q9 — Which C++ compiler BridgeStan builds with
-BridgeStan uses the system default (g++ here). The CmdStan install uses
-clang++ via `make/local`. On the gp model, the same BridgeStan build is 1.4×
-faster per gradient with clang++.
-- (a) Document it and honour `CXX` (already part of the cache key).
-- (b) Default to the CmdStan install's `make/local`.
-- (c) Nothing.
-
-**Recommendation: (a).**
+### Q9 — Which C++ compiler builds the model
+**Answer:** `CXX` or `LAPLACE_CXX` from the environment, then the `CXX` from
+the detected CmdStan's `make/local`, then the system default; print the
+compiler used; document it.
+**Done:** `laplace-sample/src/compiler.rs`. `LAPLACE_CXX` is checked before
+`CXX`, since it is the laplace-specific setting. CmdStan is `CMDSTAN`, else the
+newest `~/.cmdstan/cmdstan-<version>`. The choice is printed as
+`Compiler: ...` on every run and is part of the cache key. Documented in
+`laplace-sample/README.md`.
 
 ### Q10 — Distributing `laplace-sample`
-It is not in the release assets or `self-update`; the install hint is
-`cargo install --path laplace-sample`.
-- (a) Add it to the release workflow in Phase 5.
-- (b) Keep it source-only.
-
-**Recommendation: (a), in Phase 5.**
-
-## Answered
+**Answer:** deferred to Phase 5 (release assets).
 
 ### Q1 — Where the `laplace-sample` crate lives (Phase 1.1)
 **Answer: (a).** The `laplace` repo becomes a Cargo workspace with members `.`

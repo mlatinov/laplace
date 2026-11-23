@@ -6,6 +6,12 @@ including from R. Branch `sampler/phase-1` (from `sampler/phase-0` at
 `493fd0d`) in `laplace`; branch `laplace-sample` in `cmdlaplacer`. Nothing is
 pushed.
 
+> **Superseded in part by "Follow-up" at the end.** After review:
+> - the Robbins–Monro finish was reverted to Stan's dual averaging;
+> - moment checks now count only on healthy chains;
+> - the compiler is chosen by an explicit order, and the speed claim below
+>   is corrected: which compiler is faster depends on the model.
+
 **Short version.**
 - **Every plan check passes.** Two only pass because of changes I made along
   the way, and they need your sign-off (Q7):
@@ -345,3 +351,194 @@ Also in `docs/sampler/open-questions.md`.
 - **Survival-type posteriors.** Plain NUTS at 4 × 1000 sits at R-hat ≈ 1.015
   in both CmdStan-equivalent cost and in our run. Phase 5's must-pass tier
   should use targets where 1000 draws are enough, as the plan's list does.
+
+## Follow-up (Phase 1 review)
+
+The review's six items, done as follow-up commits on `sampler/phase-1`.
+**Outcome: Robbins–Monro was reverted (item 2).** Per the review, that means
+stopping here: `sampler/phase-2` was *not* created and Phase 2 has not
+started. Under the new harness, every must-pass check passes.
+
+### 1. Moment checks only count on healthy chains
+- **Diagnostics.**
+  - `diagnostics` now has rank-normalised bulk ESS and R-hat, as posterior
+    computes them (the larger of the bulk and folded R-hat).
+  - The basic ESS now matches `posterior:::.ess` exactly; it still sets the
+    MCSE.
+  - A unit test pins all three to posterior 1.7.0 within 1e-6, on fixed
+    draws R reproduces exactly, for both even- and odd-length chains.
+    Matching took three fixes: ρ₀ fixed at 1, monotone pairs by averaging,
+    and splitting before rank-normalising, with an odd middle draw dropped
+    as posterior's internal `.split_chains` does.
+- **Verdict.** `diagnostics::verdict` returns one of three outcomes:
+  - **did-not-converge** if any checked quantity has R-hat ≥ 1.01 or bulk
+    ESS ≤ 400 (or a non-finite value);
+  - otherwise **fail** if any |z| ≥ 4;
+  - otherwise **pass**.
+
+  It lives in the library, so Phase 5's `laplace sampler test` judges user
+  kernels with the same code.
+- **Draw counts** go per kernel × target in
+  `laplace-sample/tests/statistical.toml`. A test checks that every pair is
+  listed exactly once. Every reference check must *pass*, and a
+  did-not-converge result fails the test with a message saying to add draws,
+  never to loosen thresholds.
+
+Results (`docs/sampler/phase-1/statistical.txt`, final code). All eight are
+must-pass, and all pass:
+
+| Target | Sampler | Draws / chain (thin) | max \|z\| | max R-hat | min bulk ESS | ESS / grad | Verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| std normal | rwm | 10 000 (10) | 1.52 | 1.003 | 865 | 0.022 | pass |
+| std normal | mala | 1 000 | 1.71 | 1.007 | 634 | 0.159 | pass |
+| std normal | hmc | 1 000 | 2.22 | 1.006 | 1375 | 0.035 | pass |
+| std normal | nuts | 1 000 | 2.28 | 1.003 | 2158 | 0.109 | pass |
+| rotated κ=100 | rwm | 100 000 (100), warmup 5000 | 2.14 | 1.005 | 696 | 0.0017 | pass |
+| rotated κ=100 | mala | 50 000 (50), warmup 5000 | 1.60 | 1.003 | 997 | 0.0050 | pass |
+| rotated κ=100 | hmc | 1 000 | 1.26 | 1.003 | 1298 | 0.033 | pass |
+| rotated κ=100 | nuts | 1 000 | 1.50 | 1.004 | 995 | 0.020 | pass |
+
+At the plan's 1000 draws, three pairs would have been did-not-converge:
+rwm on std normal (bulk ESS 88), rwm on the rotated target (R-hat 1.56) and
+mala on the rotated target (R-hat 1.25). These are the pairs that previously
+"passed" on a wide MCSE.
+
+**1.8, relabelled** (`laplace-sample/validation/results/*.md`, rerun on the
+final code). `match_cmdstan.R` applies the same verdict, using posterior's
+rank-normalised R-hat and bulk ESS on every compared quantity:
+
+| Model | Sampler | Draws / chain | max \|z\| | max R-hat | min bulk ESS | Verdict |
+| --- | --- | --- | --- | --- | --- | --- |
+| gp | nuts | 1000 | 2.59 | 1.003 | 1915 | pass |
+| gp | mala | 1000 | 1.60 | 1.006 | 836 | pass |
+| survival | nuts | **4000** | 1.14 | 1.003 | 1855 | pass |
+| survival | mala | 1000 | 1.00 | **1.772** | **6** | **did-not-converge** |
+| ts | nuts | 1000 | 1.49 | 1.002 | 2048 | pass |
+| ts | mala | 1000 | 1.92 | 1.006 | 496 | pass |
+
+Survival `nuts` was also did-not-converge at 1000 draws (R-hat 1.015), so it
+gets 4000 in the script's draw table. Survival `mala` stays at 1000 and is
+reported as did-not-converge, as the review asked.
+
+### 2. Q7: HMC jitter kept; Robbins–Monro reverted
+Mean ESS per gradient over 5 seeds (11, 22, 33, 44, 55), with each pair's draw
+counts from `statistical.toml`. ESS per gradient = min bulk ESS over the
+checked quantities ÷ sampling gradients. All 40 runs passed the harness.
+
+| Target | Sampler | Robbins–Monro (sd) | Dual averaging (sd) | Accept RM / DA | RM ≥ DA |
+| --- | --- | --- | --- | --- | --- |
+| std normal | mala | 0.2131 (0.0152) | 0.1972 (0.0233) | 0.579 / 0.689 | yes |
+| std normal | hmc | 0.0274 (0.0022) | **0.0311** (0.0022) | 0.814 / 0.902 | **no** |
+| rotated κ=100 | mala | 0.00456 (0.00033) | 0.00417 (0.00012) | 0.577 / 0.672 | yes |
+| rotated κ=100 | hmc | 0.0340 (0.0018) | 0.0304 (0.0037) | 0.813 / 0.934 | yes |
+
+RM loses on hmc / standard normal, by about 13% (≈ 2.6 standard errors).
+There, hitting the 0.8 target exactly costs ESS: a smaller-than-"optimal"
+step pays off on that target. By the review's rule I **reverted to Stan's dual
+averaging** for rwm, mala and hmc:
+- `RobbinsMonro`, `StepFinish` and the temporary `step_finish` setting are
+  removed;
+- the term buffer is back to Stan's 50;
+- the 1.5 check is widened to ±0.15.
+
+MALA's post-warmup acceptance on the test seed is **0.718**: inside the band,
+but only 0.006 below its upper edge (0.724). The 5-seed mean was 0.689. The
+check is deterministic (fixed seed), but any change to the RNG stream or the
+adaptation could tip it over (see Risks).
+
+### 3. Q9: compiler order
+`laplace-sample/src/compiler.rs`, documented in `laplace-sample/README.md`.
+First match wins:
+1. `LAPLACE_CXX`, then `CXX`. `LAPLACE_CXX` comes first as the
+   laplace-specific setting.
+2. The `CXX` in the detected CmdStan's `make/local`: `CMDSTAN`, else the
+   newest `~/.cmdstan/cmdstan-<version>`.
+3. Otherwise make's default.
+
+The choice is passed to `make` as `CXX=…`, printed on every run (`Compiler:
+clang++ (from CmdStan's …/cmdstan-2.39.0/make/local)` here), and replaces the
+raw `CXX` in the cache key. Unit tests cover the precedence, `make/local`
+syntax and CmdStan detection.
+
+**A finding that changes the rationale.** With clang++ now picked up from
+CmdStan, the 1.8 rerun showed survival getting *slower*. A controlled re-check
+(same BridgeStan build, same seed, chains one at a time, two repeats each):
+
+| Model | g++ µs/grad | clang++ µs/grad | Faster |
+| --- | --- | --- | --- |
+| gp | 202.5–202.8 | 146.3–149.6 | clang++ 1.37× |
+| survival | 66.7–72.7 | 120.1–122.3 | **g++ 1.73×** |
+| ts | 21.0–21.1 | 25.8–25.9 | **g++ 1.23×** |
+
+So Phase 1's "clang++ is 1.4× faster" held for gp only. Which compiler is
+faster depends on the model. Step 2 is still useful as a *like-for-like* rule:
+laplace-sample and CmdStan then build with the same compiler. The docs now say
+exactly that, and point to `LAPLACE_CXX` for anyone tuning speed. The order
+itself is as the review specified.
+
+One build detail: BridgeStan's prebuilt support objects (`bridgestan.o`, TBB)
+keep whichever compiler first built them; only the model is rebuilt with the
+chosen `CXX`. Every clang++ result above came from such a mixed build. It
+links and runs fine, since both compilers use the same libstdc++.
+
+1.8 cost table (rerun; laplace-sample now uses clang++, like CmdStan):
+
+| Model | CmdStan ESS/grad (µs/grad) | nuts ESS/grad (µs/grad) | mala ESS/grad (µs/grad) |
+| --- | --- | --- | --- |
+| gp | 0.082 (162.8) | 0.129 (148.6) | 0.209 (152.5) |
+| survival | 0.0099 (95.5) | 0.0104 (121.6) | n/a, did not converge |
+| ts | 0.095 (23.7) | 0.137 (26.8) | 0.124 (67.5) |
+
+### 4. Q8: the note is built from the data
+`laplace_sample()` now works from the data:
+- It reads the sampler diagnostics after the fit and finds the NUTS columns
+  that are NaN in every draw.
+- It runs cmdstanr's divergence / tree-depth / E-BFMI checks only for the
+  columns with values. It calls `as_cmdstan_fit(check_diagnostics = FALSE)`,
+  then `diagnostic_summary()` with just those checks.
+- It names the all-NaN columns in one `message()`, with tree depth always
+  named when its column is NaN.
+
+| Sampler | Message |
+| --- | --- |
+| mala, rwm | "Tree depth, leapfrog steps, divergences and E-BFMI don't apply to mala: `treedepth__`, `n_leapfrog__`, `divergent__` and `energy__` are NaN in every draw. See n_grad__ and accept_stat__ instead." |
+| hmc | "Tree depth doesn't apply to hmc: `treedepth__` is NaN in every draw. See n_grad__ and accept_stat__ instead." (Divergences and E-BFMI are still checked.) |
+| nuts | none |
+
+Tests:
+- unit tests on synthetic draws (all four NaN, only tree depth, none, partly
+  NaN, and singular/plural wording);
+- end-to-end tests for mala (no warnings), hmc and nuts.
+
+Totals: 34/34 tests pass, and `R CMD check` reports Status OK.
+`posterior` is added to Suggests, since the tests use it directly.
+
+### 5. Q6: CI
+- **`.github/workflows/sampler.yml`:** every push and PR, Ubuntu and macOS,
+  `cargo clippy -p laplace-sample --all-targets --locked -D warnings` and
+  `cargo test -p laplace-sample --locked`. The statistical tests are
+  `#[ignore]` and skipped there.
+- **`.github/workflows/sampler-statistical.yml`:** Mondays 04:17 UTC plus
+  `workflow_dispatch`. It runs the `--ignored` statistical tests in release
+  mode, with `~/.laplace/bridgestan/` cached under the key
+  `bridgestan-2.9.0-<os>`. A unit test fails if that key stops matching
+  `BRIDGESTAN_VERSION`.
+- `ci.yml` is unchanged; its `cargo fmt --check` already covers the
+  workspace.
+- Neither workflow has run on GitHub yet, because nothing is pushed. Their
+  YAML parses, and their commands are the ones I ran locally.
+
+### 6. Q10
+Deferred to Phase 5 (release assets).
+
+### Risks after the follow-up
+- **The 1.5 check has a 0.006 margin** on its fixed seed (MALA at 0.718
+  against a 0.724 bound). It is deterministic, but a Phase 2 change to RNG
+  consumption or adaptation could tip it. If it does, look at the 5-seed
+  mean (0.689) before calling it a regression.
+- **The compiler is a model-dependent speed lever.** Up to 1.7× either way.
+  Comparisons with CmdStan are fair under the default order, but users
+  chasing speed need to know about `LAPLACE_CXX`, which is now documented.
+- **Phase 2 equivalence:** the RNG orders documented in Phase 1 are
+  unchanged. Dual averaging uses no randomness, so the revert does not touch
+  them.

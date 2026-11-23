@@ -1,12 +1,10 @@
-RESULT target=corr_gauss_10 sampler=hmc max|z|=1.37 max_rhat=1.0040 min_ess=1054 grads=39688 ess_per_grad=0.02655 PASS
-RESULT target=std_normal_10 sampler=hmc max|z|=2.30 max_rhat=1.0101 min_ess=999 grads=39688 ess_per_grad=0.02516 PASS
-RESULT mala post-warmup mean accept_stat = 0.5750 (target 0.574)
-RESULT target=corr_gauss_10 sampler=mala max|z|=2.14 max_rhat=1.2531 min_ess=12 grads=4000 ess_per_grad=0.00296 PASS
-RESULT target=corr_gauss_10 sampler=mala max|z|=1.37 max_rhat=1.0038 min_ess=1075 grads=200000 ess_per_grad=0.00538 PASS
-RESULT target=std_normal_10 sampler=mala max|z|=2.14 max_rhat=1.0075 min_ess=781 grads=4000 ess_per_grad=0.19519 PASS
-RESULT target=corr_gauss_10 sampler=nuts max|z|=1.50 max_rhat=1.0044 min_ess=999 grads=49540 ess_per_grad=0.02016 PASS
-RESULT target=std_normal_10 sampler=nuts max|z|=2.28 max_rhat=1.0036 min_ess=1830 grads=19786 ess_per_grad=0.09246 PASS
-RESULT target=corr_gauss_10 sampler=rwm max|z|=2.46 max_rhat=1.6240 min_ess=7 grads=4000 ess_per_grad=0.00165 PASS
-RESULT target=corr_gauss_10 sampler=rwm max|z|=2.87 max_rhat=1.0079 min_ess=448 grads=200000 ess_per_grad=0.00224 PASS
-RESULT target=std_normal_10 sampler=rwm max|z|=1.89 max_rhat=1.0458 min_ess=88 grads=4000 ess_per_grad=0.02207 PASS
-test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 32.01s
+RESULT target=corr_gauss_10 sampler=hmc chains=4 warmup=1000 draws=1000 thin=1 max|z|=1.26 max_rhat=1.0028 min_ess_bulk=1298 grads=39688 ess_per_grad=0.03269 verdict=pass
+RESULT target=std_normal_10 sampler=hmc chains=4 warmup=1000 draws=1000 thin=1 max|z|=2.22 max_rhat=1.0058 min_ess_bulk=1375 grads=39688 ess_per_grad=0.03465 verdict=pass
+RESULT mala post-warmup mean accept_stat = 0.7182 (target 0.574)
+RESULT target=corr_gauss_10 sampler=mala chains=4 warmup=5000 draws=50000 thin=50 max|z|=1.60 max_rhat=1.0027 min_ess_bulk=997 grads=200000 ess_per_grad=0.00498 verdict=pass
+RESULT target=std_normal_10 sampler=mala chains=4 warmup=1000 draws=1000 thin=1 max|z|=1.71 max_rhat=1.0067 min_ess_bulk=634 grads=4000 ess_per_grad=0.15854 verdict=pass
+RESULT target=corr_gauss_10 sampler=nuts chains=4 warmup=1000 draws=1000 thin=1 max|z|=1.50 max_rhat=1.0044 min_ess_bulk=995 grads=49540 ess_per_grad=0.02009 verdict=pass
+RESULT target=std_normal_10 sampler=nuts chains=4 warmup=1000 draws=1000 thin=1 max|z|=2.28 max_rhat=1.0031 min_ess_bulk=2158 grads=19786 ess_per_grad=0.10907 verdict=pass
+RESULT target=corr_gauss_10 sampler=rwm chains=4 warmup=5000 draws=100000 thin=100 max|z|=2.14 max_rhat=1.0048 min_ess_bulk=696 grads=400000 ess_per_grad=0.00174 verdict=pass
+RESULT target=std_normal_10 sampler=rwm chains=4 warmup=1000 draws=10000 thin=10 max|z|=1.52 max_rhat=1.0029 min_ess_bulk=865 grads=40000 ess_per_grad=0.02162 verdict=pass
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.04s
