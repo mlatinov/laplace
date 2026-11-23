@@ -1,0 +1,129 @@
+# laplace-sample binaries for a compiler release (sampler plan, Phase 5, Q10).
+#
+# PREPARED, NOT IN USE: this workflow only runs when started by hand
+# (Actions > release-sampler > Run workflow), and it only uploads to a
+# release when `publish` is ticked. Nothing triggers it on a tag push, so
+# merging it publishes nothing. Whether it should instead run inside
+# release.yml on every `v*` tag is decided at merge (docs/sampler/merge-plan.md).
+#
+# Asset layout (alongside the compiler's, same release, same tag):
+#   laplace-sample-<target>.tar.gz          a `laplace-sample-<target>/` directory holding
+#                                           the binary, LICENSE, README.md (laplace-sample's),
+#                                           THIRD-PARTY/nuts-rs-LICENSE (vendored, MIT)
+#   laplace-sample-<target>.tar.gz.sha256   "<hex>  <file name>"
+#
+# laplace-sample needs a C++ toolchain at run time (it builds models with
+# BridgeStan, which it downloads on first use); the binary itself has no
+# runtime dependency beyond libc. Windows is not built: the BridgeStan
+# build path (make, the compiler selection) is untested there.
+
+name: release-sampler
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The compiler release tag to build from and attach to (e.g. v0.3.0)"
+        required: true
+      publish:
+        description: "Upload the assets to that GitHub Release (otherwise: build artifacts only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-version:
+    name: Tag matches the compiler version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - name: Compare the tag with Cargo.toml
+        shell: bash
+        run: |
+          tag="${{ inputs.tag }}"; tag="${tag#v}"
+          crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag ${{ inputs.tag }} does not match the compiler version $crate"
+            exit 1
+          fi
+
+  build:
+    name: Build laplace-sample ${{ matrix.target }}
+    needs: check-version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04, test: true }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm, test: true }
+          - { target: aarch64-apple-darwin, os: macos-15, test: true }
+          # Cross-compiled on Apple silicon, as the compiler is.
+          - { target: x86_64-apple-darwin, os: macos-15, test: false }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Test (fast tests; the statistical ones need BridgeStan and are --ignored)
+        if: matrix.test
+        run: cargo test -p laplace-sample --locked
+      - name: Build
+        run: cargo build -p laplace-sample --release --locked --target ${{ matrix.target }}
+      - name: Smoke test (no BridgeStan needed)
+        if: matrix.target != 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          exe="target/${{ matrix.target }}/release/laplace-sample"
+          "$exe" --version
+          "$exe" sampler check laplace-sample/kernels/mala.lapkernel
+          "$exe" sampler list
+      - name: Package
+        shell: bash
+        run: |
+          name="laplace-sample-${{ matrix.target }}"
+          mkdir -p "$name/THIRD-PARTY"
+          cp "target/${{ matrix.target }}/release/laplace-sample" "$name/"
+          cp LICENSE "$name/"
+          cp laplace-sample/README.md "$name/README.md"
+          cp laplace-sample/vendor/nuts-rs-0.19.1/LICENSE "$name/THIRD-PARTY/nuts-rs-LICENSE"
+          tar -czf "$name.tar.gz" "$name"
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          else
+            shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          fi
+          cat "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: laplace-sample-${{ matrix.target }}
+          path: |
+            laplace-sample-${{ matrix.target }}.tar.gz
+            laplace-sample-${{ matrix.target }}.tar.gz.sha256
+
+  publish:
+    name: Attach to the GitHub Release
+    if: inputs.publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Upload to the existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          ls -l dist
+          gh release upload "${{ inputs.tag }}" dist/* --repo "${{ github.repository }}"
