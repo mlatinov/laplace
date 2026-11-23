@@ -4,10 +4,9 @@ Phase 4 of `docs/sampler/laplace_kernels.md`: kernel libraries. Branch
 `sampler/phase-4`, from the Phase 3 tip; the TEMPORARY CI trigger is on top
 (`a38323d`). Nothing is pushed.
 
-**Not done, because the usage limit was reached:** the per-commit worktree
-verification (each Phase 4 commit built and tested on its own). The final
-tree passes 979 tests with clippy clean, and every commit was tested when
-it was made.
+**Verification:** every Phase 4 commit was checked out on its own, built
+and tested, with fmt and clippy (`-D warnings`) clean. Tests grow from 958
+to 980, plus 18 slow ones.
 
 ## Done
 - Cost accounting, done first as its own commit (`f7d1945`):
@@ -21,7 +20,7 @@ it was made.
 - 4.3, `laplace doc` for kernels: `839f43f`.
 - 4.4, `laplace new kernel`: `13a104c`.
 - 4.5, `laplace sampler list`: `b49bce3`.
-- 4.6, `laplace-langevin`: `68c4fcd`. The library is in
+- 4.6, `laplace-langevin`: `68c4fcd`. Report and open questions: `a2b074d`. The library is in
   `~/Data_Science_Projects/laplace-langevin`; it has no git repository and
   no remote.
 
