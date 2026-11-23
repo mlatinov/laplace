@@ -3,11 +3,12 @@
 //! paths, and terminal output.
 
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 use laplace::codegen::CodegenOptions;
 use laplace::parser::library_block::{parse_library_block, ImportStatement};
@@ -19,7 +20,9 @@ use laplace::{docs, init, manifest, package, release, self_update, validate};
 #[command(
     name = "laplace",
     version = laplace::version::LONG_VERSION,
-    about = "Source-to-source preprocessor for Stan: package manager + namespaces + doc lookup"
+    about = "Source-to-source preprocessor for Stan: package manager + namespaces + doc lookup",
+    after_help = "Sampling commands (`laplace sample`, `laplace sampler`, `laplace new kernel`) \
+                  run the separate, optional `laplace-sample` binary, found on PATH."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -149,6 +152,10 @@ enum Command {
         #[arg(short, long)]
         verbose: bool,
     },
+    /// `sample`, `sampler` and `new`: forwarded unchanged to the optional
+    /// `laplace-sample` binary (D1). The compiler never links the sampler.
+    #[command(external_subcommand)]
+    External(Vec<OsString>),
 }
 
 fn main() -> ExitCode {
@@ -166,6 +173,9 @@ const EXIT_UPDATE_AVAILABLE: u8 = 10;
 
 fn run() -> Result<ExitCode, CliError> {
     let command = Cli::parse().command;
+    if let Command::External(args) = command {
+        return dispatch_to_sampler(args);
+    }
     if let Command::SelfUpdate {
         check,
         target_version,
@@ -215,11 +225,50 @@ fn run_command(command: Command) -> Result<(), CliError> {
             Ok(())
         }
         Command::SelfUpdate { .. } => unreachable!("handled in run()"),
+        Command::External(_) => unreachable!("handled in run()"),
     }
+}
+
+/// Subcommands that belong to `laplace-sample`. Anything else unknown is
+/// still clap's "unrecognized subcommand" error.
+const SAMPLER_SUBCOMMANDS: [&str; 3] = ["sample", "sampler", "new"];
+const SAMPLER_BINARY: &str = "laplace-sample";
+
+/// Cargo-style dispatch (D1): find `laplace-sample` on PATH and run it with
+/// the arguments unchanged (`laplace sample x` runs `laplace-sample sample x`),
+/// passing its exit status through.
+fn dispatch_to_sampler(args: Vec<OsString>) -> Result<ExitCode, CliError> {
+    let name = args[0].to_string_lossy().into_owned();
+    if !SAMPLER_SUBCOMMANDS.contains(&name.as_str()) {
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::InvalidSubcommand,
+                format!("unrecognized subcommand '{name}'"),
+            )
+            .exit();
+    }
+    let binary = find_on_path(SAMPLER_BINARY).ok_or(CliError::SamplerMissing(name))?;
+    let status = std::process::Command::new(binary).args(&args).status()?;
+    // A signal-terminated child has no code; report plain failure.
+    Ok(ExitCode::from(status.code().map_or(1, |c| c as u8)))
+}
+
+fn find_on_path(program: &str) -> Option<PathBuf> {
+    let file = format!("{program}{}", env::consts::EXE_SUFFIX);
+    env::split_paths(&env::var_os("PATH")?)
+        .map(|dir| dir.join(&file))
+        .find(|p| p.is_file())
 }
 
 #[derive(Debug, thiserror::Error)]
 enum CliError {
+    #[error(
+        "`laplace {0}` needs the `laplace-sample` binary, which is not on PATH.\n\
+         Sampling is optional and installed separately. From a laplace checkout:\n    \
+         cargo install --path laplace-sample --root ~/.local --force\n\
+         `laplace build` and the package commands do not need it."
+    )]
+    SamplerMissing(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]

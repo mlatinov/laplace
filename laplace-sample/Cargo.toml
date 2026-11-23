@@ -1,0 +1,27 @@
+[package]
+name = "laplace-sample"
+version = "0.1.0"
+edition = "2021"
+description = "Optional custom-sampler runtime for laplace: runs a compiled .stan model through BridgeStan"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "laplace-sample"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+# Pinned together with BRIDGESTAN_VERSION in src/bridgestan_src.rs: the
+# crate's FFI matches exactly one BridgeStan release's C header (D9).
+bridgestan = "=2.9.0"
+clap = { version = "4", features = ["derive"] }
+# Upstream nuts-rs, unpatched: Phase 1 runs NUTS on the whole model only (Q2).
+nuts-rs = "=0.19.1"
+rand = { version = "0.10", features = ["chacha"] }
+rand_distr = "0.6"
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
