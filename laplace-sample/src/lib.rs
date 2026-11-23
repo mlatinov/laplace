@@ -10,6 +10,7 @@
 
 pub mod adapt;
 pub mod bridgestan_src;
+pub mod compiler;
 pub mod csv;
 pub mod diagnostics;
 pub mod kernel;

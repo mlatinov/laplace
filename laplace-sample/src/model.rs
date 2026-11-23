@@ -8,12 +8,12 @@
 //! Compiled libraries are cached under `~/.laplace/cache/bridgestan/<key>/`
 //! (override: `LAPLACE_SAMPLE_CACHE`). The key is a SHA-256 over the `.stan`
 //! text, the text of every file it `#include`s (recursively), the BridgeStan
-//! version, the build flags, and the toolchain settings `make` reads (`CXX`
-//! and `CXXFLAGS` from the environment, BridgeStan's `make/local`), so a
-//! one-character change anywhere rebuilds and an unchanged model never does.
-//! The toolchain is part of the key because it matters: on the gp model a
-//! clang++ build computes gradients ~1.4x faster than a g++ build (Phase 1
-//! report).
+//! version, the build flags, and the toolchain (the compiler chosen by
+//! [`crate::compiler`], `CXXFLAGS` from the environment, BridgeStan's
+//! `make/local`), so a one-character change anywhere rebuilds and an
+//! unchanged model never does. The toolchain is part of the key because it
+//! matters: the compiler changes gradient time by up to 1.7x on this
+//! project's library models (Phase 1 report).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -21,6 +21,7 @@ use std::process::Command;
 use sha2::{Digest, Sha256};
 
 use crate::bridgestan_src::{self, BRIDGESTAN_VERSION};
+use crate::compiler::{self, Compiler};
 
 /// Build flags that are part of the cache key. `STAN_THREADS=true` is set
 /// by `bridgestan::compile_model` itself and enforced when a model loads.
@@ -148,20 +149,24 @@ pub fn sources(stan: &Path) -> anyhow::Result<Vec<(String, String)>> {
     Ok(out)
 }
 
-/// The toolchain settings `make` will see: `CXX`, `CXXFLAGS`, and the
-/// BridgeStan tree's `make/local` (empty strings when unset or absent).
-pub fn toolchain() -> Vec<String> {
-    let env = |k: &str| std::env::var(k).unwrap_or_default();
+/// The toolchain settings that shape the build: the chosen compiler,
+/// `CXXFLAGS`, and the BridgeStan tree's `make/local` (empty strings when
+/// unset or absent).
+pub fn toolchain(compiler: &Compiler) -> Vec<String> {
     let local = bridgestan_src::location()
         .ok()
         .and_then(|d| std::fs::read_to_string(d.join("make").join("local")).ok())
         .unwrap_or_default();
-    vec![env("CXX"), env("CXXFLAGS"), local]
+    vec![
+        compiler.key(),
+        std::env::var("CXXFLAGS").unwrap_or_default(),
+        local,
+    ]
 }
 
 /// The cache key for a `.stan` file under the current toolchain.
 pub fn cache_key(stan: &Path) -> anyhow::Result<String> {
-    cache_key_with(stan, &toolchain())
+    cache_key_with(stan, &toolchain(&compiler::select()))
 }
 
 /// The cache key for a `.stan` file (see the module docs).
@@ -191,6 +196,7 @@ pub fn cache_key_with(stan: &Path, toolchain: &[String]) -> anyhow::Result<Strin
 pub fn prepare_with(
     stan: &Path,
     cache: &Path,
+    toolchain: &[String],
     compile: impl FnOnce(&Path, &Path) -> anyhow::Result<PathBuf>,
 ) -> anyhow::Result<Prepared> {
     let stem = stan
@@ -198,7 +204,7 @@ pub fn prepare_with(
         .ok_or_else(|| anyhow::anyhow!("{}: no file name", stan.display()))?
         .to_string_lossy()
         .into_owned();
-    let key = cache_key(stan)?;
+    let key = cache_key_with(stan, toolchain)?;
     let dir = cache.join(&key);
     let library = dir.join(format!("{stem}_model.so"));
     if library.is_file() {
@@ -253,7 +259,9 @@ pub fn prepare_with(
 /// Find or build the BridgeStan library for a `.stan` file.
 pub fn prepare(stan: &Path) -> anyhow::Result<Prepared> {
     let cache = cache_root()?;
-    prepare_with(stan, &cache, |staged, src_dir| {
+    let compiler = compiler::select();
+    eprintln!("Compiler: {}", compiler.describe());
+    prepare_with(stan, &cache, &toolchain(&compiler), |staged, src_dir| {
         let bs = bridgestan_src::ensure()?;
         eprintln!(
             "Compiling {} with BridgeStan {BRIDGESTAN_VERSION} (cached afterwards)",
@@ -266,11 +274,16 @@ pub fn prepare(stan: &Path) -> anyhow::Result<Prepared> {
                 .map(|n| n.get())
                 .unwrap_or(1)
         );
+        let mut make_args = vec![jobs];
+        if let Some(cxx) = &compiler.cxx {
+            make_args.push(format!("CXX={cxx}"));
+        }
+        let make_args: Vec<&str> = make_args.iter().map(String::as_str).collect();
         Ok(bridgestan::compile_model(
             &bs,
             staged,
             &[include.as_str()],
-            &[jobs.as_str()],
+            &make_args,
         )?)
     })
 }
@@ -301,14 +314,14 @@ mod tests {
         let stan = tmp.path().join("m.stan");
         std::fs::write(&stan, "parameters { real x; } model { x ~ normal(0, 1); }").unwrap();
         let calls = Cell::new(0);
-        let a = prepare_with(&stan, &cache, fake_compile(&calls)).unwrap();
+        let a = prepare_with(&stan, &cache, &[], fake_compile(&calls)).unwrap();
         assert!(!a.cache_hit);
-        let b = prepare_with(&stan, &cache, fake_compile(&calls)).unwrap();
+        let b = prepare_with(&stan, &cache, &[], fake_compile(&calls)).unwrap();
         assert!(b.cache_hit);
         assert_eq!(a.library, b.library);
         assert_eq!(calls.get(), 1);
         std::fs::write(&stan, "parameters { real x; } model { x ~ normal(0, 2); }").unwrap();
-        let c = prepare_with(&stan, &cache, fake_compile(&calls)).unwrap();
+        let c = prepare_with(&stan, &cache, &[], fake_compile(&calls)).unwrap();
         assert!(!c.cache_hit);
         assert_ne!(c.cache_key, a.cache_key);
         assert_eq!(calls.get(), 2);
@@ -369,7 +382,7 @@ mod tests {
         let cache = tmp.path().join("cache");
         let stan = tmp.path().join("m.stan");
         std::fs::write(&stan, "model {}").unwrap();
-        let r = prepare_with(&stan, &cache, |_, _| anyhow::bail!("stanc error"));
+        let r = prepare_with(&stan, &cache, &[], |_, _| anyhow::bail!("stanc error"));
         assert!(r.is_err());
         assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
     }
@@ -383,8 +396,20 @@ mod tests {
             std::fs::write(tmp.path().join(d).join("m.stan"), "model {}").unwrap();
         }
         let calls = Cell::new(0);
-        prepare_with(&tmp.path().join("a/m.stan"), &cache, fake_compile(&calls)).unwrap();
-        let b = prepare_with(&tmp.path().join("b/m.stan"), &cache, fake_compile(&calls)).unwrap();
+        prepare_with(
+            &tmp.path().join("a/m.stan"),
+            &cache,
+            &[],
+            fake_compile(&calls),
+        )
+        .unwrap();
+        let b = prepare_with(
+            &tmp.path().join("b/m.stan"),
+            &cache,
+            &[],
+            fake_compile(&calls),
+        )
+        .unwrap();
         assert!(b.cache_hit);
         assert_eq!(calls.get(), 1);
     }
