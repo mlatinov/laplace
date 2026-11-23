@@ -360,3 +360,172 @@ fn mala_acceptance_after_warmup_is_on_target() {
     );
     assert!((mean - 0.574).abs() < 0.15, "mean acceptance {mean}");
 }
+
+// ---- Phase 2.5: .lapkernel twins on real BridgeStan builds ------------------------
+
+fn lapkernel(name: &str) -> String {
+    format!("{}/kernels/{name}.lapkernel", env!("CARGO_MANIFEST_DIR"))
+}
+
+/// Every saved (position, lp, acceptance, step size, metric) of `sampler`.
+fn twin_trace(
+    r: &Reference,
+    sampler: &laplace_sample::runner::Sampler,
+    chain: u64,
+) -> Vec<Vec<f64>> {
+    let data = r
+        .data
+        .as_ref()
+        .map(|p| CString::new(p.to_str().unwrap()).unwrap());
+    let model = Model::new(r.lib.clone(), data, SEED as u32).unwrap();
+    let target: Arc<dyn Target> = Arc::new(BridgeStanTarget { model });
+    let (mut k, a) = sampler.build(target.clone(), 1000, 1000).unwrap();
+    let mut rows = vec![];
+    run_chain(
+        target.as_ref(),
+        k.as_mut(),
+        a,
+        &Init::Radius(2.0),
+        1000,
+        1000,
+        &mut chain_rng(SEED, chain),
+        |_| Ok(()),
+        |st, info, t| {
+            let mut row = st.q.clone();
+            row.push(st.lp);
+            row.push(info.accept_prob.unwrap());
+            row.push(info.n_grad as f64);
+            row.push(t.step_size.unwrap());
+            row.extend(
+                t.inv_metric
+                    .clone()
+                    .unwrap_or_else(|| vec![1.0; st.q.len()]),
+            );
+            rows.push(row);
+            Ok(())
+        },
+    )
+    .unwrap();
+    rows
+}
+
+fn twin_check(target: &'static str, kernel: &str, rust_sets: &[&str], lap_sets: &[&str]) {
+    use laplace_sample::runner::Sampler;
+    let s = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    let rust = Sampler::from_arg(kernel, &s(rust_sets)).unwrap();
+    let lap = Sampler::from_arg(&lapkernel(kernel), &s(lap_sets)).unwrap();
+    let r = reference(target);
+    let mut worst: f64 = 0.0;
+    for chain in 1..=4 {
+        let (a, b) = (twin_trace(&r, &rust, chain), twin_trace(&r, &lap, chain));
+        for (x, y) in a.iter().flatten().zip(b.iter().flatten()) {
+            let d = (x - y).abs();
+            worst = worst.max(if d.is_nan() { f64::INFINITY } else { d });
+        }
+    }
+    println!("RESULT equivalence {kernel} {rust_sets:?} on {target}: max |difference| = {worst:e}");
+    assert!(worst <= 1e-10, "max difference {worst}");
+}
+
+#[test]
+#[ignore]
+fn twins_rwm_fixed_tuning() {
+    for t in ["std_normal_10", "corr_gauss_10"] {
+        twin_check(
+            t,
+            "rwm",
+            &["step_size=0.3", "adapt=false"],
+            &["eps=0.3", "adapt=false"],
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn twins_rwm_default_adaptation() {
+    for t in ["std_normal_10", "corr_gauss_10"] {
+        twin_check(t, "rwm", &[], &[]);
+    }
+}
+
+#[test]
+#[ignore]
+fn twins_mala_fixed_tuning() {
+    for t in ["std_normal_10", "corr_gauss_10"] {
+        twin_check(
+            t,
+            "mala",
+            &["step_size=0.3", "adapt=false"],
+            &["eps=0.3", "adapt=false"],
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn twins_mala_default_adaptation() {
+    for t in ["std_normal_10", "corr_gauss_10"] {
+        twin_check(t, "mala", &[], &[]);
+    }
+}
+
+/// Phase 2.5, report only: interpreter time per step against BridgeStan
+/// gradient time, on the gp library model (validation/models/gp.stan).
+/// MALA costs one gradient per step either way, so
+/// (lapkernel step time - Rust step time) is the interpreter's own cost.
+#[test]
+#[ignore]
+fn interpreter_overhead_on_the_gp_model() {
+    use laplace_sample::runner::Sampler;
+    use std::time::Instant;
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("validation/models");
+    let prepared = model::prepare(&dir.join("gp.stan")).unwrap();
+    let lib = Arc::new(bridgestan::open_library(&prepared.library).unwrap());
+    let data = CString::new(dir.join("gp.json").to_str().unwrap()).unwrap();
+    let target: Arc<dyn Target> = Arc::new(BridgeStanTarget {
+        model: Model::new(lib, Some(data), 1).unwrap(),
+    });
+    let fixed = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let steps = 3000u64;
+    let time = |sampler: &Sampler| -> (f64, u64) {
+        let (mut k, a) = sampler.build(target.clone(), 0, steps).unwrap();
+        let mut grads = 0;
+        let t0 = Instant::now();
+        run_chain(
+            target.as_ref(),
+            k.as_mut(),
+            a,
+            &Init::Radius(0.5),
+            0,
+            steps,
+            &mut chain_rng(SEED, 1),
+            |_| Ok(()),
+            |_, info, _| {
+                grads += info.n_grad;
+                Ok(())
+            },
+        )
+        .unwrap();
+        (t0.elapsed().as_secs_f64() / steps as f64, grads)
+    };
+    let rust = Sampler::from_arg("mala", &fixed(&["step_size=0.3", "adapt=false"])).unwrap();
+    let lap = Sampler::from_arg(&lapkernel("mala"), &fixed(&["eps=0.3", "adapt=false"])).unwrap();
+    // Warm up caches and the CPU, then measure each twice and keep the faster.
+    time(&rust);
+    let (r1, g) = time(&rust);
+    let (l1, g2) = time(&lap);
+    let (r2, _) = time(&rust);
+    let (l2, _) = time(&lap);
+    assert_eq!(g, g2, "same gradient count");
+    let (r, l) = (r1.min(r2), l1.min(l2));
+    let grad = r * steps as f64 / g as f64;
+    println!(
+        "RESULT overhead gp: rust mala {:.1} us/step, lapkernel mala {:.1} us/step, interpreter {:.1} us/step = {:.1}% of a gradient ({:.1} us, {} grads)",
+        r * 1e6,
+        l * 1e6,
+        (l - r) * 1e6,
+        100.0 * (l - r) / grad,
+        grad * 1e6,
+        g
+    );
+}

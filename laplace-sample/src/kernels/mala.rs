@@ -9,8 +9,10 @@
 //!           + log N(q  | mu_bwd, eps^2 m) - log N(q' | mu_fwd, eps^2 m)
 //! ```
 //! The Gaussian normalising constants cancel (same covariance both ways), so
-//! only the quadratic forms are computed. With `m = 1` this is exactly the
-//! `mala.lapkernel` example in `docs/sampler/laplace_kernels.md` (Phase 2.1).
+//! only the quadratic forms are computed, and the ratio is grouped as
+//! `(lp(q') - lp(q)) + correction`, the form `propose()` uses. With `m = 1`
+//! this is the `mala.lapkernel` example in `docs/sampler/laplace_kernels.md`
+//! (Phase 2.1); `kernels/mala.lapkernel` is its bit-for-bit twin.
 //!
 //! RNG call order per step:
 //! 1. `dim` normal draws `z[0..dim]`, in index order;
@@ -76,7 +78,11 @@ impl Kernel for Mala {
             let mu_bwd: Vec<f64> = (0..d)
                 .map(|i| q_new[i] + 0.5 * eps * eps * m[i] * g_new[i])
                 .collect();
-            lp_new - state.lp - quad(&state.q, &mu_bwd, eps, &m) + quad(&q_new, &mu_fwd, eps, &m)
+            // The `propose()` form, `(lp' - lp) + correction`, so that
+            // `mala.lapkernel` reproduces it bit for bit (Phase 2.5):
+            // correction = quad(q' | mu_fwd) - quad(q | mu_bwd).
+            let correction = quad(&q_new, &mu_fwd, eps, &m) - quad(&state.q, &mu_bwd, eps, &m);
+            lp_new - state.lp + correction
         };
         let (accepted, p) = mh_accept(log_alpha, rng);
         if accepted {
