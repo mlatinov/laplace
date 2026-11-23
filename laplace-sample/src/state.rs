@@ -42,6 +42,21 @@ pub struct Evaluator<'t> {
     capacity: usize,
     n_grad: u64,
     hits: u64,
+    view: Option<View>,
+}
+
+/// A block's view of the full target (Phase 3.1): positions passed to
+/// [`Evaluator::eval`] are the block's coordinates, placed at `indices` into
+/// `base` (the full position, other blocks at their current values);
+/// gradients come back restricted to `indices`.
+///
+/// The cache is keyed by the *full* position, so once another block moves,
+/// the same block point is a different key: a block can never be handed a
+/// value computed while the other blocks were somewhere else.
+#[derive(Clone, Debug, PartialEq)]
+pub struct View {
+    pub indices: Vec<usize>,
+    pub base: Vec<f64>,
 }
 
 impl<'t> Evaluator<'t> {
@@ -60,11 +75,25 @@ impl<'t> Evaluator<'t> {
             capacity,
             n_grad: 0,
             hits: 0,
+            view: None,
         }
     }
 
+    /// Evaluate through a block view from now on (`None`: the full target).
+    pub fn set_view(&mut self, view: Option<View>) {
+        self.view = view;
+    }
+
+    pub fn view(&self) -> Option<&View> {
+        self.view.as_ref()
+    }
+
+    /// The dimension kernels see: the block's under a view.
     pub fn dim(&self) -> usize {
-        self.target.dim()
+        match &self.view {
+            Some(v) => v.indices.len(),
+            None => self.target.dim(),
+        }
     }
 
     pub fn target(&self) -> &'t dyn Target {
@@ -73,6 +102,26 @@ impl<'t> Evaluator<'t> {
 
     /// Log density and gradient at `q`.
     pub fn eval(&mut self, q: &[f64]) -> anyhow::Result<(f64, Vec<f64>)> {
+        let Some(view) = &self.view else {
+            return self.eval_full(q);
+        };
+        anyhow::ensure!(
+            q.len() == view.indices.len(),
+            "block position has {} values, the block has {}",
+            q.len(),
+            view.indices.len()
+        );
+        let mut full = view.base.clone();
+        for (i, &j) in view.indices.iter().enumerate() {
+            full[j] = q[i];
+        }
+        let indices = view.indices.clone();
+        let (lp, g) = self.eval_full(&full)?;
+        Ok((lp, indices.iter().map(|&j| g[j]).collect()))
+    }
+
+    /// Log density and full gradient at a full position, ignoring any view.
+    pub fn eval_full(&mut self, q: &[f64]) -> anyhow::Result<(f64, Vec<f64>)> {
         let key: Vec<u64> = q.iter().map(|x| x.to_bits()).collect();
         if let Some(pos) = self.cache.iter().position(|e| e.key == key) {
             self.hits += 1;
