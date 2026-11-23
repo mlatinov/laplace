@@ -27,6 +27,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::manifest::PackageKind;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockedPackage {
     pub name: String,
@@ -43,6 +45,17 @@ pub struct LockedPackage {
     /// `[[package]]` entry in this same lockfile.
     #[serde(default)]
     pub dependencies: Vec<String>,
+    /// `kernels` for a kernel package; absent (and never written) for a
+    /// function library, so every lock written before kernel packages
+    /// existed reads and rewrites byte for byte.
+    ///
+    /// A compiler older than kernel packages ignores this field. It never
+    /// gets as far as acting on it: every path that touches the package's
+    /// files reads its `laplace.toml` first, and a kernel package's
+    /// `laplace = ">=0.3"` stops that compiler there (see
+    /// [`crate::manifest::KERNEL_PACKAGES_SINCE`]).
+    #[serde(default, skip_serializing_if = "PackageKind::is_functions")]
+    pub kind: PackageKind,
 }
 
 impl LockedPackage {
@@ -55,6 +68,7 @@ impl LockedPackage {
             checksum: checksum.to_string(),
             source: source.to_string(),
             dependencies: Vec::new(),
+            kind: PackageKind::Functions,
         }
     }
 }
@@ -255,6 +269,27 @@ mod tests {
             fs::read_to_string(&path).unwrap(),
             fs::read_to_string(&again).unwrap()
         );
+    }
+
+    #[test]
+    fn a_function_library_entry_writes_no_kind_and_a_kernel_package_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("laplace.lock");
+        let lock = Lockfile {
+            root: vec!["gps".into(), "langevin".into()],
+            packages: vec![
+                leaf("gps", "1.0.0"),
+                LockedPackage {
+                    kind: PackageKind::Kernels,
+                    ..leaf("langevin", "0.1.0")
+                },
+            ],
+        };
+        write_lockfile(&path, &lock).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("kind").count(), 1, "{text}");
+        assert!(text.contains("kind = \"kernels\""), "{text}");
+        assert_eq!(read_lockfile(&path).unwrap(), lock);
     }
 
     #[test]

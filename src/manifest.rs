@@ -202,6 +202,10 @@ pub struct PackageManifest {
     /// any compiler.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub laplace: Option<String>,
+    /// What the package provides. Absent means a function library, exactly
+    /// as before kernel packages existed, and it is never written for one.
+    #[serde(default, skip_serializing_if = "PackageKind::is_functions")]
+    pub kind: PackageKind,
     #[serde(default)]
     pub exports: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -215,10 +219,74 @@ impl PackageManifest {
             name: name.into(),
             version: version.into(),
             laplace: None,
+            kind: PackageKind::Functions,
             exports,
             dependencies: BTreeMap::new(),
         }
     }
+}
+
+/// `kind` in a package's `laplace.toml`.
+///
+/// - `functions` (the default): `.stan` / `.laplacelib` sources, used from a
+///   model's `library { }` block. Every package before kernel packages.
+/// - `kernels`: `.lapkernel` files under `kernels/`, used from a
+///   `.lapsampler`'s `library { }` block by `laplace-sample` (Phase 4). The
+///   compiler installs, locks and checksums them like any package, and never
+///   compiles them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PackageKind {
+    #[default]
+    Functions,
+    Kernels,
+}
+
+impl PackageKind {
+    pub fn is_functions(&self) -> bool {
+        *self == PackageKind::Functions
+    }
+    pub fn is_kernels(&self) -> bool {
+        *self == PackageKind::Kernels
+    }
+}
+
+/// The first compiler that understands kernel packages. A kernel package
+/// must declare a `laplace` requirement that excludes every compiler before
+/// it: those compilers ignore `kind` and would install a kernel package as
+/// an empty function library (and rewrite the lock without saying so). With
+/// the requirement they stop at the existing compiler gate instead, with
+/// "requires laplace >=0.3 ... laplace self-update".
+pub const KERNEL_PACKAGES_SINCE: semver::Version = semver::Version::new(0, 3, 0);
+
+/// The requirement `laplace new kernel` writes.
+pub const KERNEL_PACKAGES_REQUIREMENT: &str = ">=0.3";
+
+/// Does `req` admit only versions at or above [`KERNEL_PACKAGES_SINCE`]?
+/// True when one of its comparators (they all must hold) has a lower bound
+/// there.
+fn excludes_pre_kernel_compilers(req: &semver::VersionReq) -> bool {
+    use semver::Op;
+    let since = (
+        KERNEL_PACKAGES_SINCE.major,
+        KERNEL_PACKAGES_SINCE.minor,
+        KERNEL_PACKAGES_SINCE.patch,
+    );
+    req.comparators.iter().any(|c| {
+        let (major, minor, patch) = (c.major, c.minor, c.patch);
+        let lower = match c.op {
+            Op::Exact | Op::GreaterEq | Op::Tilde | Op::Caret | Op::Wildcard => {
+                Some((major, minor.unwrap_or(0), patch.unwrap_or(0)))
+            }
+            Op::Greater => Some(match (minor, patch) {
+                (None, _) => (major + 1, 0, 0),
+                (Some(m), None) => (major, m + 1, 0),
+                (Some(m), Some(p)) => (major, m, p + 1),
+            }),
+            _ => None,
+        };
+        lower.is_some_and(|l| l >= since)
+    })
 }
 
 #[derive(Debug, Error)]
@@ -273,6 +341,18 @@ pub enum ManifestError {
         path: PathBuf,
         required: String,
         running: String,
+    },
+
+    #[error(
+        "{path}: a kernel package (`kind = \"kernels\"`) must require laplace {since} or newer, \
+         or older compilers would install it as an empty function library\n  help: add `laplace = \
+         \"{requirement}\"` to it{found}"
+    )]
+    KernelPackageNeedsCompilerRequirement {
+        path: PathBuf,
+        since: String,
+        requirement: &'static str,
+        found: String,
     },
 
     #[error("{path}: `laplace = \"{value}\"` is not a valid version requirement: {source}")]
@@ -404,7 +484,34 @@ pub fn read_package_manifest(path: &Path) -> Result<PackageManifest, ManifestErr
         path: path.to_path_buf(),
         source,
     })?;
-    parse_checked(path, &text, |m: &PackageManifest| m.laplace.as_deref())
+    let manifest = parse_checked(path, &text, |m: &PackageManifest| m.laplace.as_deref())?;
+    check_kernel_package_gate(path, &manifest)?;
+    Ok(manifest)
+}
+
+/// A kernel package must keep pre-kernel compilers out (see
+/// [`KERNEL_PACKAGES_SINCE`]).
+fn check_kernel_package_gate(path: &Path, m: &PackageManifest) -> Result<(), ManifestError> {
+    if !m.kind.is_kernels() {
+        return Ok(());
+    }
+    let ok = m
+        .laplace
+        .as_deref()
+        .and_then(|r| semver::VersionReq::parse(r).ok())
+        .is_some_and(|r| excludes_pre_kernel_compilers(&r));
+    if ok {
+        return Ok(());
+    }
+    Err(ManifestError::KernelPackageNeedsCompilerRequirement {
+        path: path.to_path_buf(),
+        since: KERNEL_PACKAGES_SINCE.to_string(),
+        requirement: KERNEL_PACKAGES_REQUIREMENT,
+        found: match &m.laplace {
+            Some(r) => format!(" (it has `laplace = \"{r}\"`)"),
+            None => String::new(),
+        },
+    })
 }
 
 pub fn write_package_manifest(
@@ -815,6 +922,98 @@ mod tests {
         }
         write_project_manifest(&path, &manifest).unwrap();
         assert_eq!(read_project_manifest(&path).unwrap(), manifest);
+    }
+
+    #[test]
+    fn a_manifest_without_kind_is_a_function_library_and_writes_no_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("laplace.toml");
+        fs::write(&path, "name = \"gps\"\nversion = \"1.0.0\"\n").unwrap();
+        let m = read_package_manifest(&path).unwrap();
+        assert_eq!(m.kind, PackageKind::Functions);
+        write_package_manifest(&path, &m).unwrap();
+        assert!(!fs::read_to_string(&path).unwrap().contains("kind"));
+        // An explicit `kind = "functions"` means the same.
+        fs::write(
+            &path,
+            "name = \"gps\"\nversion = \"1.0.0\"\nkind = \"functions\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_package_manifest(&path).unwrap().kind,
+            PackageKind::Functions
+        );
+    }
+
+    #[test]
+    fn a_kernel_package_parses_with_its_compiler_requirement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("laplace.toml");
+        fs::write(
+            &path,
+            "name = \"langevin\"\nversion = \"0.1.0\"\nkind = \"kernels\"\nlaplace = \">=0.3\"\n",
+        )
+        .unwrap();
+        let m = read_package_manifest(&path).unwrap();
+        assert_eq!(m.kind, PackageKind::Kernels);
+        write_package_manifest(&path, &m).unwrap();
+        assert_eq!(read_package_manifest(&path).unwrap(), m);
+    }
+
+    #[test]
+    fn a_kernel_package_must_keep_pre_kernel_compilers_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("laplace.toml");
+        for bad in [
+            "",
+            "laplace = \">=0.2\"\n",
+            "laplace = \"*\"\n",
+            "laplace = \"<1.0\"\n",
+        ] {
+            fs::write(
+                &path,
+                format!("name = \"langevin\"\nversion = \"0.1.0\"\nkind = \"kernels\"\n{bad}"),
+            )
+            .unwrap();
+            let err = read_package_manifest(&path).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ManifestError::KernelPackageNeedsCompilerRequirement { .. }
+                ),
+                "{bad}: {err}"
+            );
+            assert!(err.to_string().contains("laplace = \">=0.3\""), "{err}");
+        }
+    }
+
+    #[test]
+    fn which_requirements_exclude_pre_kernel_compilers() {
+        let r = |s: &str| excludes_pre_kernel_compilers(&semver::VersionReq::parse(s).unwrap());
+        for ok in [
+            ">=0.3",
+            ">=0.3.0",
+            "^0.3",
+            "~0.3.1",
+            ">0.2",
+            ">=0.2, >=0.3",
+            "=0.4.0",
+            "1.*",
+            ">=1",
+        ] {
+            assert!(r(ok), "{ok}");
+        }
+        for bad in [
+            ">=0.2",
+            ">0.2.5",
+            "^0.2",
+            "*",
+            "<1.0",
+            ">=0.1, <0.4",
+            "0.2.*",
+        ] {
+            assert!(!r(bad), "{bad}");
+        }
     }
 
     #[test]

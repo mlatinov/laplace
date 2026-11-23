@@ -1,0 +1,42 @@
+# laplace 0.2.0 (the released compiler) on a project whose laplace.lock
+# holds a kernel package (path dependency, written by laplace 0.3.0):
+
+    root = ["langevin"]
+    
+    [[package]]
+    name = "langevin"
+    version = "0.1.0"
+    checksum = "sha256:5c7f041a7b1079b470398cc7de61d58ccae616255db90794edbcf76e572dd39b"
+    source = "path+../langevin"
+    dependencies = []
+    kind = "kernels"
+
+$ laplace install
+error: <tmp>/langevin/laplace.toml requires laplace >=0.3, but this is laplace 0.2.0
+  help: update the compiler with `laplace self-update` (it prints the right command if laplace came from a package manager)
+  -> exit 1; laplace.lock unchanged: yes
+
+$ laplace update langevin
+error: <tmp>/langevin/laplace.toml requires laplace >=0.3, but this is laplace 0.2.0
+  help: update the compiler with `laplace self-update` (it prints the right command if laplace came from a package manager)
+  -> exit 1; laplace.lock unchanged: yes
+
+$ laplace add langevin --path ../langevin
+error: <tmp>/langevin/laplace.toml requires laplace >=0.3, but this is laplace 0.2.0
+  help: update the compiler with `laplace self-update` (it prints the right command if laplace came from a package manager)
+  -> exit 1; laplace.lock unchanged: yes
+
+$ laplace build plain.laplace -o plain.stan
+wrote plain.stan (2 lines, 0 dependencies)
+  -> exit 0; laplace.lock unchanged: yes
+
+$ laplace build imports.laplace -o imports.stan
+error: <tmp>/langevin/laplace.toml requires laplace >=0.3, but this is laplace 0.2.0
+  help: update the compiler with `laplace self-update` (it prints the right command if laplace came from a package manager)
+  -> exit 1; laplace.lock unchanged: yes
+
+$ laplace doc langevin::mala
+error: <tmp>/langevin/laplace.toml requires laplace >=0.3, but this is laplace 0.2.0
+  help: update the compiler with `laplace self-update` (it prints the right command if laplace came from a package manager)
+  -> exit 1; laplace.lock unchanged: yes
+

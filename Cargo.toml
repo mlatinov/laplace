@@ -15,7 +15,7 @@ nuts-rs = { path = "laplace-sample/vendor/nuts-rs-0.19.1" }
 
 [package]
 name = "laplace"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 
 [dependencies]

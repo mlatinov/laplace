@@ -1,0 +1,12 @@
+# Released libraries: laplace.lock written by a fresh 'laplace add' (git, latest tag, subdir laplace)
+# before = laplace 0.2.0 + sampler dispatch (f7d1945), after = Phase 4.1 compiler (0.3.0)
+# sha256 of laplace.lock; laplace.toml compared too. Script: released_libraries_lock.sh
+cluster          before 01484af7e01db83f  after 01484af7e01db83f  identical
+gaussian_process before 3f904e7f15726536  after 3f904e7f15726536  identical
+lts              before 7ee16fa77cd2d2c5  after 7ee16fa77cd2d2c5  identical
+splines          before 4e8105ec3137ddb4  after 4e8105ec3137ddb4  identical
+survival         before 75f69e06b1cae2b2  after 75f69e06b1cae2b2  identical
+transformations  before bc6eabdee3f17ae8  after bc6eabdee3f17ae8  identical
+ts               before f5664d1ba57ebbab  after f5664d1ba57ebbab  identical
+
+# Build output of the testbed models against those releases (before vs after): 14 models, 14 byte-identical

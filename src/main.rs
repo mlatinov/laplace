@@ -530,9 +530,17 @@ fn cmd_build(
     // has.
     let mut order: Vec<String> = Vec::new();
     for import in imports {
-        if lock.get(&import.name).is_none() {
+        let Some(locked) = lock.get(&import.name) else {
             return Err(CliError::Message(format!(
                 "`{}` is imported but not recorded in laplace.lock -- run `laplace add {}` first",
+                import.name, import.name
+            )));
+        };
+        if locked.kind.is_kernels() {
+            return Err(CliError::Message(format!(
+                "`{}` is a kernel package: its kernels are used from a .lapsampler's library {{ }} \
+                 block (`laplace sample model.laplace --sampler <file>.lapsampler`), not from a model\n  \
+                 help: remove `import {}` from this file's library {{ }} block",
                 import.name, import.name
             )));
         }

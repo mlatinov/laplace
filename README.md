@@ -605,6 +605,45 @@ error: dependency cycle: alpha -> beta -> alpha
 else stays at its locked version unless a constraint forces it to move, so
 adding one dependency never silently bumps the rest of your graph.
 
+## Kernel packages
+
+A package can hold sampler kernels instead of functions. Its manifest says
+`kind = "kernels"`, and its kernels are `.lapkernel` files under `kernels/`:
+
+```toml
+# langevin/laplace.toml
+name = "langevin"
+version = "0.1.0"
+kind = "kernels"
+laplace = ">=0.3"   # required for kernel packages, see below
+```
+
+```text
+langevin/
+  laplace.toml
+  kernels/mala.lapkernel     # used as langevin::mala
+  kernels/pmala.lapkernel    # used as langevin::pmala
+```
+
+`laplace add`, `install`, `update` and `--path` treat it like any package:
+it is locked with a checksum, and its lock entry says `kind = "kernels"`.
+Its kernels are used from a `.lapsampler` (`library { import langevin }`,
+then `langevin::mala`), run by the optional `laplace-sample` binary; a
+model cannot import a kernel package, and a function library cannot depend
+on one. A kernel package holds only `kernels/*.lapkernel`: no `.stan` or
+`.laplacelib` sources, no `exports`, no `[dependencies]`. A manifest
+without `kind` is a function library, exactly as before.
+
+**Why `laplace = ">=0.3"` is required.** laplace 0.2 and older don't know
+`kind` and would quietly install a kernel package as an empty function
+library, and `laplace add`/`update` there would rewrite your lock without
+its `kind`. With the requirement, every command of an older compiler that
+touches the package (`install`, `add`, `update`, `doc`, and `build` of a
+model that imports it) stops with `requires laplace >=0.3 ... laplace
+self-update`, and the lock is never rewritten. Building a model that doesn't
+import the kernel package still works, and gives the same output. laplace
+refuses to lock a kernel package without the requirement.
+
 ## Templates: boilerplate that spans blocks
 
 Some Stan patterns aren't a function — they're a handful of declarations and

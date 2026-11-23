@@ -223,6 +223,72 @@ fn first_inconsistent_visibility(
         .map(|pair| (pair[0].0.clone(), pair[0].1.describe()))
 }
 
+/// Where a kernel package keeps its kernels.
+pub const KERNELS_DIR: &str = "kernels";
+pub const LAPKERNEL_EXTENSION: &str = "lapkernel";
+
+/// The kernels a kernel package provides: the stems of `kernels/*.lapkernel`,
+/// sorted. Each is used as `package::stem` from a `.lapsampler`.
+pub fn kernel_names(package_dir: &Path) -> std::io::Result<Vec<String>> {
+    let dir = package_dir.join(KERNELS_DIR);
+    if !dir.is_dir() {
+        return Ok(vec![]);
+    }
+    let mut names: Vec<String> = fs::read_dir(&dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file() && p.extension().and_then(|x| x.to_str()) == Some(LAPKERNEL_EXTENSION)
+        })
+        .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
+/// The shape of a kernel package (`kind = "kernels"`), checked wherever the
+/// package manager copies one: `kernels/*.lapkernel` and nothing a function
+/// library would have. `Err` is the problem, worded to follow "`<name>`
+/// (<dir>) ...". The kernels themselves are checked by `laplace sampler
+/// check`, which can parse them; the compiler never does.
+pub fn check_kernel_package(package_dir: &Path, m: &PackageManifest) -> Result<(), String> {
+    let io = |e: std::io::Error| format!("cannot be read: {e}");
+    let names = kernel_names(package_dir).map_err(io)?;
+    if names.is_empty() {
+        return Err(format!(
+            "is a kernel package with no {KERNELS_DIR}/*.{LAPKERNEL_EXTENSION} files"
+        ));
+    }
+    if let Some(bad) = names.iter().find(|n| !manifest::is_valid_package_name(n)) {
+        return Err(format!(
+            "has a kernel file named `{bad}.{LAPKERNEL_EXTENSION}`; kernel names are used as \
+             `{}::<name>`, so they follow the package-name rule: {}",
+            m.name,
+            manifest::PACKAGE_NAME_RULE
+        ));
+    }
+    let sources = read_package_sources(package_dir).map_err(|e| e.to_string())?;
+    if sources.files > 0 {
+        return Err(
+            "is a kernel package but has function sources (.stan / .laplacelib); keep \
+             functions in a separate function library"
+                .into(),
+        );
+    }
+    if !m.exports.is_empty() {
+        return Err(
+            "is a kernel package but lists `exports`, which only function libraries have".into(),
+        );
+    }
+    if !m.dependencies.is_empty() {
+        return Err(
+            "is a kernel package with [dependencies]; a .lapkernel cannot import anything yet"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 /// Load `package_dir` into an [`InstalledPackage`] ready for codegen.
 ///
 /// Cross-checks the package's `.laplacelib` `library { }` imports against
@@ -444,6 +510,65 @@ mod tests {
         let err = load(tmp.path(), "bad").unwrap_err();
         assert!(matches!(err, PackageError::LaplaceLib(_)), "{err:?}");
         assert!(err.to_string().contains("model"));
+    }
+
+    fn kernel_manifest() -> PackageManifest {
+        PackageManifest {
+            kind: manifest::PackageKind::Kernels,
+            laplace: Some(">=0.3".into()),
+            ..PackageManifest::new("langevin", "0.1.0", vec![])
+        }
+    }
+
+    #[test]
+    fn a_kernel_package_holds_kernels_and_nothing_else() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = kernel_manifest();
+        let err = check_kernel_package(tmp.path(), &m).unwrap_err();
+        assert!(err.contains("no kernels/*.lapkernel"), "{err}");
+
+        fs::create_dir(tmp.path().join("kernels")).unwrap();
+        write(
+            &tmp.path().join("kernels"),
+            "mala.lapkernel",
+            "kernel mala { step { move(q); } }\n",
+        );
+        write(
+            &tmp.path().join("kernels"),
+            "pmala.lapkernel",
+            "kernel pmala { step { move(q); } }\n",
+        );
+        write(&tmp.path().join("kernels"), "notes.txt", "not a kernel\n");
+        assert_eq!(kernel_names(tmp.path()).unwrap(), vec!["mala", "pmala"]);
+        assert_eq!(check_kernel_package(tmp.path(), &m), Ok(()));
+
+        let mut with_exports = m.clone();
+        with_exports.exports = vec!["mala".into()];
+        assert!(check_kernel_package(tmp.path(), &with_exports)
+            .unwrap_err()
+            .contains("exports"));
+        let mut with_deps = m.clone();
+        with_deps
+            .dependencies
+            .insert("x".into(), manifest::Dependency::Range("^1".into()));
+        assert!(check_kernel_package(tmp.path(), &with_deps)
+            .unwrap_err()
+            .contains("[dependencies]"));
+
+        write(
+            &tmp.path().join("kernels"),
+            "my-kernel.lapkernel",
+            "kernel k { step { move(q); } }\n",
+        );
+        assert!(check_kernel_package(tmp.path(), &m)
+            .unwrap_err()
+            .contains("my-kernel.lapkernel"));
+        fs::remove_file(tmp.path().join("kernels/my-kernel.lapkernel")).unwrap();
+
+        write(tmp.path(), "helpers.stan", "real f() { return 1; }\n");
+        assert!(check_kernel_package(tmp.path(), &m)
+            .unwrap_err()
+            .contains("function sources"));
     }
 
     #[test]

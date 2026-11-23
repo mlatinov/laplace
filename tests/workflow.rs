@@ -1211,3 +1211,198 @@ fn self_update_under_cargo_bin_prints_the_cargo_command() {
     );
     assert_eq!(read(&exe), "old");
 }
+
+// -- Sampler Phase 4: kernel packages ------------------------------------------------
+
+const KERNEL_MANIFEST: &str =
+    "name = \"langevin\"\nversion = \"0.1.0\"\nkind = \"kernels\"\nlaplace = \">=0.3\"\n";
+const MALA_KERNEL: &str = "kernel mala {\n  tuning { real<lower=0> eps = 0.5; }\n  step {\n    \
+     propose(q + eps * std_normal_rng(dim), 0);\n  }\n}\n";
+
+fn kernel_package(env: &Env, dir: &str, manifest: &str) -> PathBuf {
+    let pkg = env.dir(dir);
+    write(&pkg.join("laplace.toml"), manifest);
+    write(&pkg.join("kernels").join("mala.lapkernel"), MALA_KERNEL);
+    pkg
+}
+
+fn lock_entry<'a>(lock: &'a str, name: &str) -> &'a str {
+    let start = lock
+        .find(&format!("name = \"{name}\""))
+        .unwrap_or_else(|| panic!("no `{name}` in\n{lock}"));
+    let end = lock[start..]
+        .find("[[package]]")
+        .map_or(lock.len(), |e| start + e);
+    &lock[start..end]
+}
+
+/// 4.1: a kernel package installs from a path and from git, and its lock
+/// entry carries a checksum (and `kind`).
+#[test]
+fn a_kernel_package_installs_from_a_path_and_from_git() {
+    let env = setup();
+    kernel_package(&env, "langevin", KERNEL_MANIFEST);
+    let project = env.dir("project");
+
+    let out = env.run_in(&project, &["add", "langevin", "--path", "../langevin"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let lock = read(&project.join("laplace.lock"));
+    let entry = lock_entry(&lock, "langevin");
+    assert!(entry.contains("kind = \"kernels\""), "{entry}");
+    assert!(entry.contains("checksum = \"sha256:"), "{entry}");
+    assert!(entry.contains("source = \"path+../langevin\""), "{entry}");
+    assert!(
+        read(&project.join("laplace.toml")).contains("path = \"../langevin\""),
+        "laplace.toml records the dependency as for any package"
+    );
+    let synced = fs::read_dir(env.home.join(".laplace/path-packages/langevin"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(read(&synced.join("kernels/mala.lapkernel")), MALA_KERNEL);
+
+    // From git, tagged.
+    let (work, bare) = git_repo(
+        &env,
+        "langevin-git",
+        &[
+            ("laplace.toml", KERNEL_MANIFEST),
+            ("kernels/mala.lapkernel", MALA_KERNEL),
+        ],
+    );
+    git(&work, &["tag", "0.1.0"]);
+    git(&work, &["push", "--quiet", "origin", "--tags"]);
+    let git_project = env.dir("git-project");
+    let out = env.run_in(
+        &git_project,
+        &[
+            "add",
+            "langevin",
+            "--git",
+            bare.to_str().unwrap(),
+            "--tag",
+            "0.1.0",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let lock = read(&git_project.join("laplace.lock"));
+    let entry = lock_entry(&lock, "langevin");
+    assert!(entry.contains("kind = \"kernels\""), "{entry}");
+    assert!(entry.contains("checksum = \"sha256:"), "{entry}");
+    assert!(entry.contains("source = \"git+"), "{entry}");
+    let cached = env.cache().join("langevin").join("0.1.0");
+    assert_eq!(read(&cached.join("kernels/mala.lapkernel")), MALA_KERNEL);
+
+    // `install` restores it from the lock alone, verifying the checksum.
+    fs::remove_dir_all(&cached).unwrap();
+    let out = env.run_in(&git_project, &["install"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(read(&cached.join("kernels/mala.lapkernel")), MALA_KERNEL);
+    // ...and `update` leaves an unchanged lock byte for byte.
+    let out = env.run_in(&git_project, &["update", "langevin"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(read(&git_project.join("laplace.lock")), lock);
+}
+
+#[test]
+fn a_model_cannot_import_a_kernel_package() {
+    let env = setup();
+    kernel_package(&env, "langevin", KERNEL_MANIFEST);
+    let project = env.dir("project");
+    assert!(env
+        .run_in(&project, &["add", "langevin", "--path", "../langevin"])
+        .status
+        .success());
+    write(
+        &project.join("model.laplace"),
+        "library {\n  import langevin\n}\nparameters { real x; }\nmodel { x ~ normal(0, 1); }\n",
+    );
+    let out = env.run_in(&project, &["build", "model.laplace"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("`langevin` is a kernel package"), "{err}");
+    assert!(err.contains(".lapsampler"), "{err}");
+
+    // A model that does not import it builds exactly as without it.
+    write(
+        &project.join("plain.laplace"),
+        "parameters { real x; }\nmodel { x ~ normal(0, 1); }\n",
+    );
+    let out = env.run_in(&project, &["build", "plain.laplace", "-o", "plain.stan"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        read(&project.join("plain.stan")),
+        "parameters { real x; }\nmodel { x ~ normal(0, 1); }\n"
+    );
+}
+
+/// The old-compiler safeguard: without `laplace = ">=0.3"`, a compiler that
+/// predates kernel packages would install one as an empty function library.
+#[test]
+fn a_kernel_package_must_require_a_kernel_aware_compiler() {
+    let env = setup();
+    kernel_package(
+        &env,
+        "langevin",
+        "name = \"langevin\"\nversion = \"0.1.0\"\nkind = \"kernels\"\n",
+    );
+    let project = env.dir("project");
+    let out = env.run_in(&project, &["add", "langevin", "--path", "../langevin"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("must require laplace 0.3.0 or newer"), "{err}");
+    assert!(err.contains("laplace = \">=0.3\""), "{err}");
+    assert!(!project.join("laplace.lock").exists());
+}
+
+#[test]
+fn a_kernel_package_with_function_sources_or_no_kernels_is_refused() {
+    let env = setup();
+    let pkg = kernel_package(&env, "langevin", KERNEL_MANIFEST);
+    write(&pkg.join("helpers.stan"), "real f() { return 1; }\n");
+    let project = env.dir("project");
+    let out = env.run_in(&project, &["add", "langevin", "--path", "../langevin"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("has function sources"),
+        "{}",
+        stderr(&out)
+    );
+
+    fs::remove_file(pkg.join("helpers.stan")).unwrap();
+    fs::remove_dir_all(pkg.join("kernels")).unwrap();
+    let out = env.run_in(&project, &["add", "langevin", "--path", "../langevin"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("no kernels/*.lapkernel"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn a_function_library_cannot_depend_on_a_kernel_package() {
+    let env = setup();
+    kernel_package(&env, "langevin", KERNEL_MANIFEST);
+    let lib = env.dir("fns");
+    write(
+        &lib.join("laplace.toml"),
+        "name = \"fns\"\nversion = \"1.0.0\"\n\n[dependencies]\nlangevin = { path = \"../langevin\" }\n",
+    );
+    write(
+        &lib.join("fns.laplacelib"),
+        "pub real one() { return 1; }\n",
+    );
+    let project = env.dir("project");
+    let out = env.run_in(&project, &["add", "fns", "--path", "../fns"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(
+        err.contains(
+            "`fns` is a function library and depends on `langevin`, which is a kernel package"
+        ),
+        "{err}"
+    );
+}

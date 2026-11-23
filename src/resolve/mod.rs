@@ -41,6 +41,20 @@ pub enum ResolveError {
     #[error(transparent)]
     Lockfile(#[from] LockfileError),
 
+    #[error("`{name}` ({path}) {problem}")]
+    KernelPackage {
+        name: String,
+        path: PathBuf,
+        problem: String,
+    },
+
+    #[error(
+        "`{package}` is a function library and depends on `{dependency}`, which is a kernel \
+         package -- kernels are used from a .lapsampler, never from functions\n  help: remove \
+         `{dependency}` from `{package}`'s [dependencies]"
+    )]
+    FunctionLibraryDependsOnKernels { package: String, dependency: String },
+
     #[error("failed to access {path}: {source}")]
     Io {
         path: PathBuf,
@@ -754,6 +768,7 @@ fn resolve_install_and_lock(
             checksum: checksum_dir(&package_dir)?,
             source,
             dependencies: resolved.dependencies.clone(),
+            kind: pkg_manifest.kind,
         };
         // Same version, different contents than the lock recorded: the
         // package was edited without a version bump. Say so even when there
@@ -777,6 +792,20 @@ fn resolve_install_and_lock(
             });
         }
         packages.push(locked);
+    }
+
+    // Kernels are used from a .lapsampler; a function library cannot call
+    // one. (A kernel package has no [dependencies] at all: install_into.)
+    for pkg in &packages {
+        for dep in &pkg.dependencies {
+            let dep_kind = packages.iter().find(|p| &p.name == dep).map(|p| p.kind);
+            if pkg.kind.is_functions() && dep_kind == Some(manifest::PackageKind::Kernels) {
+                return Err(ResolveError::FunctionLibraryDependsOnKernels {
+                    package: pkg.name.clone(),
+                    dependency: dep.clone(),
+                });
+            }
+        }
     }
 
     let lock = Lockfile {
@@ -1300,7 +1329,16 @@ fn install_into(
     // Refuse a package written for a newer compiler before copying it
     // anywhere: parsing its sources for docs.json would otherwise fail on
     // syntax this compiler does not know, with a far less useful message.
-    manifest::read_package_manifest(&package_dir.join("laplace.toml"))?;
+    let pkg_manifest = manifest::read_package_manifest(&package_dir.join("laplace.toml"))?;
+    if pkg_manifest.kind.is_kernels() {
+        crate::package::check_kernel_package(package_dir, &pkg_manifest).map_err(|problem| {
+            ResolveError::KernelPackage {
+                name: pkg.name.clone(),
+                path: package_dir.to_path_buf(),
+                problem,
+            }
+        })?;
+    }
 
     let dest = dest.to_path_buf();
     let outcome = if dest.is_dir() {
