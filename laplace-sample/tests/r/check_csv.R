@@ -19,7 +19,10 @@ for (s in sort(list.dirs(runs, recursive = FALSE, full.names = FALSE))) {
     cat("   metadata: laplace_sampler =", md$laplace_sampler, "\n")
     cat("             laplace_kernel_rest =", md$laplace_kernel_rest, "\n")
     cat("             step_size_adaptation =", md$step_size_adaptation, "\n")
-    if (!is.null(fit$inv_metric())) cat("   inv_metric(chain 1):", signif(fit$inv_metric()[[1]], 3), "\n")
+    im <- tryCatch(fit$inv_metric(), error = function(e) NULL)
+    if (!is.null(im)) cat("   inv_metric(chain 1):", signif(diag(as.matrix(im[[1]])), 3), "\n") else
+      cat("   inv_metric: none (several blocks, each with its own; see stepsize_<label>__)\n")
+    cat("   sampler_diagnostics:", paste(dimnames(fit$sampler_diagnostics())$variable, collapse = ","), "\n")
     print(sm[, c("variable", "mean", "sd", "rhat", "ess_bulk")], n = 20)
     TRUE
   }, error = function(e) { cat(sprintf("== %s: FAILED: %s\n", s, conditionMessage(e))); FALSE })

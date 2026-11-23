@@ -56,6 +56,8 @@ pub struct Built {
     pub lines: Vec<KernelLine>,
     /// Labels of the kernel lines, in order (CSV per-block columns).
     pub labels: Vec<String>,
+    /// Each line's number of unconstrained coordinates.
+    pub dims: Vec<usize>,
 }
 
 struct Ctx<'a> {
@@ -339,7 +341,9 @@ impl SamplerFile {
         let mut items: Vec<Box<dyn Kernel>> = vec![];
         let mut lines = vec![];
         let mut labels = vec![];
+        let mut dims = vec![];
         for (l, b) in self.ast.lines.iter().zip(blocks) {
+            dims.push(b.dim());
             let inner = self.build(&l.kernel, &b, 1.0, &full, warmup, draws)?;
             let (version, sources) = self.provenance(&l.kernel);
             lines.push(KernelLine {
@@ -355,6 +359,7 @@ impl SamplerFile {
             kernel: Box::new(Seq { items }),
             lines,
             labels,
+            dims,
         })
     }
 

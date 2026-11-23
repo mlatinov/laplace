@@ -8,7 +8,10 @@ use std::sync::{Arc, Mutex};
 
 use bridgestan::{Model, StanLibrary};
 
-use crate::csv::{adaptation_lines, sampler_values, Header, Writer};
+use crate::csv::{
+    adaptation_lines, block_columns, block_values, composite_values, sampler_values,
+    single_block_values, Header, Writer,
+};
 use crate::model;
 use crate::runner::{chain_rng, gq_seed, run_chain, Init, Sampler};
 use crate::target::{BridgeStanTarget, Target};
@@ -201,6 +204,16 @@ fn run_one_chain(
     let dyn_target: Arc<dyn Target> = target.clone();
     let built = spec.build_chain(dyn_target, &params, run.warmup, run.draws)?;
     let mut kernel = built.kernel;
+    // Columns (Phase 3.6): a kernel on the whole model, or a single block
+    // covering it, writes the standard columns; several blocks add
+    // per-block columns and leave the standard ones NaN where one value
+    // cannot describe several kernels.
+    let n_coords = target.dim();
+    let layout = match built.blocks.len() {
+        0 => Layout::Whole,
+        1 if built.block_dims.first() == Some(&n_coords) => Layout::SingleBlock,
+        _ => Layout::Blocks(built.blocks.clone()),
+    };
 
     let header = Header {
         model: model_name,
@@ -215,7 +228,16 @@ fn run_one_chain(
     };
     let path = args.output_dir.join(format!("{stem}-{chain_id}.csv"));
     let file = std::io::BufWriter::new(std::fs::File::create(&path)?);
-    let w = std::cell::RefCell::new(Writer::new(file, &header, &param_names)?);
+    let block_cols = match &layout {
+        Layout::Blocks(labels) => block_columns(labels),
+        _ => vec![],
+    };
+    let w = std::cell::RefCell::new(Writer::with_block_columns(
+        file,
+        &header,
+        &block_cols,
+        &param_names,
+    )?);
     let mut out = vec![0.0; param_names.len()];
     let mut rng = chain_rng(seed, chain_id);
     let adapted = spec.adapts();
@@ -231,10 +253,22 @@ fn run_one_chain(
         run.warmup,
         run.draws,
         &mut rng,
-        |t| {
+        |k| {
             warmup_done.set(Some(std::time::Instant::now()));
-            if adapted && run.warmup > 0 {
-                w.borrow_mut().comment_lines(&adaptation_lines(t))?;
+            // CmdStan's adaptation block: the whole-model kernel's tuning,
+            // or the single block's.
+            let t = match &layout {
+                Layout::Whole if adapted => Some(k.tuning()),
+                Layout::SingleBlock => k
+                    .tunings()
+                    .into_iter()
+                    .next()
+                    .map(|(_, t)| t)
+                    .filter(|t| t.step_size.is_some() || t.inv_metric.is_some()),
+                _ => None,
+            };
+            if let (Some(t), true) = (t, run.warmup > 0) {
+                w.borrow_mut().comment_lines(&adaptation_lines(&t))?;
             }
             Ok(())
         },
@@ -245,8 +279,16 @@ fn run_one_chain(
                 target
                     .model
                     .param_constrain(&state.q, true, true, &mut out, Some(&mut gq_rng))?;
-                w.borrow_mut()
-                    .row(&sampler_values(state.lp, info, tuning), &out)?;
+                let cols = match &layout {
+                    Layout::Whole => sampler_values(state.lp, info, tuning),
+                    Layout::SingleBlock => single_block_values(state.lp, info),
+                    Layout::Blocks(labels) => {
+                        let mut v = composite_values(state.lp, info);
+                        v.extend(block_values(info, labels));
+                        v
+                    }
+                };
+                w.borrow_mut().row(&cols, &out)?;
             }
             Ok(())
         },
@@ -317,4 +359,14 @@ pub fn check_sampler(
         }
     }
     Ok(out)
+}
+
+/// Which sampler columns a run writes (Phase 3.6).
+enum Layout {
+    /// A kernel on the whole model (Level 1): the standard columns.
+    Whole,
+    /// One block covering the whole model: its statistics, unsuffixed.
+    SingleBlock,
+    /// Several blocks: per-block columns for these labels.
+    Blocks(Vec<String>),
 }
