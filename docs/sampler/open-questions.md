@@ -24,6 +24,25 @@ addition. **Not in v1**, recorded as candidates:
 **Recommendation:** add them only when a kernel needs one, each with
 registry unit tests (value and RNG use) like the v1 entries.
 
+### Q15 — Hybrids cost more than plain NUTS on the test models (Phase 3.7)
+ESS per gradient of the validated hybrids was 0.24-0.60x plain NUTS on the
+same models: correct behaviour for block updates of coupled parameters.
+Phase 5's `laplace sampler test` will report the same for user samplers.
+- (a) Report ESS/grad against plain NUTS as information only.
+- (b) Also warn below some fraction of NUTS.
+
+**Recommendation: (a).** A hybrid's value (a different kind of move for one
+block, a much cheaper block) lies outside what the reference targets measure.
+
+### Q16 — Unsuffixed CSV columns for a single whole-model block (Phase 3.6)
+The plan drops the per-block suffixes "when the whole model is one NUTS
+block". Implemented for any single block covering the model (what Level 1
+already does), so diagnostic_summary() works for all of them.
+- (a) Keep it general.
+- (b) Restrict to NUTS.
+
+**Recommendation: (a).**
+
 ## Answered
 
 ### Q2 — How to carry the nuts-rs `refresh_position` patch
