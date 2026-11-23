@@ -9,7 +9,8 @@
 //!   no statement may run after one, and none may sit inside a loop (the
 //!   count would depend on the data). They are only allowed in `step`.
 //! - **`@adapt`.** Only on tuning declarations; the tag is `step_size` (on a
-//!   `real`, optional `target_accept = <real in (0, 1)>`) or `metric` (on a
+//!   `real`, with the author's `target_accept = <real in (0, 1)>`, which
+//!   is required: the right target depends on the kernel) or `metric` (on a
 //!   `vector[dim]`); at most one of each.
 //! - **Scopes.** Tuning values are read-only to the kernel (adaptation and
 //!   `--set` change them); context values (`q`, `lp`, ...) are read-only;
@@ -289,6 +290,14 @@ impl<'r> Checker<'r> {
                             format!("@adapt(step_size) takes only target_accept, not `{n}`"),
                         );
                     }
+                }
+                if !t.args.iter().any(|(n, _)| n == "target_accept") {
+                    self.err(
+                        t.span,
+                        "@adapt(step_size) needs the kernel's default acceptance target, e.g. \
+                         @adapt(step_size, target_accept = 0.574); adapt(k, target_accept = ...) \
+                         in a .lapsampler can override it",
+                    );
                 }
             }
             AdaptKind::Metric => {
@@ -1031,7 +1040,7 @@ mod tests {
     }
 
     fn kernel(step: &str) -> String {
-        format!("kernel k {{\n  tuning {{\n    real<lower=0> eps = 0.5 @adapt(step_size);\n  }}\n  step {{\n{step}\n  }}\n}}\n")
+        format!("kernel k {{\n  tuning {{\n    real<lower=0> eps = 0.5 @adapt(step_size, target_accept = 0.5);\n  }}\n  step {{\n{step}\n  }}\n}}\n")
     }
 
     const MALA: &str = r#"kernel mala {
@@ -1246,6 +1255,16 @@ mod tests {
     }
 
     #[test]
+    fn step_size_tag_needs_a_target() {
+        let src = "kernel k {\n  tuning {\n    real eps = 1 @adapt(step_size);\n  }\n  step { move(q); }\n}\n";
+        let e = one_error(src, None);
+        assert!(
+            e.starts_with("3:18: @adapt(step_size) needs the kernel's default acceptance target"),
+            "{e}"
+        );
+    }
+
+    #[test]
     fn adapt_tag_must_be_known() {
         let src = "kernel k {\n  tuning {\n    real eps = 1 @adapt(stepsize);\n  }\n  step { move(q); }\n}\n";
         assert_eq!(
@@ -1256,7 +1275,7 @@ mod tests {
 
     #[test]
     fn adapt_tag_types() {
-        let src = "kernel k {\n  tuning {\n    vector[dim] eps = rep_vector(1, dim) @adapt(step_size);\n  }\n  step { move(q); }\n}\n";
+        let src = "kernel k {\n  tuning {\n    vector[dim] eps = rep_vector(1, dim) @adapt(step_size, target_accept = 0.5);\n  }\n  step { move(q); }\n}\n";
         assert_eq!(
             one_error(src, Some(4)),
             "3:42: @adapt(step_size) needs a real, `eps` is vector[4]"
@@ -1271,7 +1290,7 @@ mod tests {
             one_error(src, None),
             "3:50: target_accept must be a number strictly between 0 and 1"
         );
-        let src = "kernel k {\n  tuning {\n    real a = 1 @adapt(step_size);\n    real b = 1 @adapt(step_size);\n  }\n  step { move(q); }\n}\n";
+        let src = "kernel k {\n  tuning {\n    real a = 1 @adapt(step_size, target_accept = 0.5);\n    real b = 1 @adapt(step_size, target_accept = 0.5);\n  }\n  step { move(q); }\n}\n";
         assert_eq!(
             one_error(src, None),
             "4:16: only one tuning value may be tagged @adapt(step_size)"

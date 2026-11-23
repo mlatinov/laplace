@@ -59,7 +59,7 @@ enum Command {
         /// target_accept, max_depth. rwm, mala: step_size, target_accept,
         /// adapt. hmc: the same plus steps, jitter. A .lapkernel file: its
         /// int and real tuning values, adapt, and target_accept if it has
-        /// an @adapt(step_size) value.
+        /// an @adapt(step_size) value (default: the tag's).
         #[arg(long = "set", value_name = "KEY=VALUE")]
         set: Vec<String>,
         /// Directory for the CSV files (`<model>-<chain>.csv`)

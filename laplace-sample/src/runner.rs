@@ -367,13 +367,10 @@ pub struct FileSampler {
     pub sets: Vec<(String, f64)>,
     /// `--set adapt=false` turns warmup adaptation off.
     pub adapt: bool,
-    /// `--set target_accept=...`; else the tag's; else 0.8.
+    /// `--set target_accept=...`; else the kernel's own (its `@adapt` tag
+    /// must carry one, Q14).
     pub target_accept: Option<f64>,
 }
-
-/// Target acceptance for a `.lapkernel` with `@adapt(step_size)` and no
-/// `target_accept` (Stan's default `adapt_delta`).
-pub const DEFAULT_TARGET_ACCEPT: f64 = 0.8;
 
 impl Sampler {
     /// `--sampler` value: a path ending in `.lapkernel`, or a built-in name.
@@ -477,10 +474,9 @@ impl Sampler {
         let metric = kernel.adapts(AdaptKind::Metric);
         let adapter = if f.adapt && (step_size || metric) {
             let config = AdaptConfig {
-                target_accept: f
-                    .target_accept
-                    .or(kernel.target_accept())
-                    .unwrap_or(DEFAULT_TARGET_ACCEPT),
+                // A step_size tag always carries one (checked); a
+                // metric-only kernel adapts no step size and ignores it.
+                target_accept: f.target_accept.or(kernel.target_accept()).unwrap_or(0.5),
                 step_size,
                 metric,
             };
