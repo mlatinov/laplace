@@ -670,6 +670,7 @@ dependencies = [
  "anyhow",
  "bridgestan",
  "clap",
+ "laplace",
  "nalgebra",
  "nuts-rs",
  "pest",

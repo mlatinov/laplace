@@ -83,7 +83,6 @@ fn every_combinator_and_local_kernels_parse() {
     let src = r#"
 // a comment
 sampler all {
-  library { import langevin }
   kernel {
     block(beta) : seq(adapt(./kernels/mala.lapkernel), repeat(3, rwm(step_size = 0.2)))
     block(theta) : mix(1: adapt(./kernels/rwm.lapkernel, target_accept = 0.3), 2.5: hmc(steps = 5, jitter = false))
@@ -91,7 +90,6 @@ sampler all {
   }
 }"#;
     let f = load(src).unwrap_or_else(|e| panic!("{e:#?}"));
-    assert_eq!(f.ast.imports.len(), 1);
     assert_eq!(f.blocks(&model_params()).unwrap().len(), 3);
     let _ = kernels_dir();
 }
@@ -188,15 +186,152 @@ fn unknown_or_misplaced_settings() {
     );
 }
 
+// ---- library kernels (Phase 4.2) --------------------------------------------------
+
+/// A project whose laplace.lock has a kernel package `langevin` (a path
+/// dependency: mala, broken) and a function library `gps`.
+fn project() -> (tempfile::TempDir, Project) {
+    use laplace::manifest::PackageKind;
+    use laplace::resolve::lockfile::{write_lockfile, LockedPackage, Lockfile};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let pkg = root.join("langevin");
+    std::fs::create_dir_all(pkg.join("kernels")).unwrap();
+    std::fs::write(
+        pkg.join("laplace.toml"),
+        "name = \"langevin\"\nversion = \"0.1.0\"\nkind = \"kernels\"\nlaplace = \">=0.3\"\n",
+    )
+    .unwrap();
+    std::fs::copy(
+        format!("{}/mala.lapkernel", kernels_dir()),
+        pkg.join("kernels/mala.lapkernel"),
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("kernels/broken.lapkernel"),
+        "kernel broken {\n  step {\n    move(nope);\n  }\n}\n",
+    )
+    .unwrap();
+    let dir = root.join("project");
+    std::fs::create_dir_all(&dir).unwrap();
+    let lock = Lockfile {
+        root: vec!["gps".into(), "langevin".into()],
+        packages: vec![
+            LockedPackage::leaf("gps", "1.0.0", "sha256:0", "registry"),
+            LockedPackage {
+                kind: PackageKind::Kernels,
+                ..LockedPackage::leaf("langevin", "0.1.0", "sha256:0", "path+../langevin")
+            },
+        ],
+    };
+    write_lockfile(&dir.join("laplace.lock"), &lock).unwrap();
+    let project = Project {
+        dir,
+        cache_root: root.join("home/.laplace/packages"),
+    };
+    (tmp, project)
+}
+
+fn load_in(src: &str, project: &Project) -> Result<SamplerFile, Vec<String>> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    SamplerFile::from_source_in("s.lapsampler", src.to_string(), dir, project)
+        .map_err(|es| es.iter().map(|e| e.to_string()).collect())
+}
+
+fn one_error_in(src: &str, project: &Project) -> String {
+    let es = load_in(src, project).expect_err("should fail");
+    assert_eq!(es.len(), 1, "{es:#?}");
+    es[0].trim_start_matches("s.lapsampler:").to_string()
+}
+
 #[test]
-fn library_kernels_wait_for_phase_4() {
-    let e = one_error(
-        "sampler s {\n  library { import langevin }\n  kernel { rest : langevin::mala }\n}\n",
+fn a_library_kernel_resolves_through_the_lock_with_provenance() {
+    let (_tmp, p) = project();
+    let f = load_in(
+        "sampler s {\n  library { import langevin }\n  kernel {\n    block(beta) : adapt(langevin::mala(eps = 0.1))\n    \
+         block(theta) : seq(langevin::mala, ./kernels/rwm.lapkernel)\n    rest : nuts()\n  }\n}\n",
+        &p,
+    )
+    .unwrap_or_else(|e| panic!("{e:#?}"));
+    let target: Arc<dyn Target> = Arc::new(crate::target::analytic::DiagGaussian {
+        mu: vec![0.0; 8],
+        sd: vec![1.0; 8],
+    });
+    let built = f.instantiate(&model_params(), target, 10, 10).unwrap();
+    let v: Vec<(&str, &str)> = built
+        .lines
+        .iter()
+        .map(|l| (l.name.as_str(), l.version.as_str()))
+        .collect();
+    assert_eq!(
+        v,
+        vec![
+            ("adapt(langevin::mala(eps = 0.1))", "langevin@0.1.0"),
+            (
+                "seq(langevin::mala, ./kernels/rwm.lapkernel)",
+                "langevin@0.1.0+local"
+            ),
+            ("nuts()", crate::VERSION),
+        ]
     );
+    // The hash covers the installed kernel's own source.
+    let mala = std::fs::read_to_string(format!("{}/mala.lapkernel", kernels_dir())).unwrap();
+    assert!(built.lines[0].source.contains(&mala));
+}
+
+#[test]
+fn library_kernel_errors() {
+    let (_tmp, p) = project();
+    let src = |lib: &str, k: &str| {
+        format!("sampler s {{\n  library {{ {lib} }}\n  kernel {{ rest : {k} }}\n}}\n")
+    };
+    let e = one_error_in(&src("", "langevin::mala"), &p);
     assert!(
-        e.starts_with("3:19: library kernels (`langevin::mala`) arrive in Phase 4"),
+        e.starts_with("3:19: `langevin::mala`: `langevin` is not imported; add `import langevin`"),
         "{e}"
     );
+    let e = one_error_in(&src("import langevin@0.2", "langevin::mala"), &p);
+    assert!(
+        e.starts_with(
+            "2:13: `import langevin@0.2`: versions come only from laplace.toml and laplace.lock"
+        ),
+        "{e}"
+    );
+    let e = one_error_in(&src("import langevin", "langevin::pmala"), &p);
+    assert_eq!(
+        e,
+        "3:19: `langevin` 0.1.0 has no kernel `pmala`; its kernels are: broken, mala"
+    );
+    let e = one_error_in(&src("import langevin", "langevin::mala(m = 1)"), &p);
+    assert!(
+        e.starts_with("3:34: langevin::mala has no tuning value `m`; its tuning values are: eps"),
+        "{e}"
+    );
+    let e = one_error_in(&src("import langevin", "langevin::broken"), &p);
+    assert!(
+        e.starts_with("3:19: langevin::broken does not check:"),
+        "{e}"
+    );
+    assert!(
+        e.contains("langevin/kernels/broken.lapkernel:3:10:"),
+        "the kernel's own position, never the cache path: {e}"
+    );
+    let e = one_error_in(&src("import gps", "nuts()"), &p);
+    assert!(e.starts_with("2:13: `gps` is a function library"), "{e}");
+    let e = one_error_in(&src("import nothere", "nuts()"), &p);
+    assert!(
+        e.starts_with("2:13: `nothere` is not in laplace.lock -- add it with `laplace add nothere"),
+        "{e}"
+    );
+    let e = one_error_in(&src("import langevin import langevin", "nuts()"), &p);
+    assert!(e.starts_with("2:29: `langevin` is imported twice"), "{e}");
+    // No lock at all.
+    let elsewhere = Project {
+        dir: p.dir.join("sub"),
+        cache_root: p.cache_root.clone(),
+    };
+    let e = one_error_in(&src("import langevin", "langevin::mala"), &elsewhere);
+    assert!(e.contains("there is no laplace.lock in"), "{e}");
 }
 
 #[test]

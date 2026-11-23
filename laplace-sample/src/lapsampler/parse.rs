@@ -15,13 +15,22 @@ struct SamplerParser;
 pub struct SamplerAst {
     pub name: String,
     pub span: Span,
-    pub imports: Vec<(String, Span)>,
+    pub imports: Vec<Import>,
     pub lines: Vec<Line>,
     pub kernel_block: Option<Span>,
     pub warmup: Vec<Setting>,
     pub draws: Vec<Setting>,
     /// Sections in source order (for duplicate errors).
     pub sections: Vec<(&'static str, Span)>,
+}
+
+/// `import langevin` (a version, `import langevin@0.1`, parses so that it
+/// can be refused with a reason: versions come from laplace.toml/lock).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Import {
+    pub name: String,
+    pub version: Option<String>,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -74,10 +83,11 @@ pub enum KExpr {
         args: Vec<Arg>,
         span: Span,
     },
-    /// A library kernel: `langevin::mala` (Phase 4).
+    /// A library kernel: `langevin::mala(eps = 0.05)` (Phase 4).
     Library {
         package: String,
         name: String,
+        args: Vec<Arg>,
         span: Span,
     },
     Seq(Vec<KExpr>, Span),
@@ -182,11 +192,20 @@ pub fn parse(file: &str, src: &str) -> Result<SamplerAst, LapError> {
                 ast.sections.push(("library", ssp));
                 for imp in s.into_inner().filter(|p| p.as_rule() == Rule::import) {
                     let isp = span(&imp);
-                    let name = imp
-                        .into_inner()
-                        .find(|p| p.as_rule() == Rule::ident)
-                        .unwrap();
-                    ast.imports.push((name.as_str().to_string(), isp));
+                    let mut name = None;
+                    let mut version = None;
+                    for p in imp.into_inner() {
+                        match p.as_rule() {
+                            Rule::ident => name = Some(p.as_str().to_string()),
+                            Rule::version => version = Some(p.as_str().to_string()),
+                            _ => {}
+                        }
+                    }
+                    ast.imports.push(Import {
+                        name: name.unwrap(),
+                        version,
+                        span: isp,
+                    });
                 }
             }
             Rule::kernel_block => {
@@ -337,6 +356,7 @@ fn build_kexpr(p: Pair<Rule>) -> KExpr {
             KExpr::Library {
                 package: i.next().unwrap().as_str().to_string(),
                 name: i.next().unwrap().as_str().to_string(),
+                args: build_args(i.next()),
                 span: sp,
             }
         }

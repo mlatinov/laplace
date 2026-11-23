@@ -1023,14 +1023,13 @@ fn parse_package_spec(spec: &str) -> (&str, Option<&str>) {
 }
 
 fn laplace_home() -> PathBuf {
-    let home = env::var_os("HOME").expect("HOME environment variable must be set");
-    PathBuf::from(home).join(".laplace")
+    resolve::laplace_home()
 }
 
 /// Where `laplace install`/`add`/`update` copy resolved packages, per the
 /// design doc: `~/.laplace/packages/<name>/<version>/`.
 fn default_cache_root() -> PathBuf {
-    laplace_home().join("packages")
+    resolve::default_cache_root()
 }
 
 /// The local filesystem "registry" packages are resolved from (real

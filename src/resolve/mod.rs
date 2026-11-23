@@ -816,6 +816,20 @@ fn resolve_install_and_lock(
     Ok((lock, notes))
 }
 
+/// `~/.laplace`. In the library (not only the binary) so `laplace-sample`
+/// finds installed kernel packages exactly where the compiler put them.
+pub fn laplace_home() -> PathBuf {
+    let home = std::env::var_os("HOME").expect("HOME environment variable must be set");
+    PathBuf::from(home).join(".laplace")
+}
+
+/// Where `laplace install`/`add`/`update` copy resolved packages:
+/// `~/.laplace/packages/<name>/<version>/` (path packages beside it, under
+/// `path-packages/`).
+pub fn default_cache_root() -> PathBuf {
+    laplace_home().join("packages")
+}
+
 /// Translate the pure resolver's errors into laplace's user-facing ones,
 /// keeping the registry-specific wording where it is more helpful.
 fn map_graph_error(err: GraphError, registry: &Registry) -> ResolveError {

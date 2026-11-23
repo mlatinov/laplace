@@ -3,7 +3,8 @@
 //!
 //! [`SamplerFile::load`] parses a file and checks everything that does not
 //! need the model: kernel names and settings, local `.lapkernel` files
-//! (parsed and checked), library references (Phase 4), the adapt contracts,
+//! (parsed and checked), library kernels (`import` + `pkg::kernel`, resolved
+//! through the project's laplace.lock, Phase 4.2), the adapt contracts,
 //! structure. [`SamplerFile::instantiate`] then checks the blocks against
 //! the model's parameters (coverage, D2) and builds the kernel tree.
 //! `laplace sampler check` runs both, the second when given a model.
@@ -25,6 +26,7 @@ use crate::lapkernel::ast::Span;
 use crate::lapkernel::check::AdaptKind;
 use crate::lapkernel::kernel::{InterpretedKernel, LapKernelFile};
 use crate::lapkernel::LapError;
+use crate::libraries::{display_path, resolve_import, KernelPackage, Project};
 use crate::runner::{BuiltIn, SamplerSpec};
 use crate::target::Target;
 use parse::{Arg, ArgValue, KExpr, LineTarget, SamplerAst};
@@ -46,8 +48,30 @@ pub struct SamplerFile {
     pub path: String,
     pub source: String,
     pub ast: SamplerAst,
-    /// Local `.lapkernel` files by the path written in the sampler.
+    /// `.lapkernel` files by key: the path written in the sampler for a
+    /// local file, `package::kernel` for a library kernel.
     kernels: Vec<(String, Arc<LapKernelFile>)>,
+    /// The kernel packages this file imports, as locked and installed.
+    libraries: Vec<KernelPackage>,
+}
+
+/// What a kernel expression is checked against.
+struct Scope<'a> {
+    /// The sampler file's directory (local paths resolve against it).
+    dir: &'a Path,
+    /// Every name in `library { }`, resolved or not.
+    imported: Vec<String>,
+    /// The imports that resolved.
+    libraries: &'a [KernelPackage],
+}
+
+/// The key a `.lapkernel` leaf is stored under.
+fn kernel_key(k: &KExpr) -> Option<String> {
+    match k {
+        KExpr::Path { path, .. } => Some(path.clone()),
+        KExpr::Library { package, name, .. } => Some(format!("{package}::{name}")),
+        _ => None,
+    }
 }
 
 /// The kernel tree for one chain, plus its provenance lines.
@@ -86,7 +110,18 @@ pub fn render(k: &KExpr) -> String {
         KExpr::BuiltIn { name, args: a, .. } => format!("{name}({})", args(a)),
         KExpr::Path { path, args: a, .. } if a.is_empty() => path.clone(),
         KExpr::Path { path, args: a, .. } => format!("{path}({})", args(a)),
-        KExpr::Library { package, name, .. } => format!("{package}::{name}"),
+        KExpr::Library {
+            package,
+            name,
+            args: a,
+            ..
+        } if a.is_empty() => format!("{package}::{name}"),
+        KExpr::Library {
+            package,
+            name,
+            args: a,
+            ..
+        } => format!("{package}::{name}({})", args(a)),
         KExpr::Seq(ks, _) => format!(
             "seq({})",
             ks.iter().map(render).collect::<Vec<_>>().join(", ")
@@ -114,6 +149,11 @@ fn number(a: &Arg) -> Option<f64> {
 
 impl SamplerFile {
     pub fn load(path: &Path) -> Result<Self, Vec<LapError>> {
+        Self::load_in(path, &Project::current())
+    }
+
+    /// [`SamplerFile::load`] with library imports resolved in `project`.
+    pub fn load_in(path: &Path, project: &Project) -> Result<Self, Vec<LapError>> {
         let shown = path.display().to_string();
         let source = std::fs::read_to_string(path).map_err(|e| {
             vec![LapError::new(
@@ -126,12 +166,22 @@ impl SamplerFile {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
-        Self::from_source(&shown, source, &dir)
+        Self::from_source_in(&shown, source, &dir, project)
     }
 
     /// Parse and check `source`; relative `.lapkernel` paths resolve
-    /// against `dir` (the sampler file's directory).
+    /// against `dir` (the sampler file's directory), imports in the current
+    /// directory's project.
     pub fn from_source(path: &str, source: String, dir: &Path) -> Result<Self, Vec<LapError>> {
+        Self::from_source_in(path, source, dir, &Project::current())
+    }
+
+    pub fn from_source_in(
+        path: &str,
+        source: String,
+        dir: &Path,
+        project: &Project,
+    ) -> Result<Self, Vec<LapError>> {
         let ast = parse::parse(path, &source).map_err(|e| vec![e])?;
         let mut c = Ctx {
             file: path,
@@ -180,6 +230,37 @@ impl SamplerFile {
             }
         }
 
+        // Imports: kernel packages from laplace.lock, never a version here.
+        let mut libraries: Vec<KernelPackage> = vec![];
+        let mut imported: Vec<String> = vec![];
+        for imp in &ast.imports {
+            if imported.contains(&imp.name) {
+                c.err(imp.span, format!("`{}` is imported twice", imp.name));
+                continue;
+            }
+            imported.push(imp.name.clone());
+            if let Some(v) = &imp.version {
+                c.err(
+                    imp.span,
+                    format!(
+                        "`import {name}@{v}`: versions come only from laplace.toml and laplace.lock; write \
+                         `import {name}` and choose the version with `laplace add {name}@{v}` (or --tag)",
+                        name = imp.name
+                    ),
+                );
+                continue;
+            }
+            match resolve_import(project, &imp.name) {
+                Ok(lib) => libraries.push(lib),
+                Err(e) => c.err(imp.span, e),
+            }
+        }
+        let scope = Scope {
+            dir,
+            imported,
+            libraries: &libraries,
+        };
+
         // Lines: rest at most once and last; labels unique; no repeats in a block.
         let mut labels: Vec<(String, Span)> = vec![];
         for (i, l) in ast.lines.iter().enumerate() {
@@ -209,7 +290,7 @@ impl SamplerFile {
                 );
             }
             labels.push((label, l.span));
-            check_kexpr(&mut c, &l.kernel, dir, &mut kernels, false);
+            check_kexpr(&mut c, &l.kernel, &scope, &mut kernels, false);
         }
 
         if c.errors.is_empty() {
@@ -218,6 +299,7 @@ impl SamplerFile {
                 source,
                 ast,
                 kernels,
+                libraries,
             })
         } else {
             c.errors
@@ -371,9 +453,13 @@ impl SamplerFile {
             .expect("loaded at check time")
     }
 
-    /// `local` if any leaf is a local file; the concatenated leaf sources.
+    /// The provenance version of a kernel line and its leaves' sources.
+    /// Built-ins only: laplace-sample's version. Otherwise every library
+    /// kernel's `package@version` (from laplace.lock), sorted, joined with
+    /// `+`, and `local` when a local file is among the leaves.
     fn provenance(&self, k: &KExpr) -> (String, String) {
         let mut local = false;
+        let mut libs: Vec<String> = vec![];
         let mut sources = String::new();
         let mut walk = vec![k];
         while let Some(k) = walk.pop() {
@@ -386,16 +472,29 @@ impl SamplerFile {
                     local = true;
                     sources += &self.kernel_file(path).source;
                 }
-                KExpr::Library { .. } => {}
+                KExpr::Library { package, .. } => {
+                    let lib = self
+                        .libraries
+                        .iter()
+                        .find(|l| &l.name == package)
+                        .expect("resolved at check time");
+                    libs.push(format!("{}@{}", lib.name, lib.version));
+                    sources += &self.kernel_file(&kernel_key(k).unwrap()).source;
+                }
                 KExpr::Seq(ks, _) => walk.extend(ks.iter()),
                 KExpr::Mix(ks, _) => walk.extend(ks.iter().map(|(_, k)| k)),
                 KExpr::Repeat(_, k, _) | KExpr::Adapt(k, _, _) | KExpr::On(_, k, _) => walk.push(k),
             }
         }
-        let version = if local {
-            "local".to_string()
-        } else {
+        libs.sort();
+        libs.dedup();
+        if local {
+            libs.push("local".into());
+        }
+        let version = if libs.is_empty() {
             crate::VERSION.to_string()
+        } else {
+            libs.join("+")
         };
         (version, sources)
     }
@@ -448,7 +547,17 @@ impl SamplerFile {
                     &sets,
                 )?)
             }
-            KExpr::Library { .. } => unreachable!("rejected at check time"),
+            KExpr::Library { args, .. } => {
+                let sets: Vec<(String, f64)> = args
+                    .iter()
+                    .filter_map(|a| Some((a.name.clone(), number(a)?)))
+                    .collect();
+                Box::new(InterpretedKernel::new(
+                    self.kernel_file(&kernel_key(k).unwrap()),
+                    block.dim(),
+                    &sets,
+                )?)
+            }
             KExpr::Seq(ks, _) => Box::new(Seq {
                 items: ks
                     .iter()
@@ -507,18 +616,22 @@ pub fn errors(es: Vec<LapError>) -> anyhow::Error {
 fn adaptable(k: &KExpr, kernels: &[(String, Arc<LapKernelFile>)]) -> Result<(), String> {
     match k {
         KExpr::BuiltIn { name, .. } => match name.as_str() {
-            "nuts" => Err("nuts() adapts its own step size and metric; use it without adapt()".into()),
+            "nuts" => {
+                Err("nuts() adapts its own step size and metric; use it without adapt()".into())
+            }
             _ => Ok(()),
         },
-        KExpr::Path { path, .. } => match kernels.iter().find(|(p, _)| p == path) {
-            Some((_, f)) if f.has_adapt(AdaptKind::StepSize) || f.has_adapt(AdaptKind::Metric) => Ok(()),
-            Some(_) => Err(format!(
-                "{path} has nothing to adapt: tag its step size @adapt(step_size, target_accept = ...) \
-                 and/or its inverse metric @adapt(metric)"
-            )),
-            None => Ok(()), // its own load error is reported
-        },
-        KExpr::Library { .. } => Ok(()),
+        KExpr::Path { .. } | KExpr::Library { .. } => {
+            let key = kernel_key(k).unwrap();
+            match kernels.iter().find(|(p, _)| *p == key) {
+                Some((_, f)) if f.has_adapt(AdaptKind::StepSize) || f.has_adapt(AdaptKind::Metric) => Ok(()),
+                Some(_) => Err(format!(
+                    "{key} has nothing to adapt: tag its step size @adapt(step_size, target_accept = ...) \
+                     and/or its inverse metric @adapt(metric)"
+                )),
+                None => Ok(()), // its own load error is reported
+            }
+        }
         other => Err(format!(
             "adapt() wraps a single kernel, not {}(...); put adapt() around each kernel inside it",
             match other {
@@ -536,7 +649,7 @@ fn adaptable(k: &KExpr, kernels: &[(String, Arc<LapKernelFile>)]) -> Result<(), 
 fn check_kexpr(
     c: &mut Ctx,
     k: &KExpr,
-    dir: &Path,
+    scope: &Scope,
     kernels: &mut Vec<(String, Arc<LapKernelFile>)>,
     under_mix: bool,
 ) {
@@ -593,66 +706,54 @@ fn check_kexpr(
                 c.err(*span, format!("`{path}`: a local kernel is a .lapkernel file"));
                 return;
             }
-            let file = if kernels.iter().any(|(p, _)| p == path) {
-                kernels.iter().find(|(p, _)| p == path).map(|(_, f)| f.clone())
-            } else {
-                let full = dir.join(path);
-                match LapKernelFile::load(&full) {
-                    Ok(f) => {
-                        let f = Arc::new(f);
-                        kernels.push((path.clone(), f.clone()));
-                        Some(f)
-                    }
-                    Err(e) => {
-                        // The kernel file's own errors carry its own file:line:col.
-                        let msg = e.to_string();
-                        if msg.starts_with("cannot read") {
-                            c.err(*span, msg);
-                        } else {
-                            // Its own errors keep their file:line:col.
-                            let indented: Vec<String> = msg.lines().map(|l| format!("  {l}")).collect();
-                            c.err(*span, format!("{path} does not check:\n{}", indented.join("\n")));
-                        }
-                        None
-                    }
-                }
+            let full = scope.dir.join(path);
+            load_kernel(c, path, LapKernelFile::load(&full), args, *span, kernels);
+        }
+        KExpr::Library {
+            package,
+            name,
+            args,
+            span,
+        } => {
+            if !scope.imported.contains(package) {
+                c.err(
+                    *span,
+                    format!(
+                        "`{package}::{name}`: `{package}` is not imported; add `import {package}` to this \
+                         file's library {{ }} block"
+                    ),
+                );
+                return;
+            }
+            // An import that did not resolve has its own error.
+            let Some(lib) = scope.libraries.iter().find(|l| &l.name == package) else {
+                return;
             };
-            if let Some(f) = file {
-                let settable = f.settable();
-                for a in args {
-                    if !settable.contains(&a.name) {
-                        c.err(
-                            a.span,
-                            format!("{path} has no tuning value `{}`; its tuning values are: {}", a.name, settable.join(", ")),
-                        );
-                    } else if number(a).is_none() {
-                        c.err(a.span, format!("`{}` must be a number", a.name));
-                    }
+            match lib.kernel_file(name) {
+                Err(e) => c.err(*span, e),
+                Ok(file) => {
+                    let loaded = std::fs::read_to_string(&file)
+                        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", file.display()))
+                        .and_then(|src| LapKernelFile::from_source(&display_path(package, name), src));
+                    load_kernel(c, &format!("{package}::{name}"), loaded, args, *span, kernels);
                 }
             }
         }
-        KExpr::Library { package, name, span } => c.err(
-            *span,
-            format!(
-                "library kernels (`{package}::{name}`) arrive in Phase 4; use a local path such as \
-                 ./kernels/{name}.lapkernel for now"
-            ),
-        ),
-        KExpr::Seq(ks, _) => ks.iter().for_each(|k| check_kexpr(c, k, dir, kernels, under_mix)),
+        KExpr::Seq(ks, _) => ks.iter().for_each(|k| check_kexpr(c, k, scope, kernels, under_mix)),
         KExpr::Mix(ks, span) => {
             if ks.iter().any(|(w, _)| !(w.is_finite() && *w > 0.0)) {
                 c.err(*span, "mix() weights must be positive numbers");
             }
-            ks.iter().for_each(|(_, k)| check_kexpr(c, k, dir, kernels, true));
+            ks.iter().for_each(|(_, k)| check_kexpr(c, k, scope, kernels, true));
         }
         KExpr::Repeat(n, k, span) => {
             if !(*n >= 1.0 && n.fract() == 0.0) {
                 c.err(*span, format!("repeat(n, ...) needs a whole number n >= 1, got {n}"));
             }
-            check_kexpr(c, k, dir, kernels, under_mix);
+            check_kexpr(c, k, scope, kernels, under_mix);
         }
         KExpr::Adapt(k, args, span) => {
-            check_kexpr(c, k, dir, kernels, under_mix);
+            check_kexpr(c, k, scope, kernels, under_mix);
             for a in args {
                 match (a.name.as_str(), number(a)) {
                     ("target_accept", Some(v)) if v > 0.0 && v < 1.0 => {}
@@ -668,6 +769,61 @@ fn check_kexpr(
             *span,
             "on(block(...), ...) cannot be used inside a kernel line: the line already names its block",
         ),
+    }
+}
+
+/// Record a `.lapkernel` leaf under `key` (once) and check the tuning
+/// values given to it. A file that does not load or check is reported at
+/// the leaf, with the kernel's own errors indented below it.
+fn load_kernel(
+    c: &mut Ctx,
+    key: &str,
+    loaded: anyhow::Result<LapKernelFile>,
+    args: &[Arg],
+    span: Span,
+    kernels: &mut Vec<(String, Arc<LapKernelFile>)>,
+) {
+    let file = if let Some((_, f)) = kernels.iter().find(|(p, _)| p == key) {
+        Some(f.clone())
+    } else {
+        match loaded {
+            Ok(f) => {
+                let f = Arc::new(f);
+                kernels.push((key.to_string(), f.clone()));
+                Some(f)
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.starts_with("cannot read") {
+                    c.err(span, msg);
+                } else {
+                    // Its own errors keep their file:line:col.
+                    let indented: Vec<String> = msg.lines().map(|l| format!("  {l}")).collect();
+                    c.err(
+                        span,
+                        format!("{key} does not check:\n{}", indented.join("\n")),
+                    );
+                }
+                None
+            }
+        }
+    };
+    if let Some(f) = file {
+        let settable = f.settable();
+        for a in args {
+            if !settable.contains(&a.name) {
+                c.err(
+                    a.span,
+                    format!(
+                        "{key} has no tuning value `{}`; its tuning values are: {}",
+                        a.name,
+                        settable.join(", ")
+                    ),
+                );
+            } else if number(a).is_none() {
+                c.err(a.span, format!("`{}` must be a number", a.name));
+            }
+        }
     }
 }
 
