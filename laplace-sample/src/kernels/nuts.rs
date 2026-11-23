@@ -94,6 +94,16 @@ pub struct Nuts {
     chain: Option<NutsChainOf>,
     step_size: Option<f64>,
     inv_metric: Option<Vec<f64>>,
+    /// Block mode (Phase 3.4): the block target's shared "rest" and its
+    /// gradient counter.
+    block: Option<BlockHandle>,
+    /// Draws taken so far (to check the warmup length at end_warmup).
+    draws_taken: u64,
+}
+
+struct BlockHandle {
+    rest: Arc<std::sync::Mutex<Vec<f64>>>,
+    n_grad: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Nuts {
@@ -117,7 +127,52 @@ impl Nuts {
             chain: None,
             step_size: None,
             inv_metric: None,
+            block: None,
+            draws_taken: 0,
         }
+    }
+
+    /// `nuts()` on one block of `full` (Phase 3.4). `num_tune` must be the
+    /// number of times this kernel will run during warmup (warmup x uses
+    /// per sweep): nuts-rs adapts for exactly that many draws.
+    ///
+    /// Each step first copies the other blocks' current values into the
+    /// block target and calls nuts-rs's `refresh_position` (the vendored
+    /// patch, Q2): the cached log density and gradient are recomputed under
+    /// the moved blocks, and step size and metric are left alone. Upstream's
+    /// `set_position` would re-initialise them, which after warmup makes the
+    /// kernel depend on the state and biases it (Phase 0.5).
+    pub fn for_block(
+        full: Arc<dyn Target>,
+        indices: Vec<usize>,
+        num_tune: u64,
+        num_draws: u64,
+    ) -> Self {
+        let dim = full.dim();
+        let bt = crate::target::BlockTarget::new(full, indices, vec![0.0; dim]);
+        let handle = BlockHandle {
+            rest: bt.rest.clone(),
+            n_grad: bt.n_grad.clone(),
+        };
+        let mut k = Self::new(Arc::new(bt), num_tune, num_draws);
+        k.block = Some(handle);
+        k
+    }
+
+    fn sync_rest(&self, ev: &Evaluator) -> anyhow::Result<()> {
+        if let Some(b) = &self.block {
+            let view = ev.view().ok_or_else(|| {
+                anyhow::anyhow!("nuts() on a block must run inside on(block, ...)")
+            })?;
+            *b.rest.lock().expect("rest lock") = view.base.clone();
+        }
+        Ok(())
+    }
+
+    fn block_grads(&self) -> Option<u64> {
+        self.block
+            .as_ref()
+            .map(|b| b.n_grad.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     pub fn set_max_depth(&mut self, depth: u64) {
@@ -156,9 +211,10 @@ impl Kernel for Nuts {
     fn init(
         &mut self,
         state: &ChainState,
-        _ev: &mut Evaluator,
+        ev: &mut Evaluator,
         rng: &mut ChainRng,
     ) -> anyhow::Result<()> {
+        self.sync_rest(ev)?;
         let logp = TargetLogp {
             target: self.target.clone(),
         };
@@ -173,13 +229,24 @@ impl Kernel for Nuts {
     fn step(
         &mut self,
         state: &mut ChainState,
-        _ev: &mut Evaluator,
+        ev: &mut Evaluator,
         _rng: &mut ChainRng,
     ) -> anyhow::Result<StepInfo> {
+        let grads_before = self.block_grads();
+        if self.block.is_some() {
+            self.sync_rest(ev)?;
+        }
+        let in_block = self.block.is_some();
         let chain = self
             .chain
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("nuts: step before init"))?;
+        if in_block {
+            // The other blocks may have moved: recompute logp and gradient
+            // at the current block position, keeping step size and metric.
+            chain.refresh_position(&state.q)?;
+        }
+        self.draws_taken += 1;
         let (position, _expanded, stats, progress) = chain.expanded_draw()?;
         let kinetic_energy = stats.point.kinetic_energy;
         let grad = stats
@@ -199,9 +266,15 @@ impl Kernel for Nuts {
         if let Some(sd) = &stats.hamiltonian.transformation.mass_matrix_inv {
             self.inv_metric = Some(sd.iter().map(|s| s * s).collect());
         }
+        // Whole model: nuts-rs's own count. Block: every evaluation through
+        // the block target, the refresh included.
+        let n_grad = match (grads_before, self.block_grads()) {
+            (Some(a), Some(b)) => b - a,
+            _ => progress.num_gradients,
+        };
         Ok(StepInfo {
             accept_prob: Some(stats.adapt.step_size.mean_tree_accept),
-            n_grad: progress.num_gradients,
+            n_grad,
             divergent: Some(progress.diverging),
             // Stan's energy__ is -lp + kinetic energy. nuts-rs's own
             // `energy` lives in its transformed space and is offset by the
@@ -212,6 +285,17 @@ impl Kernel for Nuts {
             n_leapfrog: Some(progress.num_steps),
             ..Default::default()
         })
+    }
+
+    fn end_warmup(&mut self) -> anyhow::Result<()> {
+        let tune = self.settings.num_tune;
+        anyhow::ensure!(
+            self.draws_taken == tune,
+            "nuts() was set up to adapt for {tune} warmup steps but ran {}; it would keep \
+             adapting after warmup (nuts() cannot sit under mix(), whose step counts are random)",
+            self.draws_taken
+        );
+        Ok(())
     }
 
     fn tuning(&self) -> Tuning {
@@ -235,5 +319,147 @@ impl Kernel for Nuts {
             self.set_initial_step_size(eps);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod block_tests {
+    use super::*;
+    use crate::adapt::Adapt;
+    use crate::blocks::{parameters, Block};
+    use crate::combinators::{Mix, On, Seq};
+    use crate::diagnostics::{moment, verdict, Verdict};
+    use crate::kernels::mala::Mala;
+    use crate::runner::{chain_rng, initial_state, Init};
+    use crate::target::analytic::Gaussian;
+    use nalgebra::DMatrix;
+
+    /// Two 3-coordinate blocks, correlated through the precision matrix.
+    fn coupled() -> (Arc<dyn Target>, Vec<f64>, Block, Block) {
+        let mut p = vec![vec![0.0; 6]; 6];
+        for (i, row) in p.iter_mut().enumerate() {
+            for (j, x) in row.iter_mut().enumerate() {
+                *x = if i == j {
+                    2.0
+                } else {
+                    0.3 + 0.05 * (i + j) as f64
+                };
+            }
+        }
+        let cov = DMatrix::from_fn(6, 6, |i, j| p[i][j])
+            .try_inverse()
+            .unwrap();
+        let names: Vec<String> = ["a.1", "a.2", "a.3", "b.1", "b.2", "b.3"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let ps = parameters(&names).unwrap();
+        (
+            Arc::new(Gaussian { precision: p }),
+            (0..6).map(|i| cov[(i, i)]).collect(),
+            Block::new(&ps, &["a".into()], None).unwrap(),
+            Block::new(&ps, &["b".into()], None).unwrap(),
+        )
+    }
+
+    fn hybrid(t: &Arc<dyn Target>, a: &Block, b: &Block, warmup: u64, draws: u64) -> Seq {
+        Seq {
+            items: vec![
+                Box::new(On {
+                    block: a.clone(),
+                    inner: Box::new(Nuts::for_block(t.clone(), a.indices.clone(), warmup, draws)),
+                }),
+                Box::new(On {
+                    block: b.clone(),
+                    inner: Box::new(Adapt::new(Box::new(Mala::new(1.0)), None, warmup).unwrap()),
+                }),
+            ],
+        }
+    }
+
+    /// 3.4: block(a): nuts() alongside block(b): adapt(mala()) passes the
+    /// moment check, with healthy chains, on a target whose blocks are
+    /// correlated; and no component re-tunes after warmup.
+    #[test]
+    fn nuts_as_a_block_beside_another_block() {
+        let (t, var, a, b) = coupled();
+        let (warmup, draws) = (1000, 2000);
+        let mut xs: Vec<Vec<Vec<f64>>> = vec![vec![]; 6];
+        for chain in 1..=4 {
+            let mut k = hybrid(&t, &a, &b, warmup, draws);
+            let mut ev = Evaluator::new(t.as_ref());
+            let mut rng = chain_rng(21, chain);
+            let mut st = initial_state(&Init::Radius(2.0), &mut ev, &mut rng).unwrap();
+            k.init(&st, &mut ev, &mut rng).unwrap();
+            for _ in 0..warmup {
+                k.step(&mut st, &mut ev, &mut rng).unwrap();
+            }
+            k.end_warmup().unwrap();
+            let frozen = k.tunings();
+            assert!(
+                frozen.iter().all(|(_, t)| t.step_size.is_some()),
+                "{frozen:?}"
+            );
+            let mut cols: Vec<Vec<f64>> = vec![vec![]; 6];
+            for _ in 0..draws {
+                k.step(&mut st, &mut ev, &mut rng).unwrap();
+                assert_eq!(k.tunings(), frozen, "re-tuned after warmup");
+                for (d, x) in st.q.iter().enumerate() {
+                    cols[d].push(*x);
+                }
+            }
+            for d in 0..6 {
+                xs[d].push(std::mem::take(&mut cols[d]));
+            }
+        }
+        let mut rows = vec![];
+        for d in 0..6 {
+            let x2: Vec<Vec<f64>> = xs[d]
+                .iter()
+                .map(|c| c.iter().map(|v| v * v).collect())
+                .collect();
+            rows.push(moment(&format!("E[x{d}]"), &xs[d], 0.0));
+            rows.push(moment(&format!("E[x{d}^2]"), &x2, var[d]));
+        }
+        assert_eq!(verdict(&rows), Verdict::Pass, "{rows:#?}");
+    }
+
+    #[test]
+    fn nuts_under_mix_is_refused_at_end_of_warmup() {
+        let (t, _, a, _) = coupled();
+        let nuts = On {
+            block: a.clone(),
+            inner: Box::new(Nuts::for_block(t.clone(), a.indices.clone(), 100, 10)),
+        };
+        let other = On {
+            block: a.clone(),
+            inner: Box::new(Mala::new(0.3)),
+        };
+        let mut k = Mix::new(&[1.0, 1.0], vec![Box::new(nuts), Box::new(other)]).unwrap();
+        let mut ev = Evaluator::new(t.as_ref());
+        let mut rng = chain_rng(1, 1);
+        let mut st = initial_state(&Init::Radius(1.0), &mut ev, &mut rng).unwrap();
+        k.init(&st, &mut ev, &mut rng).unwrap();
+        for _ in 0..100 {
+            k.step(&mut st, &mut ev, &mut rng).unwrap();
+        }
+        let e = k.end_warmup().unwrap_err();
+        assert!(e.to_string().contains("cannot sit under mix()"), "{e}");
+    }
+
+    #[test]
+    fn block_nuts_counts_its_refresh_gradient() {
+        let (t, _, a, b) = coupled();
+        let mut k = hybrid(&t, &a, &b, 10, 10);
+        let mut ev = Evaluator::new(t.as_ref());
+        let mut rng = chain_rng(2, 1);
+        let mut st = initial_state(&Init::Radius(1.0), &mut ev, &mut rng).unwrap();
+        k.init(&st, &mut ev, &mut rng).unwrap();
+        let info = k.step(&mut st, &mut ev, &mut rng).unwrap();
+        let nuts = &info.blocks[0];
+        assert_eq!(nuts.label, "a");
+        // at least the refresh plus one leapfrog step
+        assert!(nuts.info.n_grad >= 2, "{:?}", nuts.info);
+        assert_eq!(nuts.info.n_leapfrog.map(|n| n >= 1), Some(true));
     }
 }
