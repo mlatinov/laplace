@@ -1,0 +1,10 @@
+// Phase 3.7: NUTS on one block, adapted MALA on the other, on a target whose
+// blocks are strongly correlated (tests/targets/corr_gauss_split.stan).
+sampler hybrid_corr {
+  kernel {
+    block(a) : nuts()
+    block(b) : adapt(mala())
+  }
+  warmup { iterations = 1000; }
+  draws  { iterations = 1000; }
+}

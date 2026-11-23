@@ -18,6 +18,7 @@ pub mod diagnostics;
 pub mod kernel;
 pub mod kernels;
 pub mod lapkernel;
+pub mod lapsampler;
 pub mod model;
 pub mod runner;
 pub mod sample;
