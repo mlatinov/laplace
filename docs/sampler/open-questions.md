@@ -24,6 +24,31 @@ addition. **Not in v1**, recorded as candidates:
 **Recommendation:** add them only when a kernel needs one, each with
 registry unit tests (value and RNG use) like the v1 entries.
 
+### Q20 — `laplace-sample`'s version and distribution (Phase 5)
+`laplace-sample --version` says 0.1.0 while the compiler it ships with is
+0.3.0, and built-in kernels' CSV provenance lines carry that 0.1.0.
+`install.sh`, `laplace self-update` and the AUR package know only `laplace`.
+- (a) Version `laplace-sample` with the compiler (0.3.0); the prepared
+  release workflow attaches its assets to the compiler's release, and the
+  installer and `self-update` learn an opt-in `--with-sampler` later.
+- (b) Version it separately, and release it on its own tags.
+
+**Recommendation: (a).** One version for one release. Its provenance then
+names the compiler release that produced a run. The installer support can
+wait until custom samplers stop being experimental.
+
+### Q21 — Barker's adaptation lands below its target (Phase 4.6)
+Under `adapt()`, `langevin::barker` settles at 0.25–0.37 acceptance against
+its 0.4 target. Dual averaging assumes acceptance falls steadily as the
+step size grows, and Barker's acceptance barely changes with step size.
+The kernel is correct (moment checks pass); it is only tuned below its
+target.
+- (a) Leave it; document it in the kernel.
+- (b) Let a kernel opt out of the averaged step size (use the last
+  iterate).
+
+**Recommendation: (a)** for v1. It affects efficiency, not correctness.
+
 ## Answered
 
 ### Q2 — How to carry the nuts-rs `refresh_position` patch
