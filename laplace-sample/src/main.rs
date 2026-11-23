@@ -97,6 +97,10 @@ enum NewWhat {
         /// (ends in move())
         #[arg(long, default_value = "proposal", value_parser = ["proposal", "direct"])]
         kind: String,
+        /// The new package's name, when creating one (default: the
+        /// kernel's name). Inside a kernel package it must be that package.
+        #[arg(long)]
+        package: Option<String>,
     },
 }
 
@@ -156,7 +160,12 @@ fn main() -> ExitCode {
             action: SamplerAction::List,
         } => report(Ok(authoring::list(&project()))),
         Command::New {
-            what: NewWhat::Kernel { name, kind },
+            what:
+                NewWhat::Kernel {
+                    name,
+                    kind,
+                    package,
+                },
         } => {
             let kind = if kind == "direct" {
                 authoring::KernelKind::Direct
@@ -164,21 +173,25 @@ fn main() -> ExitCode {
                 authoring::KernelKind::Proposal
             };
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            report(authoring::new_kernel(&name, kind, &cwd).map(|files| {
-                let shown: Vec<String> = files
-                    .iter()
-                    .map(|f| format!("  created {}", f.strip_prefix(&cwd).unwrap_or(f).display()))
-                    .collect();
-                format!(
-                    "{}\ncheck it with `laplace sampler check {}`",
-                    shown.join("\n"),
-                    files
+            report(
+                authoring::new_kernel(&name, kind, &cwd, package.as_deref()).map(|files| {
+                    let shown: Vec<String> = files
                         .iter()
-                        .find(|f| f.extension().and_then(|e| e.to_str()) == Some("lapkernel"))
-                        .map(|f| f.strip_prefix(&cwd).unwrap_or(f).display().to_string())
-                        .unwrap_or_default()
-                )
-            }))
+                        .map(|f| {
+                            format!("  created {}", f.strip_prefix(&cwd).unwrap_or(f).display())
+                        })
+                        .collect();
+                    format!(
+                        "{}\ncheck it with `laplace sampler check {}`",
+                        shown.join("\n"),
+                        files
+                            .iter()
+                            .find(|f| f.extension().and_then(|e| e.to_str()) == Some("lapkernel"))
+                            .map(|f| f.strip_prefix(&cwd).unwrap_or(f).display().to_string())
+                            .unwrap_or_default()
+                    )
+                }),
+            )
         }
         Command::Sample {
             model,

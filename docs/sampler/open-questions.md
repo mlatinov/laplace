@@ -24,24 +24,6 @@ addition. **Not in v1**, recorded as candidates:
 **Recommendation:** add them only when a kernel needs one, each with
 registry unit tests (value and RNG use) like the v1 entries.
 
-### Q17 — Compiler version for kernel packages (Phase 4.1)
-The kernel-package gate needs a compiler newer than the released 0.2.0, so
-Cargo.toml is now 0.3.0 and kernel packages must require `>=0.3`. Choosing
-a different number changes one constant (`KERNEL_PACKAGES_SINCE`).
-**Recommendation:** release kernel packages as compiler 0.3.0.
-
-### Q18 — `laplace new kernel` package naming (Phase 4.6 friction)
-Outside a package, the kernel name is also the package name.
-- (a) Add `--package <name>`.
-- (b) Leave it as is.
-
-**Recommendation: (a).**
-
-### Q19 — Interpreter overhead on cheap densities (Phase 4.6)
-Interpreted kernels lose to NUTS on ESS per second when a gradient costs
-about 1 µs. **Recommendation:** no optimization before v1; real models'
-gradients dominate the cost.
-
 ## Answered
 
 ### Q2 — How to carry the nuts-rs `refresh_position` patch
@@ -108,7 +90,8 @@ newest `~/.cmdstan/cmdstan-<version>`. The choice is printed as
 `laplace-sample/README.md`.
 
 ### Q10 — Distributing `laplace-sample`
-**Answer:** deferred to Phase 5 (release assets).
+**Answer:** deferred to Phase 5 (release assets). **Phase 5 go:** prepare
+the release workflow for laplace-sample binaries; do not run or publish it.
 
 ### Q1 — Where the `laplace-sample` crate lives (Phase 1.1)
 **Answer: (a).** The `laplace` repo becomes a Cargo workspace with members `.`
@@ -156,3 +139,15 @@ Density-only and gradient evaluations are counted apart (`n_logp__`).
 ### Q16 — Unsuffixed CSV columns for a single whole-model block
 **Answer (Phase 4 go):** general: any single block covering the whole model
 writes the unsuffixed columns.
+
+### Q17 — Compiler version for kernel packages
+**Answer (Phase 5 go):** kernel packages ship in 0.3.0, after Phase 5 and
+the editor-support update. The branch stays at 0.3.0. Custom samplers are
+labelled "experimental" in all 0.3.0 docs. Nothing is tagged or released.
+
+### Q18 — `laplace new kernel` package naming
+**Answer:** yes, `--package <name>`; the default is the kernel's name.
+
+### Q19 — Interpreter overhead on cheap densities
+**Answer:** agreed, no interpreter optimization before v1. The docs state
+the measured overhead and when to write a Rust `Kernel` instead.

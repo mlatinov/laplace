@@ -261,20 +261,42 @@ fn write_new(path: &Path, contents: &str, created: &mut Vec<PathBuf>) -> anyhow:
     Ok(())
 }
 
-/// `laplace new kernel <name>`. Inside a kernel package (`dir` has a
-/// laplace.toml with `kind = "kernels"`): the kernel and its test file.
-/// Anywhere else: a new kernel package `<dir>/<name>/` with laplace.toml,
-/// the kernel, its test file and a README. Returns the files created.
-pub fn new_kernel(name: &str, kind: KernelKind, dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+/// `laplace new kernel <name> [--package <pkg>]`. Inside a kernel package
+/// (`dir` has a laplace.toml with `kind = "kernels"`): the kernel and its
+/// test file. Anywhere else: a new kernel package `<dir>/<pkg>/` named
+/// `<pkg>` (default: the kernel's name) with laplace.toml, the kernel, its
+/// test file and a README. Returns the files created.
+pub fn new_kernel(
+    name: &str,
+    kind: KernelKind,
+    dir: &Path,
+    package: Option<&str>,
+) -> anyhow::Result<Vec<PathBuf>> {
     anyhow::ensure!(
         manifest::is_valid_package_name(name),
         "`{name}` cannot be a kernel name (it is used as `package::{name}`): {}",
         manifest::PACKAGE_NAME_RULE
     );
+    if let Some(p) = package {
+        anyhow::ensure!(
+            manifest::is_valid_package_name(p),
+            "`{p}` cannot be a package name: {}",
+            manifest::PACKAGE_NAME_RULE
+        );
+    }
     let mut created = vec![];
     let here = dir.join("laplace.toml");
     let package_dir = match manifest::read_package_manifest(&here) {
-        Ok(m) if m.kind == PackageKind::Kernels => dir.to_path_buf(),
+        Ok(m) if m.kind == PackageKind::Kernels => {
+            if let Some(p) = package.filter(|p| *p != m.name) {
+                anyhow::bail!(
+                    "this is the kernel package `{}`; --package {p} names another one (run it outside \
+                     a package to create `{p}`, or drop --package to add `{name}` here)",
+                    m.name
+                );
+            }
+            dir.to_path_buf()
+        }
         Ok(m) => anyhow::bail!(
             "{} is the function library `{}`; a kernel lives in a kernel package (`kind = \"kernels\"`). \
              Run `laplace new kernel {name}` outside it to create one",
@@ -283,18 +305,19 @@ pub fn new_kernel(name: &str, kind: KernelKind, dir: &Path) -> anyhow::Result<Ve
         ),
         // No laplace.toml, or a project's (no `name`): a new package.
         Err(_) => {
-            let pkg = dir.join(name);
+            let pkg_name = package.unwrap_or(name);
+            let pkg = dir.join(pkg_name);
             anyhow::ensure!(!pkg.exists(), "{} already exists", pkg.display());
             write_new(
                 &pkg.join("laplace.toml"),
                 &format!(
-                    "name = \"{name}\"\nversion = \"0.1.0\"\nkind = \"kernels\"\n\
+                    "name = \"{pkg_name}\"\nversion = \"0.1.0\"\nkind = \"kernels\"\n\
                      # Kernel packages need a compiler that knows them (older ones refuse it).\n\
                      laplace = \"{KERNEL_PACKAGES_REQUIREMENT}\"\n"
                 ),
                 &mut created,
             )?;
-            write_new(&pkg.join("README.md"), &readme(name, name), &mut created)?;
+            write_new(&pkg.join("README.md"), &readme(pkg_name, name), &mut created)?;
             pkg
         }
     };
@@ -322,8 +345,8 @@ mod tests {
     fn list_shows_built_ins_and_the_projects_kernel_packages() {
         use laplace::resolve::lockfile::{write_lockfile, LockedPackage, Lockfile};
         let tmp = tempfile::tempdir().unwrap();
-        new_kernel("pmala", KernelKind::Proposal, tmp.path()).unwrap();
-        new_kernel("exact", KernelKind::Direct, &tmp.path().join("pmala")).unwrap();
+        new_kernel("pmala", KernelKind::Proposal, tmp.path(), None).unwrap();
+        new_kernel("exact", KernelKind::Direct, &tmp.path().join("pmala"), None).unwrap();
         let dir = tmp.path().join("project");
         std::fs::create_dir(&dir).unwrap();
         let project = Project {
@@ -368,7 +391,7 @@ mod tests {
     #[test]
     fn a_new_kernel_package_scaffolds_and_checks_unchanged() {
         let tmp = tempfile::tempdir().unwrap();
-        let files = new_kernel("pmala", KernelKind::Proposal, tmp.path()).unwrap();
+        let files = new_kernel("pmala", KernelKind::Proposal, tmp.path(), None).unwrap();
         let rel: Vec<String> = files
             .iter()
             .map(|p| p.strip_prefix(tmp.path()).unwrap().display().to_string())
@@ -402,7 +425,7 @@ mod tests {
         assert_eq!(t["kernel"].as_str(), Some("pmala"));
 
         // Inside the package: only the kernel and its test file.
-        let files = new_kernel("gibbs", KernelKind::Direct, &pkg).unwrap();
+        let files = new_kernel("gibbs", KernelKind::Direct, &pkg, None).unwrap();
         let rel: Vec<String> = files
             .iter()
             .map(|p| p.strip_prefix(&pkg).unwrap().display().to_string())
@@ -418,12 +441,30 @@ mod tests {
             .starts_with("ok:"));
         assert!(laplace::package::check_kernel_package(&pkg, &m).is_ok());
 
+        // --package (Q18): a package named apart from its first kernel.
+        let files = new_kernel("mala", KernelKind::Proposal, tmp.path(), Some("langevin")).unwrap();
+        assert!(files.contains(&tmp.path().join("langevin/kernels/mala.lapkernel")));
+        let lm =
+            manifest::read_package_manifest(&tmp.path().join("langevin/laplace.toml")).unwrap();
+        assert_eq!(lm.name, "langevin");
+        assert!(
+            std::fs::read_to_string(tmp.path().join("langevin/README.md"))
+                .unwrap()
+                .contains("adapt(langevin::mala)")
+        );
+        let e = new_kernel("barker", KernelKind::Proposal, &pkg, Some("other"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("this is the kernel package `pmala`"), "{e}");
+        assert!(new_kernel("barker", KernelKind::Proposal, &pkg, Some("pmala")).is_ok());
+        assert!(new_kernel("x", KernelKind::Proposal, tmp.path(), Some("bad-name")).is_err());
+
         // Never overwrites; refuses bad names and function libraries.
-        assert!(new_kernel("gibbs", KernelKind::Direct, &pkg)
+        assert!(new_kernel("gibbs", KernelKind::Direct, &pkg, None)
             .unwrap_err()
             .to_string()
             .contains("already exists"));
-        assert!(new_kernel("my-kernel", KernelKind::Proposal, tmp.path()).is_err());
+        assert!(new_kernel("my-kernel", KernelKind::Proposal, tmp.path(), None).is_err());
         let lib = tmp.path().join("fns");
         std::fs::create_dir(&lib).unwrap();
         std::fs::write(
@@ -431,7 +472,7 @@ mod tests {
             "name = \"fns\"\nversion = \"1.0.0\"\n",
         )
         .unwrap();
-        let e = new_kernel("k", KernelKind::Proposal, &lib)
+        let e = new_kernel("k", KernelKind::Proposal, &lib, None)
             .unwrap_err()
             .to_string();
         assert!(e.contains("is the function library `fns`"), "{e}");
