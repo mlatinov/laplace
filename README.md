@@ -605,7 +605,36 @@ error: dependency cycle: alpha -> beta -> alpha
 else stays at its locked version unless a constraint forces it to move, so
 adding one dependency never silently bumps the rest of your graph.
 
+## Custom samplers (experimental)
+
+> **Experimental in laplace 0.3.0.** File formats, commands and CSV columns
+> may still change. CmdStan's NUTS stays the default way to run a model;
+> nothing below changes `laplace build` or its output.
+
+The optional `laplace-sample` binary runs a built model through BridgeStan
+with another sampler, and writes CmdStan-style CSVs that cmdstanr reads:
+
+```sh
+laplace sample model.laplace --data data.json --sampler mala
+laplace sample model.laplace --data data.json --sampler hybrid.lapsampler
+laplace sampler test mala
+```
+
+There are three levels:
+
+- **Pick a sampler** (`--sampler mala`).
+- **Compose kernels over parameter blocks** in a `.lapsampler`.
+- **Write your own kernel** in a `.lapkernel`.
+
+Composition is a tool for geometry NUTS handles poorly, not a way to go
+faster: on every well-behaved model measured, plain NUTS was more
+efficient. See
+[laplace-sample/README.md](laplace-sample/README.md) and the guides in
+`docs/sampler/wiki/`.
+
 ## Kernel packages
+
+> Experimental in laplace 0.3.0, with the custom samplers they serve.
 
 A package can hold sampler kernels instead of functions. Its manifest says
 `kind = "kernels"`, and its kernels are `.lapkernel` files under `kernels/`:

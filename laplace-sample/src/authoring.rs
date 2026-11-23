@@ -47,7 +47,7 @@ fn builtin_line(b: BuiltIn) -> String {
     let (settings, adapts) = match b {
         BuiltIn::Nuts => (
             "step_size, target_accept, max_depth",
-            "adapts itself (Stan's windowed adaptation)",
+            "adapts itself (nuts-rs's warmup adaptation)",
         ),
         BuiltIn::Rwm => (
             "step_size",
