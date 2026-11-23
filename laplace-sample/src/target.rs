@@ -46,9 +46,79 @@ impl Target for BridgeStanTarget {
     }
 }
 
+/// The log density of one block of a full target, the other coordinates
+/// held at `rest` (Phase 3.1). Used where a kernel needs a target object of
+/// its own (nuts-rs); kernels that go through the chain's [`Evaluator`] use
+/// a [`crate::state::View`] instead.
+///
+/// `rest` is shared: whoever moves the other blocks writes the new full
+/// position there before the block kernel runs again.
+pub struct BlockTarget {
+    pub full: Arc<dyn Target>,
+    pub indices: Vec<usize>,
+    pub rest: Arc<std::sync::Mutex<Vec<f64>>>,
+    /// Real gradient evaluations through this block target.
+    pub n_grad: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl BlockTarget {
+    pub fn new(full: Arc<dyn Target>, indices: Vec<usize>, rest: Vec<f64>) -> Self {
+        Self {
+            full,
+            indices,
+            rest: Arc::new(std::sync::Mutex::new(rest)),
+            n_grad: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+}
+
+impl Target for BlockTarget {
+    fn dim(&self) -> usize {
+        self.indices.len()
+    }
+
+    fn log_density_gradient(&self, q: &[f64], grad: &mut [f64]) -> anyhow::Result<f64> {
+        let mut full = self.rest.lock().expect("rest lock").clone();
+        for (i, &j) in self.indices.iter().enumerate() {
+            full[j] = q[i];
+        }
+        let mut g = vec![0.0; full.len()];
+        let lp = self.full.log_density_gradient(&full, &mut g)?;
+        self.n_grad
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        for (i, &j) in self.indices.iter().enumerate() {
+            grad[i] = g[j];
+        }
+        Ok(lp)
+    }
+}
+
 /// Closed-form targets for fast unit tests (no BridgeStan, no compiler).
 pub mod analytic {
     use super::Target;
+
+    /// A zero-mean Gaussian given by its precision matrix (row-major):
+    /// `lp = -x^T P x / 2`, `grad = -P x`. With off-diagonal entries between
+    /// blocks, moving one block changes the other's gradient: the target
+    /// the stale-gradient tests need (Phase 3.1).
+    pub struct Gaussian {
+        pub precision: Vec<Vec<f64>>,
+    }
+
+    impl Target for Gaussian {
+        fn dim(&self) -> usize {
+            self.precision.len()
+        }
+        fn log_density_gradient(&self, q: &[f64], grad: &mut [f64]) -> anyhow::Result<f64> {
+            let mut lp = 0.0;
+            for (i, row) in self.precision.iter().enumerate() {
+                let px: f64 = row.iter().zip(q).map(|(p, x)| p * x).sum();
+                grad[i] = -px;
+                lp -= 0.5 * q[i] * px;
+            }
+            Ok(lp)
+        }
+    }
 
     /// Independent normals with means `mu` and standard deviations `sd`.
     pub struct DiagGaussian {

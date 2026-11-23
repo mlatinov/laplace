@@ -9,6 +9,7 @@
 //! the `laplace-sample` binary on `PATH` and forwards its arguments (D1).
 
 pub mod adapt;
+pub mod blocks;
 pub mod bridgestan_src;
 pub mod compiler;
 pub mod csv;
