@@ -121,6 +121,17 @@ fn download_to(dir: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn ci_cache_key_tracks_the_pinned_version() {
+        let wf = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../.github/workflows/sampler-statistical.yml");
+        let text = std::fs::read_to_string(wf).unwrap();
+        assert!(
+            text.contains(&format!("key: bridgestan-{}-", super::BRIDGESTAN_VERSION)),
+            "update the BridgeStan cache key in sampler-statistical.yml"
+        );
+    }
+
+    #[test]
     fn crate_and_source_versions_agree() {
         // The bridgestan crate's FFI matches exactly one release.
         assert_eq!(bridgestan::VERSION, super::BRIDGESTAN_VERSION);

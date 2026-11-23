@@ -1,0 +1,29 @@
+# laplace-sample (the optional custom-sampler runtime): clippy and the fast
+# tests on every push. They need no BridgeStan and no C++ toolchain; the
+# statistical tests that do run in sampler-statistical.yml.
+# `cargo fmt --check` for the whole workspace already runs in ci.yml.
+name: sampler
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy -p laplace-sample --all-targets --locked -- -D warnings
+      # Unit tests plus the fast tests in tests/; the statistical ones are
+      # #[ignore] and skipped here.
+      - run: cargo test -p laplace-sample --locked
