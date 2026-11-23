@@ -7,6 +7,7 @@
 pub mod ast;
 pub mod builtins;
 pub mod check;
+pub mod doc;
 pub mod interp;
 pub mod kernel;
 pub mod parse;

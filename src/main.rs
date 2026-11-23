@@ -176,6 +176,18 @@ fn run() -> Result<ExitCode, CliError> {
     if let Command::External(args) = command {
         return dispatch_to_sampler(args);
     }
+    // `laplace doc pkg::kernel` for a kernel package (Phase 4.3): the
+    // kernels are read by laplace-sample, which can parse them.
+    if let Command::Doc { spec, html, .. } = &command {
+        if is_kernel_package_spec(spec) {
+            if *html {
+                return Err(CliError::Message(
+                    "--html is for function libraries; a kernel's doc is plain text".to_string(),
+                ));
+            }
+            return dispatch_to_sampler(vec!["sampler".into(), "doc".into(), spec.into()]);
+        }
+    }
     if let Command::SelfUpdate {
         check,
         target_version,
@@ -251,6 +263,17 @@ fn dispatch_to_sampler(args: Vec<OsString>) -> Result<ExitCode, CliError> {
     let status = std::process::Command::new(binary).args(&args).status()?;
     // A signal-terminated child has no code; report plain failure.
     Ok(ExitCode::from(status.code().map_or(1, |c| c as u8)))
+}
+
+/// `pkg::name` where laplace.lock records `pkg` as a kernel package.
+fn is_kernel_package_spec(spec: &str) -> bool {
+    let Some((package, _)) = spec.split_once("::") else {
+        return false;
+    };
+    resolve::lockfile::read_lockfile(Path::new("laplace.lock"))
+        .ok()
+        .and_then(|lock| lock.get(package).map(|p| p.kind.is_kernels()))
+        .unwrap_or(false)
 }
 
 fn find_on_path(program: &str) -> Option<PathBuf> {

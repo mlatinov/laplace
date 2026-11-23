@@ -76,3 +76,45 @@ fn other_unknown_subcommands_are_still_rejected_by_clap() {
     );
     assert!(!String::from_utf8_lossy(&out.stdout).contains("args:"));
 }
+
+/// Phase 4.3: `laplace doc pkg::kernel` for a kernel package (laplace.lock
+/// says `kind = "kernels"`) is answered by laplace-sample; a function
+/// library's doc is not forwarded.
+#[test]
+fn doc_of_a_kernel_package_is_forwarded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    fake_sampler(&bin);
+    let project = tmp.path().join("project");
+    fs::create_dir(&project).unwrap();
+    fs::write(
+        project.join("laplace.lock"),
+        "root = [\"gps\", \"langevin\"]\n\n[[package]]\nname = \"gps\"\nversion = \"1.0.0\"\n\
+         checksum = \"sha256:0\"\nsource = \"registry\"\ndependencies = []\n\n[[package]]\n\
+         name = \"langevin\"\nversion = \"0.1.0\"\nchecksum = \"sha256:0\"\nsource = \"registry\"\n\
+         dependencies = []\nkind = \"kernels\"\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_laplace"))
+            .args(args)
+            .current_dir(&project)
+            .env("PATH", &bin)
+            .env("HOME", tmp.path())
+            .output()
+            .unwrap()
+    };
+    let out = run(&["doc", "langevin::mala"]);
+    assert_eq!(out.status.code(), Some(7));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "args:sampler doc langevin::mala"
+    );
+    let out = run(&["doc", "langevin::mala", "--html", "-o", "x.html"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--html is for function libraries"));
+    // A function library is looked up by the compiler itself.
+    let out = run(&["doc", "gps::rbf"]);
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("args:"));
+}

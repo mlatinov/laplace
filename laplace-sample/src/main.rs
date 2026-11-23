@@ -7,6 +7,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+use laplace_sample::authoring;
 use laplace_sample::runner::Sampler;
 use laplace_sample::sample::{check_sampler, display, sample, SampleArgs};
 
@@ -73,7 +74,7 @@ enum Command {
         #[arg(long, default_value = ".")]
         output_dir: PathBuf,
     },
-    /// Work with .lapsampler files
+    /// Work with .lapsampler files and kernels
     Sampler {
         #[command(subcommand)]
         action: SamplerAction,
@@ -83,9 +84,9 @@ enum Command {
 #[derive(Subcommand)]
 enum SamplerAction {
     /// Check a .lapsampler: syntax, every kernel resolves (built-ins,
-    /// local .lapkernel files, which are checked too), settings, the
-    /// adapt() contracts. With --model, also that every model parameter is
-    /// in exactly one block (coverage, D2).
+    /// local .lapkernel files and library kernels, which are checked too),
+    /// settings, the adapt() contracts. With --model, also that every model
+    /// parameter is in exactly one block (coverage, D2).
     Check {
         file: PathBuf,
         /// The model whose parameters the blocks must cover (.laplace or
@@ -96,22 +97,32 @@ enum SamplerAction {
         #[arg(long)]
         data: Option<PathBuf>,
     },
+    /// A kernel's documentation: doc comments, tuning values with their
+    /// @adapt tags, and whether its step ends in propose() or move().
+    /// `<package>::<kernel>` (an installed kernel package; `laplace doc`
+    /// forwards here) or a .lapkernel file.
+    Doc { spec: String },
 }
 
 fn main() -> ExitCode {
+    let report = |r: anyhow::Result<String>| match r {
+        Ok(out) => {
+            println!("{}", out.trim_end());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{e:#}");
+            ExitCode::FAILURE
+        }
+    };
+    let project = laplace_sample::libraries::Project::current;
     match Cli::parse().command {
         Command::Sampler {
             action: SamplerAction::Check { file, model, data },
-        } => match check_sampler(&file, model.as_deref(), data.as_deref()) {
-            Ok(report) => {
-                println!("{report}");
-                ExitCode::SUCCESS
-            }
-            Err(e) => {
-                eprintln!("{e:#}");
-                ExitCode::FAILURE
-            }
-        },
+        } => report(check_sampler(&file, model.as_deref(), data.as_deref())),
+        Command::Sampler {
+            action: SamplerAction::Doc { spec },
+        } => report(authoring::doc(&spec, &project())),
         Command::Sample {
             model,
             data,
