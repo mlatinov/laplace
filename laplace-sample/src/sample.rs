@@ -246,6 +246,7 @@ fn run_one_chain(
     let started = std::time::Instant::now();
     let warmup_done = std::cell::Cell::new(None);
     let mut i = 0u64;
+    let mut since = (0, 0);
     let summary = run_chain(
         target.as_ref(),
         kernel.as_mut(),
@@ -275,7 +276,8 @@ fn run_one_chain(
         |state, info, tuning| {
             let keep = i.is_multiple_of(run.thin);
             i += 1;
-            if keep {
+            if let Some(info) = saved_row_cost(&mut since, info, keep) {
+                let info = &info;
                 target
                     .model
                     .param_constrain(&state.q, true, true, &mut out, Some(&mut gq_rng))?;
@@ -375,4 +377,57 @@ enum Layout {
     SingleBlock,
     /// Several blocks: per-block columns for these labels.
     Blocks(Vec<String>),
+}
+
+/// The statistics a saved row reports, or `None` for an iteration thinning
+/// drops. The cost columns count every iteration since the previous saved
+/// row, so summing `n_grad__` / `n_logp__` over the file gives the sampling
+/// cost whatever `thin` is (up to the last saved draw); every other column
+/// describes the saved iteration itself, as in CmdStan.
+fn saved_row_cost(
+    since: &mut (u64, u64),
+    info: &crate::kernel::StepInfo,
+    keep: bool,
+) -> Option<crate::kernel::StepInfo> {
+    since.0 += info.n_grad;
+    since.1 += info.n_logp;
+    if !keep {
+        return None;
+    }
+    let mut row = info.clone();
+    (row.n_grad, row.n_logp) = std::mem::take(since);
+    Some(row)
+}
+
+#[cfg(test)]
+mod cost_tests {
+    use super::*;
+    use crate::kernel::StepInfo;
+
+    #[test]
+    fn thinned_rows_carry_the_cost_of_the_iterations_dropped_before_them() {
+        let mut since = (0, 0);
+        let mut rows = vec![];
+        for i in 0..10u64 {
+            let info = StepInfo {
+                n_grad: i,
+                n_logp: 1,
+                accept_prob: Some(i as f64),
+                ..Default::default()
+            };
+            if let Some(r) = saved_row_cost(&mut since, &info, i % 4 == 0) {
+                rows.push((r.n_grad, r.n_logp, r.accept_prob));
+            }
+        }
+        // Saved: 0, 4, 8. Costs: {0}, {1..4}, {5..8}; 9 comes after the last.
+        assert_eq!(
+            rows,
+            vec![
+                (0, 1, Some(0.0)),
+                (1 + 2 + 3 + 4, 4, Some(4.0)),
+                (5 + 6 + 7 + 8, 4, Some(8.0))
+            ]
+        );
+        assert_eq!(since, (9, 1), "the tail after the last saved draw");
+    }
 }
