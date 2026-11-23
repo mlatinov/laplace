@@ -57,7 +57,7 @@ tuning that is still moving.
 
   ```text
   # laplace_sampler = mala (sha256: ...)
-  # laplace_kernel_rest = mala 0.1.0 sha256:...
+  # laplace_kernel_rest = mala 0.3.0 sha256:...
   # laplace_settings = adapt:true step_size:1 target_accept:0.574
   ```
 

@@ -17,10 +17,23 @@ fn laplace(path_env: &Path, args: &[&str]) -> Output {
         .unwrap()
 }
 
-/// A `laplace-sample` that prints its arguments and exits with 7.
+/// A `laplace-sample` of this compiler's version that prints its
+/// arguments and exits with 7.
 fn fake_sampler(dir: &Path) {
+    fake_sampler_reporting(dir, Some(env!("CARGO_PKG_VERSION")));
+}
+
+/// As [`fake_sampler`], answering `--version` with `version` (or, for
+/// `None`, not answering it).
+fn fake_sampler_reporting(dir: &Path, version: Option<&str>) {
     let p = dir.join("laplace-sample");
-    fs::write(&p, "#!/bin/sh\necho \"args:$*\"\nexit 7\n").unwrap();
+    let answer = match version {
+        Some(v) => {
+            format!("if [ \"$1\" = --version ]; then echo \"laplace-sample {v}\"; exit 0; fi\n")
+        }
+        None => "if [ \"$1\" = --version ]; then exit 2; fi\n".to_string(),
+    };
+    fs::write(&p, format!("#!/bin/sh\n{answer}echo \"args:$*\"\nexit 7\n")).unwrap();
     fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
@@ -117,4 +130,44 @@ fn doc_of_a_kernel_package_is_forwarded() {
     // A function library is looked up by the compiler itself.
     let out = run(&["doc", "gps::rbf"]);
     assert!(!String::from_utf8_lossy(&out.stdout).contains("args:"));
+}
+
+/// Q20: laplace and laplace-sample share one version. A mismatch is a
+/// warning naming both versions and the install command; the command still
+/// runs. A matching pair says nothing.
+#[test]
+fn a_laplace_sample_of_another_version_is_warned_about() {
+    let ours = env!("CARGO_PKG_VERSION");
+    let tmp = tempfile::tempdir().unwrap();
+
+    fake_sampler(tmp.path());
+    let out = laplace(tmp.path(), &["sampler", "list"]);
+    assert_eq!(out.status.code(), Some(7));
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("warning"),
+        "matching versions are quiet"
+    );
+
+    fake_sampler_reporting(tmp.path(), Some("0.1.0"));
+    let out = laplace(tmp.path(), &["sampler", "list"]);
+    assert_eq!(out.status.code(), Some(7), "the command still runs");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "args:sampler list"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains(&format!("this is laplace {ours}, but laplace-sample at")),
+        "{err}"
+    );
+    assert!(err.contains(" is 0.1.0;"), "{err}");
+    assert!(
+        err.contains(&format!("cargo install --locked --git https://github.com/mlatinov/laplace --tag v{ours} laplace-sample")),
+        "{err}"
+    );
+
+    fake_sampler_reporting(tmp.path(), None);
+    let out = laplace(tmp.path(), &["sample", "m.laplace"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("is of unknown version"), "{err}");
 }

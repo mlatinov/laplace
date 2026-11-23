@@ -16,6 +16,10 @@ cargo install --path laplace-sample --root ~/.local --force
 laplace sample model.laplace --data data.json --sampler mala --seed 1
 ```
 
+`laplace-sample` has the compiler's version and is released with it. When
+`laplace` hands a command to a `laplace-sample` of another version, it warns,
+naming both versions and the install command for the matching one.
+
 ## Three levels
 
 | Level | You write | Example | Guide |

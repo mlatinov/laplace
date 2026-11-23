@@ -6,6 +6,9 @@
 # merging it publishes nothing. Whether it should instead run inside
 # release.yml on every `v*` tag is decided at merge (docs/sampler/merge-plan.md).
 #
+# laplace-sample has the compiler's version (Cargo.toml [workspace.package],
+# Q20), so the tag check below covers both binaries.
+#
 # Asset layout (alongside the compiler's, same release, same tag):
 #   laplace-sample-<target>.tar.gz          a `laplace-sample-<target>/` directory holding
 #                                           the binary, LICENSE, README.md (laplace-sample's),

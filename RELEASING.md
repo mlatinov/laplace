@@ -20,7 +20,9 @@ workflow checks both before it builds anything.
    git status            # nothing to commit
    ```
 
-2. Bump the version in `Cargo.toml` (`version = "X.Y.Z"`), then run
+2. Bump the version in `Cargo.toml` (`version = "X.Y.Z"` under
+   `[workspace.package]`: the compiler and `laplace-sample` share it and
+   move in lockstep), then run
    `cargo build` so `Cargo.lock` picks it up (the release builds with
    `--locked`, which fails on a stale lockfile).
 

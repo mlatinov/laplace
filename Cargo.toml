@@ -5,6 +5,13 @@ members = [".", "laplace-sample"]
 # Phase 0 spike crates carry their own [workspace] and are never members.
 exclude = ["spikes"]
 
+# One version for the compiler and laplace-sample, which are released
+# together and move in lockstep (Q20): both packages inherit it. The release
+# workflows read the first `version = "..."` line of this file, which is
+# this one.
+[workspace.package]
+version = "0.3.0"
+
 # laplace-sample's nuts-rs = "=0.19.1" is the vendored, patched copy (Q2,
 # laplace-sample/vendor/VENDORED.md). A [patch] source is not a workspace
 # member, so fmt and clippy leave the upstream code alone (a plain path
@@ -15,7 +22,7 @@ nuts-rs = { path = "laplace-sample/vendor/nuts-rs-0.19.1" }
 
 [package]
 name = "laplace"
-version = "0.3.0"
+version.workspace = true
 edition = "2021"
 
 [dependencies]

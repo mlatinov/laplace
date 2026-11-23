@@ -24,19 +24,6 @@ addition. **Not in v1**, recorded as candidates:
 **Recommendation:** add them only when a kernel needs one, each with
 registry unit tests (value and RNG use) like the v1 entries.
 
-### Q20 — `laplace-sample`'s version and distribution (Phase 5)
-`laplace-sample --version` says 0.1.0 while the compiler it ships with is
-0.3.0, and built-in kernels' CSV provenance lines carry that 0.1.0.
-`install.sh`, `laplace self-update` and the AUR package know only `laplace`.
-- (a) Version `laplace-sample` with the compiler (0.3.0); the prepared
-  release workflow attaches its assets to the compiler's release, and the
-  installer and `self-update` learn an opt-in `--with-sampler` later.
-- (b) Version it separately, and release it on its own tags.
-
-**Recommendation: (a).** One version for one release. Its provenance then
-names the compiler release that produced a run. The installer support can
-wait until custom samplers stop being experimental.
-
 ## Answered
 
 ### Q2 — How to carry the nuts-rs `refresh_position` patch
@@ -173,3 +160,14 @@ adaptation. **Done:** SBC passes (200 replicates, same settings as MALA's;
 (100000 on the correlated Gaussian) barker passes the must-pass tier and
 its release gate (`phase-5/release-gate-tuned.txt`); the kernel and the
 test file document that acceptance settles at 0.25-0.37, below 0.4.
+
+### Q20 — `laplace-sample`'s version and distribution
+**Answer (Phase 5 review):** laplace-sample takes the compiler's version
+(0.3.0) and moves in lockstep; `laplace` warns on a mismatch when it hands
+a command over. **Done:** both packages inherit `[workspace.package]
+version` from the root Cargo.toml. Before forwarding (and in the release
+gate) `laplace` runs `laplace-sample --version` and, if it is not its own
+version, warns with both versions and the install command (tested: match,
+mismatch, no answer). Built-in kernels' provenance now reads
+`<kernel> 0.3.0`. Installer and `self-update` support stays a later
+decision.

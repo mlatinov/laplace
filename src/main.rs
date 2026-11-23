@@ -265,9 +265,50 @@ fn dispatch_to_sampler(args: Vec<OsString>) -> Result<ExitCode, CliError> {
             .exit();
     }
     let binary = find_on_path(SAMPLER_BINARY).ok_or(CliError::SamplerMissing(name))?;
+    warn_on_sampler_version_mismatch(&binary);
     let status = std::process::Command::new(binary).args(&args).status()?;
     // A signal-terminated child has no code; report plain failure.
     Ok(ExitCode::from(status.code().map_or(1, |c| c as u8)))
+}
+
+/// laplace and laplace-sample are released together with one version (Q20).
+/// Ask the `laplace-sample` about to run for its version, and warn (never
+/// fail) when it is not this compiler's: a mismatched pair may disagree on
+/// files, flags or CSV columns.
+fn warn_on_sampler_version_mismatch(binary: &Path) {
+    if let Some(message) = sampler_version_mismatch(binary) {
+        eprintln!("{message}");
+    }
+}
+
+fn sampler_version_mismatch(binary: &Path) -> Option<String> {
+    let ours = env!("CARGO_PKG_VERSION");
+    let reported = std::process::Command::new(binary)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            // `laplace-sample 0.3.0`
+            String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .nth(1)
+                .map(str::to_string)
+        });
+    if reported.as_deref() == Some(ours) {
+        return None;
+    }
+    let theirs = reported.map_or(
+        "of unknown version (`--version` did not answer)".to_string(),
+        |v| v,
+    );
+    Some(format!(
+        "warning: this is laplace {ours}, but laplace-sample at {} is {theirs}; the two are released \
+         together and should be the same version\n  help: install laplace-sample {ours}: `cargo install \
+         --locked --git https://github.com/mlatinov/laplace --tag v{ours} laplace-sample` (from a laplace \
+         checkout: `cargo install --locked --path laplace-sample --root ~/.local --force`)",
+        binary.display()
+    ))
 }
 
 /// `pkg::name` where laplace.lock records `pkg` as a kernel package.
@@ -952,6 +993,7 @@ fn sampler_release_gate(plan: &release::ReleasePlan, skip: bool) -> Result<(), C
             plan.package
         ))
     })?;
+    warn_on_sampler_version_mismatch(&binary);
     let mut failed = vec![];
     for kernel in &plan.kernels {
         println!(

@@ -1432,7 +1432,12 @@ fn kernel_release_env(code: Option<i32>) -> (Env, PathBuf, PathBuf) {
         let script = bin.join("laplace-sample");
         write(
             &script,
-            &format!("#!/bin/sh\necho \"$*\" >> {}\nexit {code}\n", log.display()),
+            &format!(
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo \"laplace-sample {}\"; exit 0; fi\n\
+                 echo \"$*\" >> {}\nexit {code}\n",
+                env!("CARGO_PKG_VERSION"),
+                log.display()
+            ),
         );
         let mut perms = fs::metadata(&script).unwrap().permissions();
         std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
