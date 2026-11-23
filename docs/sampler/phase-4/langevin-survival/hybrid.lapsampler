@@ -1,0 +1,9 @@
+sampler survival_hybrid {
+  library { import langevin }
+  kernel {
+    block(eta0, beta) as reg : adapt(langevin::mala)
+    rest                     : adapt(langevin::barker)
+  }
+  warmup { iterations = 1000; }
+  draws  { iterations = 5000; }
+}

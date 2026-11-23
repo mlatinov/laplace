@@ -1,0 +1,9 @@
+sampler survival_nuts_barker {
+  library { import langevin }
+  kernel {
+    block(eta0, beta) as reg : nuts()
+    rest                     : adapt(langevin::barker)
+  }
+  warmup { iterations = 1000; }
+  draws  { iterations = 5000; }
+}

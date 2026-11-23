@@ -1,0 +1,137 @@
+# Phase 4.6: laplace-langevin (a local folder next to the laplace repo, used through
+# a --path dependency) on the survival model of the released survival library.
+# Project: laplace-testbed/langevin-survival (model.laplace, data.json from testbed/survival).
+
+## The library (~/Data_Science_Projects/laplace-langevin)
+    ./kernels/barker.lapkernel
+    ./kernels/mala.lapkernel
+    ./laplace.toml
+    ./README.md
+    ./tests/barker.test.toml
+    ./tests/mala.test.toml
+
+$ laplace sampler check kernels/mala.lapkernel   (in the library)
+ok: kernels/mala.lapkernel (kernel `mala`; 2 tuning value(s); adapted: eps (step size), m (metric))
+$ laplace sampler check kernels/barker.lapkernel   (in the library)
+ok: kernels/barker.lapkernel (kernel `barker`; 2 tuning value(s); adapted: eps (step size), m (metric))
+
+## The project
+$ cat laplace.toml
+    [dependencies.langevin]
+    path = "../../laplace-langevin"
+    
+    [dependencies.survival]
+    git = "https://github.com/mlatinov/laplace-survival"
+    tag = "0.1.2"
+    subdir = "laplace"
+$ cat laplace.lock
+    root = [
+        "langevin",
+        "survival",
+    ]
+    
+    [[package]]
+    name = "langevin"
+    version = "0.1.0"
+    checksum = "sha256:0b6897a28d63f5de7cfcdb157935175aa2c366e8a8909568427ab8dcc4c474e6"
+    source = "path+../../laplace-langevin"
+    dependencies = []
+    kind = "kernels"
+    
+    [[package]]
+    name = "survival"
+    version = "0.1.2"
+    checksum = "sha256:abd2fc97b54a93963e4ca1be21271d09d9821036031bbe6b5efa02cf64ff3ee7"
+    source = "git+https://github.com/mlatinov/laplace-survival@0.1.2#laplace"
+    dependencies = []
+
+$ laplace doc langevin::barker
+langevin::barker  (langevin 0.1.0, kernels/barker.lapkernel)
+
+  Barker proposal: gradient-informed and robust to a mistuned step size
+
+Tuning values (set as `name = value` after the kernel, e.g. in a .lapsampler):
+  real<lower=0> eps = 1   @adapt(step_size, target_accept = 0.4)
+      Step size (adapted toward 0.4 acceptance)
+  vector<lower=0>[dim] m = rep_vector(1, dim)   @adapt(metric)
+      Diagonal inverse metric (adapted in warmup)
+
+Step: ends in propose(): a Metropolis-Hastings proposal; laplace-sample accepts or rejects it (one uniform).
+Adaptation: adapt(langevin::barker) tunes eps and m in warmup, then freezes them.
+
+$ laplace sampler list
+Built-in kernels:
+  nuts   settings: step_size, target_accept, max_depth; adapts itself (Stan's windowed adaptation)
+  rwm    settings: step_size; adapt(rwm()) tunes step size and metric (target 0.234)
+  mala   settings: step_size; adapt(mala()) tunes step size and metric (target 0.574)
+  hmc    settings: step_size, steps, jitter; adapt(hmc()) tunes step size and metric (target 0.8)
+
+langevin 0.1.0 (`import langevin`):
+  langevin::barker     tuning: eps @adapt(step_size, target_accept = 0.4), m @adapt(metric)
+      Barker proposal: gradient-informed and robust to a mistuned step size
+  langevin::mala       tuning: eps @adapt(step_size, target_accept = 0.574), m @adapt(metric)
+      Metropolis-adjusted Langevin algorithm with a diagonal metric
+
+$ cat hybrid.lapsampler
+    sampler survival_hybrid {
+      library { import langevin }
+      kernel {
+        block(eta0, beta) as reg : adapt(langevin::mala)
+        rest                     : adapt(langevin::barker)
+      }
+      warmup { iterations = 1000; }
+      draws  { iterations = 5000; }
+    }
+$ laplace sampler check hybrid.lapsampler --model model.laplace --data data.json
+ok: hybrid.lapsampler (2 kernel line(s); kernels resolve, settings and adapt() contracts check)
+  block reg: eta0, beta (3 unconstrained coordinate(s))
+  block rest: a, gamma (2 unconstrained coordinate(s))
+every parameter of ~/Data_Science_Projects/laplace-testbed/langevin-survival/build/model.stan is in exactly one block
+
+## Runs: 4 chains, seed 2026, 1000 warmup; NUTS = plain laplace-sample NUTS
+## vs a CmdStan reference (4 x 25000, 0 divergences; make_reference.R, compare.R)
+### 5000 draws per chain
+         run max_abs_z max_rhat min_ess  grads logps  secs ess_per_grad
+        nuts      0.91   1.0010    2770 210364     0 25.68     0.013200
+      hybrid      0.31   1.0465      98  40000     0  5.40     0.002450
+ nuts_barker      0.94   1.0090     170 144169     0 18.09     0.001180
+      barker      1.12   1.2172      16  20000     0  3.02     0.000789
+ ess_per_s          verdict grad_ratio s_ratio
+       108             pass       1.00    1.00
+        18 did-not-converge       0.19    0.17
+         9 did-not-converge       0.09    0.08
+         5 did-not-converge       0.06    0.05
+### 100000 draws per chain, thinned 1:20 (NUTS row: the 5000-draw run)
+              run max_abs_z max_rhat min_ess   grads logps   secs ess_per_grad
+             nuts      0.91   1.0010    2770  210364     0  25.68     0.013200
+      hybrid_long      1.17   1.0009    2550  799848     0 106.06     0.003190
+ nuts_barker_long      0.39   1.0010    2935 2882232     0 359.49     0.001020
+      barker_long      0.52   1.0167     357  399924     0  59.91     0.000893
+ ess_per_s          verdict grad_ratio s_ratio
+       108             pass       1.00    1.00
+        24             pass       0.24    0.22
+         8             pass       0.08    0.07
+         6 did-not-converge       0.07    0.06
+
+Posterior correlations (constrained scale): a-eta0 -0.88, gamma-eta0 -0.91, a-gamma 0.74.
+
+## Provenance (CSV headers, chain 1)
+# laplace_sampler = hybrid.lapsampler (sha256: c9a4938a913623913e851301ec1665991e4fcf05a08755ba711f2f74a2720f5d)
+# laplace_kernel_reg = adapt(langevin::mala) langevin@0.1.0 sha256:664d1a7759e960b1db28bc505be77665500a1fe1ca555c58b7b485b105187da5
+# laplace_kernel_rest = adapt(langevin::barker) langevin@0.1.0 sha256:a8d481e2db0d7dd8e92552c4c43250d1b0e9f629fd571b7665105faf7b732bb3
+# laplace_sampler = nuts_barker.lapsampler (sha256: 07e22495033577dc8c357e2efdb0cf2e2c8bb388be64a6892d62ea0501d74c5b)
+# laplace_kernel_reg = nuts() 0.1.0 sha256:ece13b8ab701de9ccce8e21e536671f8798f7d0aadc431ca49db8753239f3d15
+# laplace_kernel_rest = adapt(langevin::barker) langevin@0.1.0 sha256:a8d481e2db0d7dd8e92552c4c43250d1b0e9f629fd571b7665105faf7b732bb3
+
+Each sha256 = sha256(<kernel expression> + newline + the installed kernel's source):
+    barker rest: match (a8d481e2db0d7dd8e92552c4c43250d1b0e9f629fd571b7665105faf7b732bb3)
+    hybrid reg: match (664d1a7759e960b1db28bc505be77665500a1fe1ca555c58b7b485b105187da5)
+
+## barker on exact targets (Level 1, 4 chains, laplace-sample CLI + posterior)
+    std_normal_10, 4000 draws: max|z| 2.10, R-hat 1.0061, bulk ESS 1326, mean accept 0.247: pass
+    corr_gauss_10, 40000 draws thin 10: max|z| 1.59, R-hat 1.0056, bulk ESS 687, mean accept 0.334: pass
+
+## std_normal_10, 4 x 50000 draws (no thinning): library kernels vs NUTS
+nuts    min ESS 107244  max|z| 2.23  max rhat 1.0001  grads  938852  secs 1.13  ESS/grad 0.1142  ESS/s   94906
+mala    min ESS  45682  max|z| 2.33  max rhat 1.0002  grads  200000  secs 1.57  ESS/grad 0.2284  ESS/s   29097
+barker  min ESS  18098  max|z| 2.57  max rhat 1.0004  grads  200000  secs 9.55  ESS/grad 0.0905  ESS/s    1895
