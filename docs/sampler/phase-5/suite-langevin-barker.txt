@@ -1,0 +1,62 @@
+laplace sampler test: langevin::barker
+
+target            tier         verdict           max|z|   R-hat min ESS      grads      logps  ESS/grad     ESS/s  vs NUTS  (per s)
+std_normal_10     must pass    did-not-converge    1.78  1.0303     280       4000          0   0.07011      1534     0.64     0.01
+corr_gauss_10     must pass    did-not-converge    3.04  1.3734       9       4000          0   0.00229        49     0.11     0.00
+eight_schools_nc  must pass    did-not-converge    3.84  1.0311     180       4000          0   0.04489       959     0.66     0.02
+funnel_10         report only  did-not-converge    6.55  1.7325       6       4000          0   0.00155        34    15.36     0.25
+banana_2          report only  did-not-converge    1.14  1.0971      44       4000          0   0.01095       941     4.96     0.25
+mixture_2         report only  did-not-converge    1.85  1.0289      74       4000          0   0.01857      1547     4.05     0.31
+
+ESS = minimum bulk ESS over the checked quantities; grads and logps = gradient and density-only evaluations while sampling; ESS/s = per second of sampling, summed over chains; vs NUTS = ESS/grad ratio to plain NUTS on the same target (then ESS/s). Ratios are information, never a threshold.
+
+std_normal_10 did not converge (4 chains x 1000 draws, thin 1): the run says nothing either way. Give it more draws in tests/<kernel>.test.toml:
+  [targets.std_normal_10]
+  draws = 10000
+  thin = 10
+  E[x.2]: estimate -0.0493, truth 0.0000, z -1.03, R-hat 1.0303, bulk ESS 398
+  E[x.2^2]: estimate 0.9108, truth 1.0000, z -1.78, R-hat 1.0290, bulk ESS 312
+  E[x.3]: estimate 0.0171, truth 0.0000, z 0.36, R-hat 1.0108, bulk ESS 455
+  E[x.3^2]: estimate 1.0498, truth 1.0000, z 0.75, R-hat 1.0129, bulk ESS 470
+
+corr_gauss_10 did not converge (4 chains x 1000 draws, thin 1): the run says nothing either way. Give it more draws in tests/<kernel>.test.toml:
+  [targets.corr_gauss_10]
+  draws = 10000
+  thin = 10
+  E[x.1]: estimate -0.1539, truth 0.0000, z -0.27, R-hat 1.0242, bulk ESS 85
+  E[x.1^2]: estimate 26.5857, truth 35.1646, z -3.04, R-hat 1.0142, bulk ESS 197
+  E[x.2]: estimate 0.0450, truth 0.0000, z 0.06, R-hat 1.0884, bulk ESS 46
+  E[x.2^2]: estimate 23.5406, truth 25.6175, z -0.90, R-hat 1.0192, bulk ESS 119
+
+eight_schools_nc did not converge (4 chains x 1000 draws, thin 1): the run says nothing either way. Give it more draws in tests/<kernel>.test.toml:
+  [targets.eight_schools_nc]
+  draws = 10000
+  thin = 10
+  E[mu]: estimate 4.4710, truth 4.4007, z 0.27, R-hat 1.0296, bulk ESS 205
+  E[mu^2]: estimate 32.6276, truth 30.2444, z 1.32, R-hat 1.0171, bulk ESS 309
+  E[tau]: estimate 3.6860, truth 3.5957, z 0.34, R-hat 1.0259, bulk ESS 180
+  E[tau^2]: estimate 24.9813, truth 23.1980, z 0.47, R-hat 1.0259, bulk ESS 180
+
+funnel_10 did not converge (4 chains x 1000 draws, thin 1): the run says nothing either way. Give it more draws in tests/<kernel>.test.toml:
+  [targets.funnel_10]
+  draws = 10000
+  thin = 10
+  E[v]: estimate -0.2611, truth 0.0000, z -0.32, R-hat 1.7325, bulk ESS 6
+  E[v^2]: estimate 3.7893, truth 9.0000, z -6.55, R-hat 1.0964, bulk ESS 29
+
+banana_2 did not converge (4 chains x 1000 draws, thin 1): the run says nothing either way. Give it more draws in tests/<kernel>.test.toml:
+  [targets.banana_2]
+  draws = 10000
+  thin = 10
+  E[x1]: estimate -0.1565, truth 0.0000, z -1.14, R-hat 1.0769, bulk ESS 52
+  E[x1^2]: estimate 0.9852, truth 1.0000, z -0.06, R-hat 1.0831, bulk ESS 50
+  E[x2]: estimate 0.9809, truth 1.0000, z -0.08, R-hat 1.0971, bulk ESS 61
+  E[x2^2]: estimate 2.7017, truth 3.2500, z -0.46, R-hat 1.0866, bulk ESS 44
+
+mixture_2 did not converge (4 chains x 1000 draws, thin 1): the run says nothing either way. Give it more draws in tests/<kernel>.test.toml:
+  [targets.mixture_2]
+  draws = 10000
+  thin = 10
+  P[x.1 + x.2 > 0]: estimate 0.6050, truth 0.5000, z 1.85, R-hat 1.0289, bulk ESS 74
+
+result: a must-pass target did not pass

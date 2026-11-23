@@ -1,0 +1,21 @@
+# How `laplace sampler test` runs the built-in rwm, and the shipped
+# kernels/rwm.lapkernel twin (found by convention). Format: suite.rs.
+kernel = "rwm"
+adapt = true
+
+[defaults]
+warmup = 1000
+draws = 10000
+thin = 10
+
+# No momentum, no help from a diagonal metric on a rotated target.
+[targets.corr_gauss_10]
+warmup = 5000
+draws = 100000
+thin = 100
+
+# 10000 draws: R-hat 1.09, bulk ESS 47.
+[targets.eight_schools_nc]
+warmup = 5000
+draws = 200000
+thin = 200

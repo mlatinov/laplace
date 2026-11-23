@@ -1,0 +1,24 @@
+laplace sampler test: hmc
+
+target            tier         verdict           max|z|   R-hat min ESS      grads      logps  ESS/grad     ESS/s  vs NUTS  (per s)
+std_normal_10     must pass    pass                2.22  1.0058    1375      39688          0   0.03465     84202     0.32     0.52
+corr_gauss_10     must pass    pass                1.26  1.0028    1298      39688          0   0.03269     24657     1.63     1.86
+eight_schools_nc  must pass    pass                2.37  1.0045    1400      39688          0   0.03527     32547     0.52     0.67
+funnel_10         report only  did-not-converge   12.14  1.0399      85      39688          0   0.00215      3569    21.28    27.01
+banana_2          report only  pass                1.47  1.0052     751      39965          0   0.01878     55084     8.51    13.66
+mixture_2         report only  did-not-converge    0.25  1.0686      58      39978          0   0.00144      2235     0.31     0.47
+
+ESS = minimum bulk ESS over the checked quantities; grads and logps = gradient and density-only evaluations while sampling; ESS/s = per second of sampling, summed over chains; vs NUTS = ESS/grad ratio to plain NUTS on the same target (then ESS/s). Ratios are information, never a threshold.
+
+funnel_10 did not converge (4 chains x 1000 draws, thin 1): the run says nothing either way. Give it more draws in tests/<kernel>.test.toml:
+  [targets.funnel_10]
+  draws = 10000
+  thin = 10
+  E[v]: estimate 0.6505, truth 0.0000, z 3.09, R-hat 1.0399, bulk ESS 85
+  E[v^2]: estimate 4.2263, truth 9.0000, z -12.14, R-hat 1.0100, bulk ESS 215
+
+mixture_2 did not converge (4 chains x 1000 draws, thin 1): the run says nothing either way. Give it more draws in tests/<kernel>.test.toml:
+  [targets.mixture_2]
+  draws = 10000
+  thin = 10
+  P[x.1 + x.2 > 0]: estimate 0.4833, truth 0.5000, z -0.25, R-hat 1.0686, bulk ESS 58

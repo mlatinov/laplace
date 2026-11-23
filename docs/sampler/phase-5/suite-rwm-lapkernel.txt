@@ -1,0 +1,27 @@
+laplace sampler test: laplace-sample/kernels/rwm.lapkernel
+
+target            tier         verdict           max|z|   R-hat min ESS      grads      logps  ESS/grad     ESS/s  vs NUTS  (per s)
+std_normal_10     must pass    pass                1.52  1.0029     865          0      40000       n/a     11650      n/a     0.07
+corr_gauss_10     must pass    pass                2.14  1.0048     696          0     400000       n/a       610      n/a     0.05
+eight_schools_nc  must pass    pass                2.03  1.0013    3646          0     800000       n/a      1845      n/a     0.04
+funnel_10         report only  did-not-converge    2.40  1.4317       8          0      40000       n/a       103      n/a     0.77
+banana_2          report only  did-not-converge    0.94  1.0217     220          0      40000       n/a      3325      n/a     0.84
+mixture_2         report only  pass                0.97  1.0017    1283          0      40000       n/a     16144      n/a     3.36
+
+ESS = minimum bulk ESS over the checked quantities; grads and logps = gradient and density-only evaluations while sampling; ESS/s = per second of sampling, summed over chains; vs NUTS = ESS/grad ratio to plain NUTS on the same target (then ESS/s). Ratios are information, never a threshold.
+
+funnel_10 did not converge (4 chains x 10000 draws, thin 10): the run says nothing either way. Give it more draws in tests/<kernel>.test.toml:
+  [targets.funnel_10]
+  draws = 100000
+  thin = 100
+  E[v]: estimate 2.0298, truth 0.0000, z 2.40, R-hat 1.4317, bulk ESS 8
+  E[v^2]: estimate 10.0817, truth 9.0000, z 0.24, R-hat 1.2664, bulk ESS 12
+
+banana_2 did not converge (4 chains x 10000 draws, thin 10): the run says nothing either way. Give it more draws in tests/<kernel>.test.toml:
+  [targets.banana_2]
+  draws = 100000
+  thin = 100
+  E[x1]: estimate 0.0292, truth 0.0000, z 0.34, R-hat 1.0217, bulk ESS 262
+  E[x1^2]: estimate 1.3258, truth 1.0000, z 0.93, R-hat 1.0216, bulk ESS 234
+  E[x2]: estimate 1.3332, truth 1.0000, z 0.94, R-hat 1.0202, bulk ESS 235
+  E[x2^2]: estimate 7.0625, truth 3.2500, z 0.80, R-hat 1.0211, bulk ESS 220

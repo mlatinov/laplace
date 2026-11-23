@@ -129,6 +129,32 @@ enum SamplerAction {
     /// The built-in kernels and the kernels of this project's kernel
     /// packages, with their settings and tuning values
     List,
+    /// Run a kernel or sampler on the reference suite: standard normal,
+    /// correlated Gaussian and non-centred eight schools must pass; Neal's
+    /// funnel, a banana and a bimodal mixture are reported. Prints a table
+    /// with ESS per gradient and per second and the ratio to plain NUTS;
+    /// exits non-zero when a must-pass target does not pass.
+    Test {
+        /// A built-in (nuts, rwm, mala, hmc), `<package>::<kernel>`, a
+        /// .lapkernel or a .lapsampler
+        sampler: String,
+        /// Draw counts and settings (default: the kernel's
+        /// tests/<name>.test.toml, or <name>.test.toml beside a
+        /// .lapsampler)
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// A setting or tuning value as key=value, after the file's [set]
+        #[arg(long = "set", value_name = "KEY=VALUE")]
+        set: Vec<String>,
+        /// Only one tier: `must-pass` or `report-only`
+        #[arg(long, value_parser = ["must-pass", "report-only"])]
+        tier: Option<String>,
+        #[arg(long, default_value_t = 20261123)]
+        seed: u64,
+        /// Skip the plain-NUTS runs (no ratios)
+        #[arg(long)]
+        no_compare: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -159,6 +185,24 @@ fn main() -> ExitCode {
         Command::Sampler {
             action: SamplerAction::List,
         } => report(Ok(authoring::list(&project()))),
+        Command::Sampler {
+            action:
+                SamplerAction::Test {
+                    sampler,
+                    config,
+                    set,
+                    tier,
+                    seed,
+                    no_compare,
+                },
+        } => sampler_test(
+            &sampler,
+            config.as_deref(),
+            &set,
+            tier.as_deref(),
+            seed,
+            !no_compare,
+        ),
         Command::New {
             what:
                 NewWhat::Kernel {
@@ -239,6 +283,58 @@ fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             }
+        }
+    }
+}
+
+/// `laplace sampler test`: exit 0 when every must-pass target passes.
+fn sampler_test(
+    spec: &str,
+    config: Option<&std::path::Path>,
+    sets: &[String],
+    tier: Option<&str>,
+    seed: u64,
+    compare: bool,
+) -> ExitCode {
+    use laplace_sample::suite;
+    let project = laplace_sample::libraries::Project::current();
+    let prepared = match suite::prepare(spec, sets, config, &project) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    eprintln!("settings: {}; seed {seed}", prepared.config_source);
+    let req = suite::Request {
+        sampler: &prepared.sampler,
+        config: &prepared.config,
+        tier: tier.map(|t| {
+            if t == "must-pass" {
+                suite::Tier::MustPass
+            } else {
+                suite::Tier::ReportOnly
+            }
+        }),
+        seed,
+        compare,
+    };
+    match suite::run_suite(&req, |t| eprintln!("running {t} ...")) {
+        Ok(rows) => {
+            print!("{}", suite::render(spec, &rows));
+            if suite::passed(&rows) {
+                ExitCode::SUCCESS
+            } else {
+                println!(
+                    "\nresult: a must-pass target did not pass (or the sampler runs on none of them: test its \
+                     kernels instead)"
+                );
+                ExitCode::FAILURE
+            }
+        }
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            ExitCode::FAILURE
         }
     }
 }

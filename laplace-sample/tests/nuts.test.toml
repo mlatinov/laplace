@@ -1,0 +1,23 @@
+# How `laplace sampler test` runs the built-in nuts (and the counts every
+# other kernel's "vs NUTS" ratio is measured against). Format: suite.rs.
+kernel = "nuts"
+
+[defaults]
+chains = 4
+warmup = 1000
+draws = 1000
+thin = 1
+
+# The report-only targets: 1000 draws did not converge on any of them
+# (bulk ESS 32-90), and they are the baseline of every "vs NUTS" ratio.
+[targets.funnel_10]
+draws = 10000
+thin = 10
+
+[targets.banana_2]
+draws = 10000
+thin = 10
+
+[targets.mixture_2]
+draws = 10000
+thin = 10

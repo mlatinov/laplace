@@ -1,0 +1,33 @@
+laplace sampler test: laplace-sample/tests/targets/single_nuts.lapsampler
+
+target            tier         verdict           max|z|   R-hat min ESS      grads      logps  ESS/grad     ESS/s  vs NUTS  (per s)
+std_normal_10     must pass    pass                2.28  1.0031    2158      27655          0   0.07804    114129     0.72     0.70
+corr_gauss_10     must pass    pass                2.10  1.0033    1170      57307          0   0.02041     13022     1.02     0.98
+eight_schools_nc  must pass    pass                2.63  1.0033    1676      34080          0   0.04917     34942     0.72     0.70
+funnel_10         report only  did-not-converge    5.67  1.1071      31      58396          0   0.00054       640     5.32     4.70
+banana_2          report only  did-not-converge    0.96  1.0458      77      26216          0   0.00294      4635     1.33     1.17
+mixture_2         report only  did-not-converge    1.74  1.0849      33      18540          0   0.00176      1724     0.38     0.36
+
+ESS = minimum bulk ESS over the checked quantities; grads and logps = gradient and density-only evaluations while sampling; ESS/s = per second of sampling, summed over chains; vs NUTS = ESS/grad ratio to plain NUTS on the same target (then ESS/s). Ratios are information, never a threshold.
+
+funnel_10 did not converge (4 chains x 1000 draws, thin 1): the run says nothing either way. Give it more draws in tests/<kernel>.test.toml:
+  [targets.funnel_10]
+  draws = 10000
+  thin = 10
+  E[v]: estimate 0.6692, truth 0.0000, z 2.03, R-hat 1.1071, bulk ESS 31
+  E[v^2]: estimate 4.2920, truth 9.0000, z -5.67, R-hat 1.0479, bulk ESS 102
+
+banana_2 did not converge (4 chains x 1000 draws, thin 1): the run says nothing either way. Give it more draws in tests/<kernel>.test.toml:
+  [targets.banana_2]
+  draws = 10000
+  thin = 10
+  E[x1]: estimate 0.0919, truth 0.0000, z 0.96, R-hat 1.0436, bulk ESS 112
+  E[x1^2]: estimate 0.9570, truth 1.0000, z -0.19, R-hat 1.0435, bulk ESS 102
+  E[x2]: estimate 0.9337, truth 1.0000, z -0.28, R-hat 1.0458, bulk ESS 84
+  E[x2^2]: estimate 2.6291, truth 3.2500, z -0.47, R-hat 1.0448, bulk ESS 77
+
+mixture_2 did not converge (4 chains x 1000 draws, thin 1): the run says nothing either way. Give it more draws in tests/<kernel>.test.toml:
+  [targets.mixture_2]
+  draws = 10000
+  thin = 10
+  P[x.1 + x.2 > 0]: estimate 0.3545, truth 0.5000, z -1.74, R-hat 1.0849, bulk ESS 33

@@ -1,0 +1,11 @@
+laplace sampler test: laplace-sample/tests/targets/hybrid_eight_schools.lapsampler
+
+target            tier         verdict           max|z|   R-hat min ESS      grads      logps  ESS/grad     ESS/s  vs NUTS  (per s)
+std_normal_10     must pass    not applicable: the model has no parameter `theta_tilde`; its parameters are: x
+corr_gauss_10     must pass    not applicable: the model has no parameter `theta_tilde`; its parameters are: x
+eight_schools_nc  must pass    pass                1.69  1.0062     630      29589          0   0.02131     14476     0.31     0.30
+funnel_10         report only  not applicable: the model has no parameter `theta_tilde`; its parameters are: v, x
+banana_2          report only  not applicable: the model has no parameter `theta_tilde`; its parameters are: x1, x2
+mixture_2         report only  not applicable: the model has no parameter `theta_tilde`; its parameters are: x
+
+ESS = minimum bulk ESS over the checked quantities; grads and logps = gradient and density-only evaluations while sampling; ESS/s = per second of sampling, summed over chains; vs NUTS = ESS/grad ratio to plain NUTS on the same target (then ESS/s). Ratios are information, never a threshold.

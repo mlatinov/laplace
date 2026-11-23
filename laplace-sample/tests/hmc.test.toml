@@ -1,0 +1,7 @@
+# How `laplace sampler test` runs the built-in hmc. Format: suite.rs.
+kernel = "hmc"
+adapt = true
+
+[defaults]
+warmup = 1000
+draws = 1000

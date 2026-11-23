@@ -1,0 +1,20 @@
+# How `laplace sampler test` runs the built-in mala, and the shipped
+# kernels/mala.lapkernel twin (found by convention). Format: suite.rs.
+kernel = "mala"
+adapt = true
+
+[defaults]
+warmup = 1000
+draws = 1000
+
+# Rotated, condition 100: a diagonal metric cannot help. 1000 draws: R-hat
+# 1.25, bulk ESS 12 (tests/statistical.toml).
+[targets.corr_gauss_10]
+warmup = 5000
+draws = 50000
+thin = 50
+
+# 1000 draws: R-hat 1.015 (bulk ESS 435).
+[targets.eight_schools_nc]
+draws = 5000
+thin = 5

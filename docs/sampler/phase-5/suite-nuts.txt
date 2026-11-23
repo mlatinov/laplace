@@ -1,0 +1,18 @@
+laplace sampler test: nuts
+
+target            tier         verdict           max|z|   R-hat min ESS      grads      logps  ESS/grad     ESS/s  vs NUTS  (per s)
+std_normal_10     must pass    pass                2.28  1.0031    2158      19786          0   0.10907    165183      n/a      n/a
+corr_gauss_10     must pass    pass                1.50  1.0044     995      49540          0   0.02009     13261      n/a      n/a
+eight_schools_nc  must pass    pass                2.77  1.0038    1793      26256          0   0.06827     50832      n/a      n/a
+funnel_10         report only  did-not-converge    6.82  1.0487      78     766253          0   0.00010       133      n/a      n/a
+banana_2          report only  pass                0.81  1.0086     402     181917          0   0.00221      3820      n/a      n/a
+mixture_2         report only  pass                0.28  1.0058     492     107392          0   0.00458      4736      n/a      n/a
+
+ESS = minimum bulk ESS over the checked quantities; grads and logps = gradient and density-only evaluations while sampling; ESS/s = per second of sampling, summed over chains; vs NUTS = ESS/grad ratio to plain NUTS on the same target (then ESS/s). Ratios are information, never a threshold.
+
+funnel_10 did not converge (4 chains x 10000 draws, thin 10): the run says nothing either way. Give it more draws in tests/<kernel>.test.toml:
+  [targets.funnel_10]
+  draws = 100000
+  thin = 100
+  E[v]: estimate 0.9375, truth 0.0000, z 4.43, R-hat 1.0487, bulk ESS 78
+  E[v^2]: estimate 6.3957, truth 9.0000, z -6.82, R-hat 1.0047, bulk ESS 764

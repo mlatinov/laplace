@@ -26,6 +26,7 @@ pub mod model;
 pub mod runner;
 pub mod sample;
 pub mod state;
+pub mod suite;
 pub mod target;
 
 /// Version recorded in every CSV this binary writes.
