@@ -47,7 +47,14 @@ and `$sampler_diagnostics()` all run, so **no column needs 0**. What the
 user sees:
 - `num_divergent` = NaN (honest);
 - `ebfmi` = NA, with the warning "E-BFMI not computed because 'energy__' contains NAs" (honest);
-- **`num_max_treedepth` = 0 even when `treedepth__` is all NaN.** cmdstanr
-  drops the NAs when it counts. We cannot change this from the CSV side.
-  `laplace_sample()` in cmdlaplacer could document it, or the Phase 1.9 test could pin
-  it, so a cmdstanr change is noticed.
+- `num_max_treedepth` = 0 even when `treedepth__` is all NaN (see Q5).
+
+### Q5 — `num_max_treedepth` reads 0 for non-NUTS runs
+cmdstanr drops NAs when it counts tree-depth hits, so an all-NaN
+`treedepth__` still reports `num_max_treedepth = 0`. That falsely says "checked, none found",
+and the CSV cannot change it.
+
+**Answer:** handle it in cmdlaplacer (step 1.9). When the sampler is not NUTS,
+`laplace_sample()` shows one `message()` (not `warning()`) after the fit:
+"Tree depth and divergence diagnostics don't apply to <sampler>; see n_grad__
+and accept_stat__ instead." A testthat test covers it.
