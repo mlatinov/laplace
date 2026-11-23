@@ -1,0 +1,65 @@
+Warning: 4 of 4000 (0.0%) transitions ended with a divergence.
+See https://mc-stan.org/misc/warnings for details.
+
+== hmc: as_cmdstan_fit OK, 4 chains x 1000 draws, 6 variables
+   diagnostic_summary: num_divergent1=3 num_divergent2=1 num_divergent3=0 num_divergent4=0 num_max_treedepth1=0 num_max_treedepth2=0 num_max_treedepth3=0 num_max_treedepth4=0 ebfmi1=1.14 ebfmi2=1.19 ebfmi3=1.06 ebfmi4=1.06 
+   metadata: laplace_sampler = hmc (sha256: 8bf9e454769116d278ef8fcba8f4b1adcda1dccfd88b11dc81586e20a86dc4ec) 
+             laplace_kernel_rest = hmc 0.1.0 sha256:81a08ea26d14462b46f7e1dc696b3086e068ea4684c2856c51fa74e9dbd2e444 
+             step_size_adaptation = 0.8664447 0.8918435 0.9015088 0.8704396 
+   inv_metric(chain 1): 0.0891 0 0 0 0.0507 0 0 0 0.0178 
+# A tibble: 6 × 5
+  variable      mean     sd  rhat ess_bulk
+  <chr>        <dbl>  <dbl> <dbl>    <dbl>
+1 lp__     16.1      1.22    1.00    1256.
+2 alpha     0.839    0.258   1.00    2535.
+3 rho       1.25     0.276   1.00    2321.
+4 sigma     0.271    0.0354  1.00    2877.
+5 sigma2    0.0746   0.0199  1.00    2877.
+6 y_new     0.000326 1.10    1.00    4052.
+== mala: as_cmdstan_fit OK, 4 chains x 1000 draws, 6 variables
+   diagnostic_summary: num_divergent1=NaN num_divergent2=NaN num_divergent3=NaN num_divergent4=NaN num_max_treedepth1=0 num_max_treedepth2=0 num_max_treedepth3=0 num_max_treedepth4=0 ebfmi=NA 
+   metadata: laplace_sampler = mala (sha256: 3bd88bcf423adabf2305526c2d573ee63bbec8de8819b7b257401dcf53371eaa) 
+             laplace_kernel_rest = mala 0.1.0 sha256:7226f53cf98630c2331d053d5810e83c95e0853823c7634f46b20066fbed9b0a 
+             step_size_adaptation = 1.141486 1.219646 1.070925 1.179831 
+   inv_metric(chain 1): 0.0889 0 0 0 0.0504 0 0 0 0.0205 
+# A tibble: 6 × 5
+  variable     mean     sd  rhat ess_bulk
+  <chr>       <dbl>  <dbl> <dbl>    <dbl>
+1 lp__     16.1     1.28    1.00     906.
+2 alpha     0.840   0.257   1.00     878.
+3 rho       1.25    0.275   1.00     925.
+4 sigma     0.271   0.0379  1.00     888.
+5 sigma2    0.0749  0.0218  1.00     888.
+6 y_new    -0.00367 1.09    1.00    4080.
+== nuts: as_cmdstan_fit OK, 4 chains x 1000 draws, 6 variables
+   diagnostic_summary: num_divergent1=0 num_divergent2=0 num_divergent3=0 num_divergent4=0 num_max_treedepth1=0 num_max_treedepth2=0 num_max_treedepth3=0 num_max_treedepth4=0 ebfmi1=1.15 ebfmi2=1.11 ebfmi3=1.13 ebfmi4=1.16 
+   metadata: laplace_sampler = nuts (sha256: f50cfb29ffa409be0e0f58bd374812cfba145e2b803359fbdbe5f14915c24f16) 
+             laplace_kernel_rest = nuts 0.1.0 sha256:c801ae78ecccd3c152b8eadd78ddd2a2d91b25ce177e358c267c0a858ab49a6e 
+             step_size_adaptation = 0.8835821 0.8871828 0.8897022 0.9407939 
+   inv_metric(chain 1): 0.0716 0 0 0 0.0447 0 0 0 0.0185 
+# A tibble: 6 × 5
+  variable     mean     sd  rhat ess_bulk
+  <chr>       <dbl>  <dbl> <dbl>    <dbl>
+1 lp__     16.1     1.22    1.00    2030.
+2 alpha     0.828   0.255   1.00    2589.
+3 rho       1.24    0.275   1.00    2310.
+4 sigma     0.270   0.0357  1.00    3854.
+5 sigma2    0.0741  0.0202  1.00    3854.
+6 y_new    -0.00481 1.07    1.00    4041.
+== rwm: as_cmdstan_fit OK, 4 chains x 1000 draws, 6 variables
+   diagnostic_summary: num_divergent1=NaN num_divergent2=NaN num_divergent3=NaN num_divergent4=NaN num_max_treedepth1=0 num_max_treedepth2=0 num_max_treedepth3=0 num_max_treedepth4=0 ebfmi=NA 
+   metadata: laplace_sampler = rwm (sha256: e496ef968e09948f1886bb0dc780b6e531da25417fd6c58ad58cf10cec02ea74) 
+             laplace_kernel_rest = rwm 0.1.0 sha256:2b03f025fdae3b4d7fb1510b2647555f59c2de7a05af745e950d6679dcbaea1f 
+             step_size_adaptation = 1.439937 1.295649 1.948326 1.758819 
+   inv_metric(chain 1): 0.0963 0 0 0 0.0697 0 0 0 0.0169 
+# A tibble: 6 × 5
+  variable     mean     sd  rhat ess_bulk
+  <chr>       <dbl>  <dbl> <dbl>    <dbl>
+1 lp__     16.1     1.20    1.02     300.
+2 alpha     0.840   0.271   1.01     257.
+3 rho       1.26    0.279   1.02     243.
+4 sigma     0.269   0.0362  1.02     254.
+5 sigma2    0.0739  0.0203  1.02     254.
+6 y_new    -0.00729 1.08    1.00    4102.
+
+ALL OK
