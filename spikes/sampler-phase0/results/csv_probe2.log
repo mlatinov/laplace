@@ -1,0 +1,65 @@
+Q1 hand-written 7-line header, NUTS-shaped columns 
+   as_cmdstan_fit         ok
+   $summary()             ok
+   $draws()               ok
+    num_divergent1     num_divergent2     num_divergent3     num_divergent4 
+          0.000000           0.000000           0.000000           0.000000 
+num_max_treedepth1 num_max_treedepth2 num_max_treedepth3 num_max_treedepth4 
+          0.000000           0.000000           0.000000           0.000000 
+            ebfmi1             ebfmi2             ebfmi3             ebfmi4 
+          1.596389           1.685242           1.525175           1.691194 
+   $diagnostic_summary()  ok
+   $sampler_diagnostics() ok
+Q2 non-NUTS columns (lp, accept, stepsize, n_grad): which call fails? 
+   as_cmdstan_fit         ERROR: subscript out of bounds
+Q3 non-NUTS sampler padded: treedepth__=0, n_leapfrog__=n_grad, divergent__=0, energy__=NaN 
+   as_cmdstan_fit         ok
+   $summary()             ok
+   $draws()               ok
+    num_divergent1     num_divergent2     num_divergent3     num_divergent4 
+                 0                  0                  0                  0 
+num_max_treedepth1 num_max_treedepth2 num_max_treedepth3 num_max_treedepth4 
+                 0                  0                  0                  0 
+             ebfmi 
+                NA 
+   $diagnostic_summary()  ok
+   $sampler_diagnostics() ok
+Q4 as Q3 but energy__ = -lp__ (not a real Hamiltonian; E-BFMI meaningless) 
+   as_cmdstan_fit         ok
+   $summary()             ok
+   $draws()               ok
+    num_divergent1     num_divergent2     num_divergent3     num_divergent4 
+          0.000000           0.000000           0.000000           0.000000 
+num_max_treedepth1 num_max_treedepth2 num_max_treedepth3 num_max_treedepth4 
+          0.000000           0.000000           0.000000           0.000000 
+            ebfmi1             ebfmi2             ebfmi3             ebfmi4 
+          1.208387           1.342903           1.234326           1.326061 
+   $diagnostic_summary()  ok
+   $sampler_diagnostics() ok
+Q5 Q1 + '# algorithm = laplace' 
+   as_cmdstan_fit         ok
+   $summary()             ok
+   $draws()               ok
+    num_divergent1     num_divergent2     num_divergent3     num_divergent4 
+          0.000000           0.000000           0.000000           0.000000 
+num_max_treedepth1 num_max_treedepth2 num_max_treedepth3 num_max_treedepth4 
+          0.000000           0.000000           0.000000           0.000000 
+            ebfmi1             ebfmi2             ebfmi3             ebfmi4 
+          1.530441           1.585497           1.497081           1.692908 
+   $diagnostic_summary()  ok
+   $sampler_diagnostics() ok
+Q6 Q2 + '# algorithm = fixed_param' (the other built-in path) 
+   as_cmdstan_fit         ERROR: There are no sampler diagnostics when fixed_param = TRUE.
+Q7 one key per kernel: laplace_kernel_<label> 
+   as_cmdstan_fit         ok
+   $summary()             ok
+   $draws()               ok
+    num_divergent1     num_divergent2     num_divergent3     num_divergent4 
+          0.000000           0.000000           0.000000           0.000000 
+num_max_treedepth1 num_max_treedepth2 num_max_treedepth3 num_max_treedepth4 
+          0.000000           0.000000           0.000000           0.000000 
+            ebfmi1             ebfmi2             ebfmi3             ebfmi4 
+          1.575345           1.605158           1.579377           1.564847 
+   $diagnostic_summary()  ok
+   $sampler_diagnostics() ok
+   metadata keys: laplace_sampler, laplace_kernel_beta, laplace_kernel_sigma_tau 
