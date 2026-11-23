@@ -302,3 +302,15 @@ Also recorded in `docs/sampler/open-questions.md`.
 - **cmdstanr coupling (D4)** is covered by the 1.9 testthat test.
 - **Speed:** expect BridgeStan runs to be about 1.2× CmdStan per gradient. ESS-per-gradient
   comparisons are unaffected. Wall-clock comparisons should say so.
+
+## Review outcome (after STOP 0)
+
+Decisions on the open questions are recorded in `open-questions.md`.
+- Q1 answered (a): workspace. Q2 deferred to Phase 3: Phase 1 uses upstream nuts-rs unpatched, full model only. Q3 answered (a). Q4 answered (a), extended to NaN in every NUTS column that does not apply.
+- Q4 verified (`R/csv_probe3.R`). NaN in `energy__`, `treedepth__`, `n_leapfrog__` and `divergent__` breaks none of `$summary()`, `$draws()`, `$diagnostic_summary()` or `$sampler_diagnostics()`, so **no column falls back to 0**. Caveat: cmdstanr reports `num_max_treedepth = 0` even for an all-NaN `treedepth__`.
+
+Accepted plan changes, carried into Phase 1:
+- **1.7** always writes the seven NUTS columns. Non-NUTS kernels write NaN in the ones that do not apply. Provenance uses `# laplace_kernel_<label> = <name> <version> <hash>` per block, plus `# laplace_sampler = <name> (sha256: …)`.
+- **1.5**: never re-tune after warmup. Add a test asserting that tuning values (step size, metric) are identical across every post-warmup iteration.
+- **1.8** also reports: the Stan Math version bundled in BridgeStan v2.9.0 against CmdStan's, the compiler flags of each, and how the gradient timing was measured.
+- Overhead (≈1.24× per gradient) is accepted, with no optimisation work. The block step-size gap is noted, with no action now.

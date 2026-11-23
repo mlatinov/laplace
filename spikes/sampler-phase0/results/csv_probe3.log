@@ -1,0 +1,44 @@
+
+== R1 all four NUTS columns NaN  (NaN in: treedepth__, n_leapfrog__, divergent__, energy__)
+   as_cmdstan_fit           ok
+   $summary()               ok
+   $draws()                 ok
+   $diagnostic_summary()    ok
+   $sampler_diagnostics()   ok
+   diagnostic_summary: num_divergent1=NaN num_divergent2=NaN num_divergent3=NaN num_divergent4=NaN num_max_treedepth1=0 num_max_treedepth2=0 num_max_treedepth3=0 num_max_treedepth4=0 ebfmi=NA 
+   warnings: E-BFMI not computed because 'energy__' contains NAs. 
+
+== R2 only treedepth__ NaN  (NaN in: treedepth__)
+   as_cmdstan_fit           ok
+   $summary()               ok
+   $draws()                 ok
+   $diagnostic_summary()    ok
+   $sampler_diagnostics()   ok
+   diagnostic_summary: num_divergent1=0 num_divergent2=0 num_divergent3=0 num_divergent4=0 num_max_treedepth1=0 num_max_treedepth2=0 num_max_treedepth3=0 num_max_treedepth4=0 ebfmi1=1.20838696827466 ebfmi2=1.3429027230824 ebfmi3=1.23432610756845 ebfmi4=1.32606060501348 
+
+== R2 only n_leapfrog__ NaN  (NaN in: n_leapfrog__)
+   as_cmdstan_fit           ok
+   $summary()               ok
+   $draws()                 ok
+   $diagnostic_summary()    ok
+   $sampler_diagnostics()   ok
+   diagnostic_summary: num_divergent1=0 num_divergent2=0 num_divergent3=0 num_divergent4=0 num_max_treedepth1=0 num_max_treedepth2=0 num_max_treedepth3=0 num_max_treedepth4=0 ebfmi1=1.20838696827466 ebfmi2=1.3429027230824 ebfmi3=1.23432610756845 ebfmi4=1.32606060501348 
+
+== R2 only divergent__ NaN  (NaN in: divergent__)
+   as_cmdstan_fit           ok
+   $summary()               ok
+   $draws()                 ok
+   $diagnostic_summary()    ok
+   $sampler_diagnostics()   ok
+   diagnostic_summary: num_divergent1=NaN num_divergent2=NaN num_divergent3=NaN num_divergent4=NaN num_max_treedepth1=0 num_max_treedepth2=0 num_max_treedepth3=0 num_max_treedepth4=0 ebfmi1=1.20838696827466 ebfmi2=1.3429027230824 ebfmi3=1.23432610756845 ebfmi4=1.32606060501348 
+
+== R2 only energy__ NaN  (NaN in: energy__)
+   as_cmdstan_fit           ok
+   $summary()               ok
+   $draws()                 ok
+   $diagnostic_summary()    ok
+   $sampler_diagnostics()   ok
+   diagnostic_summary: num_divergent1=0 num_divergent2=0 num_divergent3=0 num_divergent4=0 num_max_treedepth1=0 num_max_treedepth2=0 num_max_treedepth3=0 num_max_treedepth4=0 ebfmi=NA 
+   warnings: E-BFMI not computed because 'energy__' contains NAs. 
+
+RESULT: NaN in all of {treedepth__, n_leapfrog__, divergent__, energy__} works for every call
