@@ -60,3 +60,22 @@ kernel = "hmc"
 [[run]]
 target = "corr_gauss_10"
 kernel = "nuts"
+
+# ---- Phase 3.7: hybrids (.lapsampler) on their models ---------------------
+# Same verdict rules; constrained draws are compared (simplex values, tau > 0).
+
+[[hybrid]]
+sampler = "hybrid_corr.lapsampler"
+target = "corr_gauss_split"
+# Block Gibbs across two strongly correlated blocks mixes slowly whatever
+# each block's kernel: 1000 draws gave R-hat 1.09, bulk ESS 37.
+draws = 20000
+thin = 20
+
+[[hybrid]]
+sampler = "hybrid_eight_schools.lapsampler"
+target = "eight_schools_nc"
+
+[[hybrid]]
+sampler = "hybrid_simplex.lapsampler"
+target = "simplex_hybrid"

@@ -268,6 +268,20 @@ pub fn moment(name: &str, chains: &[Vec<f64>], truth: f64) -> Moment {
     }
 }
 
+/// Like [`moment`], against a reference that has its own Monte Carlo error
+/// (a long CmdStan run shipped with the suite): `z = (estimate - reference)
+/// / sqrt(mcse^2 + reference_mcse^2)`.
+pub fn moment_vs_reference(
+    name: &str,
+    chains: &[Vec<f64>],
+    reference: f64,
+    reference_mcse: f64,
+) -> Moment {
+    let mut m = moment(name, chains, reference);
+    m.z = (m.estimate - reference) / (m.mcse * m.mcse + reference_mcse * reference_mcse).sqrt();
+    m
+}
+
 /// Chain-health thresholds (`docs/sampler/laplace_kernels.md`, section 4).
 pub const MAX_RHAT: f64 = 1.01;
 pub const MIN_ESS_BULK: f64 = 400.0;
