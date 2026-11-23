@@ -79,6 +79,25 @@ enum Command {
         #[command(subcommand)]
         action: SamplerAction,
     },
+    /// Scaffold something new
+    New {
+        #[command(subcommand)]
+        what: NewWhat,
+    },
+}
+
+#[derive(Subcommand)]
+enum NewWhat {
+    /// A kernel. Outside a kernel package: a new package `<name>/` with
+    /// laplace.toml, kernels/<name>.lapkernel, tests/<name>.test.toml and
+    /// README.md. Inside one: only the kernel and its test file.
+    Kernel {
+        name: String,
+        /// `proposal` (ends in propose(), Metropolis-Hastings) or `direct`
+        /// (ends in move())
+        #[arg(long, default_value = "proposal", value_parser = ["proposal", "direct"])]
+        kind: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -86,7 +105,8 @@ enum SamplerAction {
     /// Check a .lapsampler: syntax, every kernel resolves (built-ins,
     /// local .lapkernel files and library kernels, which are checked too),
     /// settings, the adapt() contracts. With --model, also that every model
-    /// parameter is in exactly one block (coverage, D2).
+    /// parameter is in exactly one block (coverage, D2). Given a .lapkernel,
+    /// check that one kernel.
     Check {
         file: PathBuf,
         /// The model whose parameters the blocks must cover (.laplace or
@@ -119,10 +139,41 @@ fn main() -> ExitCode {
     match Cli::parse().command {
         Command::Sampler {
             action: SamplerAction::Check { file, model, data },
-        } => report(check_sampler(&file, model.as_deref(), data.as_deref())),
+        } => {
+            if file.extension().and_then(|e| e.to_str()) == Some("lapkernel") {
+                report(authoring::check_kernel(&file))
+            } else {
+                report(check_sampler(&file, model.as_deref(), data.as_deref()))
+            }
+        }
         Command::Sampler {
             action: SamplerAction::Doc { spec },
         } => report(authoring::doc(&spec, &project())),
+        Command::New {
+            what: NewWhat::Kernel { name, kind },
+        } => {
+            let kind = if kind == "direct" {
+                authoring::KernelKind::Direct
+            } else {
+                authoring::KernelKind::Proposal
+            };
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            report(authoring::new_kernel(&name, kind, &cwd).map(|files| {
+                let shown: Vec<String> = files
+                    .iter()
+                    .map(|f| format!("  created {}", f.strip_prefix(&cwd).unwrap_or(f).display()))
+                    .collect();
+                format!(
+                    "{}\ncheck it with `laplace sampler check {}`",
+                    shown.join("\n"),
+                    files
+                        .iter()
+                        .find(|f| f.extension().and_then(|e| e.to_str()) == Some("lapkernel"))
+                        .map(|f| f.strip_prefix(&cwd).unwrap_or(f).display().to_string())
+                        .unwrap_or_default()
+                )
+            }))
+        }
         Command::Sample {
             model,
             data,
