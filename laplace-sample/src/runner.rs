@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use rand::{RngExt, SeedableRng};
 
-use crate::adapt::{AdaptConfig, Adapter, StepFinish};
+use crate::adapt::{AdaptConfig, Adapter};
 use crate::kernel::{ChainRng, Kernel, StepInfo, Tuning};
 use crate::kernels::{hmc::Hmc, mala::Mala, nuts::Nuts, rwm::Rwm};
 use crate::state::{ChainState, Evaluator};
@@ -334,13 +334,12 @@ impl SamplerSpec {
             }
         };
         let adapter = if self.bool("adapt")? {
-            // Single-proposal MH kernels: Stan's windows and dual averaging,
-            // with a Robbins-Monro finish (see adapt::RobbinsMonro).
+            // Stan's windowed adaptation: dual averaging toward the target
+            // acceptance, diagonal metric from the slow windows.
             let config = AdaptConfig {
                 target_accept: delta,
                 step_size: true,
                 metric: true,
-                finish: StepFinish::RobbinsMonro,
             };
             Some(Adapter::new(config, warmup, dim, eps))
         } else {

@@ -56,7 +56,7 @@ enum Command {
         init: Vec<String>,
         /// Sampler setting as key=value, repeatable. nuts: step_size,
         /// target_accept, max_depth. rwm, mala: step_size, target_accept,
-        /// adapt. hmc: step_size, target_accept, steps, jitter, adapt.
+        /// adapt. hmc: the same plus steps, jitter.
         #[arg(long = "set", value_name = "KEY=VALUE")]
         set: Vec<String>,
         /// Directory for the CSV files (`<model>-<chain>.csv`)

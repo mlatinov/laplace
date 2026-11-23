@@ -6,8 +6,6 @@
 //! - [`Welford`]: running per-coordinate variance.
 //! - [`Schedule`]: Stan's windowed warmup (init buffer, doubling slow
 //!   windows, term buffer).
-//! - [`RobbinsMonro`]: an optional final step-size phase for kernels whose
-//!   only adaptation signal is one Metropolis acceptance probability.
 //! - [`Adapter`]: drives any kernel through its `tuning()` / `set_tuning()`
 //!   hooks during warmup, and **freezes** after warmup: nothing here can
 //!   change a kernel's tuning once `iteration >= warmup`.
@@ -70,75 +68,6 @@ impl DualAveraging {
     /// The averaged step size, used once adaptation ends.
     pub fn final_step(&self) -> f64 {
         self.x_bar.exp()
-    }
-}
-
-/// Robbins–Monro on `log(step)` with gains `c / (k + k0)`; the result is
-/// the Polyak average of the iterates over the second half of the phase.
-///
-/// Why it exists: Stan's dual averaging keeps the *average acceptance over
-/// its iterates* at the target, but its iterates never stop fluctuating, and
-/// with a single-proposal kernel (one noisy MH probability per step) the
-/// acceptance at the *averaged* step lands well above the target (MALA on a
-/// 10-d normal: 0.69 against 0.574, see the Phase 1 report). Decaying gains
-/// make the iterates converge to the step whose acceptance is the target.
-#[derive(Clone, Debug)]
-pub struct RobbinsMonro {
-    pub target: f64,
-    pub gain: f64,
-    pub k0: f64,
-    x: f64,
-    k: f64,
-    len: u64,
-    sum: f64,
-    count: u64,
-}
-
-impl RobbinsMonro {
-    pub fn new(target: f64) -> Self {
-        Self {
-            target,
-            gain: 1.5,
-            k0: 5.0,
-            x: 0.0,
-            k: 0.0,
-            len: 0,
-            sum: 0.0,
-            count: 0,
-        }
-    }
-
-    /// Start a phase of `len` updates from `step`.
-    pub fn start(&mut self, step: f64, len: u64) {
-        self.x = step.ln();
-        self.k = 0.0;
-        self.len = len;
-        self.sum = 0.0;
-        self.count = 0;
-    }
-
-    /// Feed one acceptance probability; returns the next step size.
-    pub fn update(&mut self, accept: f64) -> f64 {
-        let accept = if accept.is_nan() {
-            0.0
-        } else {
-            accept.clamp(0.0, 1.0)
-        };
-        self.k += 1.0;
-        self.x += (accept - self.target) * self.gain / (self.k + self.k0);
-        if self.k > (self.len / 2) as f64 {
-            self.sum += self.x;
-            self.count += 1;
-        }
-        self.x.exp()
-    }
-
-    pub fn final_step(&self) -> f64 {
-        if self.count == 0 {
-            self.x.exp()
-        } else {
-            (self.sum / self.count as f64).exp()
-        }
     }
 }
 
@@ -259,34 +188,12 @@ impl Schedule {
     }
 }
 
-/// How the step size is settled in the term buffer (the last, step-size-only
-/// phase of warmup).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum StepFinish {
-    /// Stan: dual averaging all the way; final step = `exp(x_bar)`. Term
-    /// buffer 50.
-    DualAveraging,
-    /// Dual averaging until the last metric update, then [`RobbinsMonro`]
-    /// over a 100-iteration term buffer. For single-proposal MH kernels.
-    RobbinsMonro,
-}
-
-impl StepFinish {
-    pub fn term_buffer(self) -> u64 {
-        match self {
-            StepFinish::DualAveraging => 50,
-            StepFinish::RobbinsMonro => 100,
-        }
-    }
-}
-
-/// Which tuning values to adapt, and how.
+/// Which tuning values to adapt.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AdaptConfig {
     pub target_accept: f64,
     pub step_size: bool,
     pub metric: bool,
-    pub finish: StepFinish,
 }
 
 /// Drives a kernel's tuning during warmup.
@@ -294,7 +201,6 @@ pub struct Adapter {
     pub config: AdaptConfig,
     pub schedule: Schedule,
     pub da: DualAveraging,
-    rm: RobbinsMonro,
     var: Welford,
 }
 
@@ -302,15 +208,10 @@ impl Adapter {
     pub fn new(config: AdaptConfig, warmup: u64, dim: usize, initial_step: f64) -> Self {
         Self {
             config,
-            schedule: Schedule::with_buffers(warmup, 75, config.finish.term_buffer(), 25),
+            schedule: Schedule::stan(warmup),
             da: DualAveraging::new(config.target_accept, initial_step),
-            rm: RobbinsMonro::new(config.target_accept),
             var: Welford::new(dim),
         }
-    }
-
-    fn rm_finish(&self) -> bool {
-        self.config.finish == StepFinish::RobbinsMonro && self.schedule.term_buffer > 0
     }
 
     /// Call after every step. `iteration` counts from 0 over warmup and
@@ -331,18 +232,8 @@ impl Adapter {
             step_size: None,
             inv_metric: None,
         };
-        let term_start = warmup - self.schedule.term_buffer;
-        let accept = info.accept_prob.unwrap_or(0.0);
         if self.config.step_size {
-            if self.rm_finish() && iteration >= term_start {
-                if iteration == term_start {
-                    let current = kernel.tuning().step_size.unwrap_or(1.0);
-                    self.rm.start(current, self.schedule.term_buffer);
-                }
-                t.step_size = Some(self.rm.update(accept));
-            } else {
-                t.step_size = Some(self.da.update(accept));
-            }
+            t.step_size = Some(self.da.update(info.accept_prob.unwrap_or(0.0)));
         }
         if self.config.metric && self.schedule.in_slow_window(iteration) {
             self.var.add(q);
@@ -357,11 +248,7 @@ impl Adapter {
             }
         }
         if iteration + 1 == warmup && self.config.step_size {
-            t.step_size = Some(if self.rm_finish() {
-                self.rm.final_step()
-            } else {
-                self.da.final_step()
-            });
+            t.step_size = Some(self.da.final_step());
         }
         kernel.set_tuning(&t)
     }
@@ -400,29 +287,6 @@ mod tests {
         }
         assert!(up.final_step() > 1.0);
         assert!(down.final_step() < 1.0);
-    }
-
-    #[test]
-    fn robbins_monro_converges_to_the_target_of_a_smooth_curve() {
-        // accept(step) = exp(-step): the root of accept = 0.5 is ln 2.
-        let mut rm = RobbinsMonro::new(0.5);
-        rm.start(1.0, 4000);
-        let mut step = 1.0f64;
-        for _ in 0..4000 {
-            step = rm.update((-step).exp());
-        }
-        assert!(
-            (rm.final_step() - 2f64.ln()).abs() < 0.02,
-            "{}",
-            rm.final_step()
-        );
-    }
-
-    #[test]
-    fn robbins_monro_finish_uses_a_100_iteration_term_buffer() {
-        let s = Schedule::with_buffers(1000, 75, StepFinish::RobbinsMonro.term_buffer(), 25);
-        assert_eq!(s.term_buffer, 100);
-        assert_eq!(*s.window_ends.last().unwrap(), 900);
     }
 
     #[test]
