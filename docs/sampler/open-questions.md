@@ -38,6 +38,37 @@ addition. **Not in v1**, recorded as candidates:
 **Recommendation:** add them only when a kernel needs one, each with
 registry unit tests (value and RNG use) like the v1 entries.
 
+### Q12 — The `mala` Metropolis-ratio regrouping (Phase 2.5)
+To make the adapted `.lapkernel` twin bit-identical, the Rust `mala` now
+groups its ratio as `(lp' - lp) + (B - A)` (the `propose()` form) instead of
+`lp' - lp - A + B`. The mathematics and the RNG call order are unchanged;
+only rounding (~1e-16) changes. Without it, dual averaging amplified the
+rounding difference past 1e-10 within ~100 warmup iterations.
+- (a) Keep the regrouping.
+- (b) Revert it; the adapted MALA twin then matches only in distribution.
+
+**Recommendation: (a).**
+
+### Q13 — `metric` in the context vs `@adapt(metric)` (Phase 2.3)
+The context's `metric` is the kernel's `@adapt(metric)` tuning value if it
+has one, else all ones.
+- (a) Keep that.
+- (b) Drop the context entry; kernels always declare their metric.
+- (c) Make `metric` the only metric and let `@adapt(metric)` stand alone.
+
+**Recommendation: (a).**
+
+### Q14 — Default `target_accept` for a `.lapkernel` (Phase 2.4)
+A kernel with `@adapt(step_size)` and no `target_accept` adapts toward 0.8
+(Stan's `adapt_delta`).
+- (a) Keep 0.8.
+- (b) Require `@adapt(step_size, target_accept = ...)` whenever step size is
+  adapted.
+
+**Recommendation: (b).** The right target is kernel-specific (0.234 RWM,
+0.574 MALA, ~0.8 HMC), and a silent 0.8 is wrong for most single-proposal
+kernels.
+
 ## Answered
 
 ### Q6 — CI for `laplace-sample`
