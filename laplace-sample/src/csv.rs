@@ -42,8 +42,19 @@ pub struct Header {
     pub sampler: String,
     /// `key:value ...` of every resolved setting.
     pub settings: String,
-    /// One entry per block: (label, kernel name, kernel source).
-    pub kernels: Vec<(String, String, &'static str)>,
+    /// One entry per block.
+    pub kernels: Vec<KernelLine>,
+}
+
+/// One block's kernel in the provenance header.
+#[derive(Clone, Debug)]
+pub struct KernelLine {
+    pub label: String,
+    pub name: String,
+    /// The laplace-sample version for built-ins, `local` for a file.
+    pub version: String,
+    /// Hashed, never written out.
+    pub source: String,
 }
 
 impl Header {
@@ -51,10 +62,13 @@ impl Header {
     /// each block's label, kernel and kernel hash, one per line.
     pub fn sampler_text(&self) -> String {
         let mut s = format!("sampler {}\nsettings {}\n", self.sampler, self.settings);
-        for (label, name, src) in &self.kernels {
+        for k in &self.kernels {
             s += &format!(
-                "block {label} {name} sha256:{}\n",
-                sha256_hex(src.as_bytes())
+                "block {} {} {} sha256:{}\n",
+                k.label,
+                k.name,
+                k.version,
+                sha256_hex(k.source.as_bytes())
             );
         }
         s
@@ -78,11 +92,13 @@ impl Header {
                 sha256_hex(self.sampler_text().as_bytes())
             ),
         ];
-        for (label, name, src) in &self.kernels {
+        for k in &self.kernels {
             out.push(format!(
-                "# laplace_kernel_{label} = {name} {} sha256:{}",
-                crate::VERSION,
-                sha256_hex(src.as_bytes())
+                "# laplace_kernel_{} = {} {} sha256:{}",
+                k.label,
+                k.name,
+                k.version,
+                sha256_hex(k.source.as_bytes())
             ));
         }
         out.push(format!("# laplace_settings = {}", self.settings));
@@ -200,7 +216,12 @@ mod tests {
             draws: 50,
             sampler: "mala".into(),
             settings: "adapt:true step_size:1 target_accept:0.574".into(),
-            kernels: vec![("rest".into(), "mala".into(), "fn step() {}")],
+            kernels: vec![KernelLine {
+                label: "rest".into(),
+                name: "mala".into(),
+                version: crate::VERSION.into(),
+                source: "fn step() {}".into(),
+            }],
         }
     }
 

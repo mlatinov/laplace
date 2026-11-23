@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use laplace_sample::runner::BuiltIn;
+use laplace_sample::runner::Sampler;
 use laplace_sample::sample::{display, sample, SampleArgs};
 
 #[derive(Parser)]
@@ -32,7 +32,8 @@ enum Command {
         /// Data as a JSON file (cmdstanr::write_stan_json format)
         #[arg(long)]
         data: Option<PathBuf>,
-        /// Built-in sampler: nuts, rwm, mala or hmc
+        /// Built-in sampler (nuts, rwm, mala, hmc) or a path to a
+        /// .lapkernel file
         #[arg(long, default_value = "nuts")]
         sampler: String,
         #[arg(long, default_value_t = 4)]
@@ -56,7 +57,9 @@ enum Command {
         init: Vec<String>,
         /// Sampler setting as key=value, repeatable. nuts: step_size,
         /// target_accept, max_depth. rwm, mala: step_size, target_accept,
-        /// adapt. hmc: the same plus steps, jitter.
+        /// adapt. hmc: the same plus steps, jitter. A .lapkernel file: its
+        /// int and real tuning values, adapt, and target_accept if it has
+        /// an @adapt(step_size) value.
         #[arg(long = "set", value_name = "KEY=VALUE")]
         set: Vec<String>,
         /// Directory for the CSV files (`<model>-<chain>.csv`)
@@ -92,8 +95,9 @@ fn main() -> ExitCode {
         set,
         output_dir,
     };
-    // Fail on a bad --sampler before compiling anything.
-    if let Err(e) = BuiltIn::parse(&args.sampler) {
+    // Fail on a bad --sampler (or a .lapkernel that does not parse or
+    // check) before compiling anything.
+    if let Err(e) = Sampler::from_arg(&args.sampler, &args.set) {
         eprintln!("error: {e}");
         return ExitCode::FAILURE;
     }

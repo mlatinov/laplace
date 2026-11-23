@@ -145,8 +145,8 @@ impl Kernel for Nuts {
     fn name(&self) -> &'static str {
         "nuts"
     }
-    fn source(&self) -> &'static str {
-        include_str!("nuts.rs")
+    fn source(&self) -> std::borrow::Cow<'static, str> {
+        include_str!("nuts.rs").into()
     }
 
     fn adapts_itself(&self) -> bool {

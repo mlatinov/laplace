@@ -48,8 +48,8 @@ impl Kernel for Mala {
     fn name(&self) -> &'static str {
         "mala"
     }
-    fn source(&self) -> &'static str {
-        include_str!("mala.rs")
+    fn source(&self) -> std::borrow::Cow<'static, str> {
+        include_str!("mala.rs").into()
     }
 
     fn step(

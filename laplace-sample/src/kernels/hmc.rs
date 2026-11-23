@@ -66,8 +66,8 @@ impl Kernel for Hmc {
     fn name(&self) -> &'static str {
         "hmc"
     }
-    fn source(&self) -> &'static str {
-        include_str!("hmc.rs")
+    fn source(&self) -> std::borrow::Cow<'static, str> {
+        include_str!("hmc.rs").into()
     }
 
     fn step(

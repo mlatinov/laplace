@@ -326,7 +326,7 @@ fn compile(src: &str, dim: usize) -> Checked {
 /// returns the state variables after the last and the outcomes.
 fn run(src: &str, steps: usize, seed: u64) -> (Vec<Value>, Vec<Outcome>) {
     let checked = compile(src, 3);
-    let interp = Interp::new(&checked);
+    let interp = Interp::new(std::sync::Arc::new(checked));
     let tuning = interp.tuning_defaults(3).unwrap();
     let t = target();
     let mut ev = Evaluator::new(&t);
@@ -348,7 +348,7 @@ fn run(src: &str, steps: usize, seed: u64) -> (Vec<Value>, Vec<Outcome>) {
 
 fn run_err(src: &str) -> String {
     let checked = compile(src, 3);
-    let interp = Interp::new(&checked);
+    let interp = Interp::new(std::sync::Arc::new(checked));
     let tuning = interp.tuning_defaults(3).unwrap();
     let t = target();
     let mut ev = Evaluator::new(&t);
@@ -490,7 +490,7 @@ fn tuning_defaults_and_bounds() {
            step { move(q); } }",
         3,
     );
-    let interp = Interp::new(&checked);
+    let interp = Interp::new(std::sync::Arc::new(checked));
     let t = interp.tuning_defaults(3).unwrap();
     assert!((real(&t[0]) - 0.3).abs() < 1e-15);
     assert_eq!(vec_of(&t[1]), vec![1.0; 3]);

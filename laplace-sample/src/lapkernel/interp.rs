@@ -11,6 +11,7 @@
 //! with a literal integer 2 is `x * x` (other exponents use `powf`).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use nalgebra::{DMatrix, DVector};
 
@@ -40,23 +41,26 @@ enum Flow {
 
 type Scope = HashMap<String, Value>;
 
-pub struct Interp<'k> {
-    pub checked: &'k Checked,
+pub struct Interp {
+    pub checked: Arc<Checked>,
     reg: Registry,
-    funs: HashMap<&'k str, &'k FunDef>,
+    /// Function name -> index in `checked.kernel.functions`.
+    funs: HashMap<String, usize>,
 }
 
-impl<'k> Interp<'k> {
-    pub fn new(checked: &'k Checked) -> Self {
+impl Interp {
+    pub fn new(checked: Arc<Checked>) -> Self {
+        let funs = checked
+            .kernel
+            .functions
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.name.clone(), i))
+            .collect();
         Self {
             checked,
             reg: Registry::standard(),
-            funs: checked
-                .kernel
-                .functions
-                .iter()
-                .map(|f| (f.name.as_str(), f))
-                .collect(),
+            funs,
         }
     }
 
@@ -703,8 +707,8 @@ impl<'k> Interp<'k> {
             }
             ExprKind::Call { name, args, .. } => {
                 let vals = self.args(args, scopes, ctx)?;
-                if let Some(f) = self.funs.get(name.as_str()) {
-                    return self.call_user(f, vals, ctx, e.span);
+                if let Some(&i) = self.funs.get(name.as_str()) {
+                    return self.call_user(&self.checked.kernel.functions[i], vals, ctx, e.span);
                 }
                 match self.reg.get(name).map(|en| &en.kind) {
                     Some(Kind::Function {

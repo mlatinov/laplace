@@ -35,8 +35,8 @@ impl Kernel for Rwm {
     fn name(&self) -> &'static str {
         "rwm"
     }
-    fn source(&self) -> &'static str {
-        include_str!("rwm.rs")
+    fn source(&self) -> std::borrow::Cow<'static, str> {
+        include_str!("rwm.rs").into()
     }
 
     fn step(

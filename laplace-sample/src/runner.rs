@@ -9,6 +9,8 @@ use rand::{RngExt, SeedableRng};
 use crate::adapt::{AdaptConfig, Adapter};
 use crate::kernel::{ChainRng, Kernel, StepInfo, Tuning};
 use crate::kernels::{hmc::Hmc, mala::Mala, nuts::Nuts, rwm::Rwm};
+use crate::lapkernel::check::AdaptKind;
+use crate::lapkernel::kernel::{InterpretedKernel, LapKernelFile};
 use crate::state::{ChainState, Evaluator};
 use crate::target::Target;
 
@@ -346,6 +348,148 @@ impl SamplerSpec {
             None
         };
         Ok((kernel, adapter))
+    }
+}
+
+/// What `--sampler` names: a built-in, or a `.lapkernel` file (Level 3,
+/// run at Level 1 with the same automatic warmup adaptation).
+#[derive(Clone, Debug)]
+pub enum Sampler {
+    BuiltIn(SamplerSpec),
+    File(FileSampler),
+}
+
+/// A `.lapkernel` file plus its `--set` values.
+#[derive(Clone, Debug)]
+pub struct FileSampler {
+    pub file: Arc<LapKernelFile>,
+    /// Scalar tuning values from `--set name=value`, in order.
+    pub sets: Vec<(String, f64)>,
+    /// `--set adapt=false` turns warmup adaptation off.
+    pub adapt: bool,
+    /// `--set target_accept=...`; else the tag's; else 0.8.
+    pub target_accept: Option<f64>,
+}
+
+/// Target acceptance for a `.lapkernel` with `@adapt(step_size)` and no
+/// `target_accept` (Stan's default `adapt_delta`).
+pub const DEFAULT_TARGET_ACCEPT: f64 = 0.8;
+
+impl Sampler {
+    /// `--sampler` value: a path ending in `.lapkernel`, or a built-in name.
+    pub fn from_arg(arg: &str, sets: &[String]) -> anyhow::Result<Self> {
+        if !arg.ends_with(".lapkernel") {
+            return Ok(Sampler::BuiltIn(SamplerSpec::new(
+                BuiltIn::parse(arg)?,
+                sets,
+            )?));
+        }
+        let file = Arc::new(LapKernelFile::load(std::path::Path::new(arg))?);
+        let mut fs = FileSampler {
+            file: file.clone(),
+            sets: vec![],
+            adapt: true,
+            target_accept: None,
+        };
+        let has_step = file.has_adapt(AdaptKind::StepSize);
+        for s in sets {
+            let (k, v) = s
+                .split_once('=')
+                .ok_or_else(|| anyhow::anyhow!("--set expects key=value, got `{s}`"))?;
+            let (k, v) = (k.trim(), v.trim());
+            match k {
+                "adapt" => {
+                    fs.adapt = match v {
+                        "true" => true,
+                        "false" => false,
+                        _ => anyhow::bail!("adapt: expected true or false, got `{v}`"),
+                    }
+                }
+                "target_accept" if has_step => {
+                    let x: f64 = v
+                        .parse()
+                        .map_err(|_| anyhow::anyhow!("target_accept: `{v}` is not a number"))?;
+                    anyhow::ensure!(
+                        x > 0.0 && x < 1.0,
+                        "target_accept must be in (0, 1), got {x}"
+                    );
+                    fs.target_accept = Some(x);
+                }
+                name if file.settable().iter().any(|n| n == name) => {
+                    let x: f64 = v
+                        .parse()
+                        .map_err(|_| anyhow::anyhow!("{name}: `{v}` is not a number"))?;
+                    fs.sets.push((name.to_string(), x));
+                }
+                other => {
+                    let mut keys = file.settable();
+                    keys.push("adapt".into());
+                    if has_step {
+                        keys.push("target_accept".into());
+                    }
+                    anyhow::bail!(
+                        "`{}` has no setting `{other}`; its settings are: {}",
+                        file.path,
+                        keys.join(", ")
+                    )
+                }
+            }
+        }
+        Ok(Sampler::File(fs))
+    }
+
+    /// The name in the CSV `laplace_sampler` line.
+    pub fn name(&self) -> String {
+        match self {
+            Sampler::BuiltIn(s) => s.kind.name().to_string(),
+            Sampler::File(f) => f.file.path.clone(),
+        }
+    }
+
+    pub fn settings_text(&self) -> String {
+        match self {
+            Sampler::BuiltIn(s) => s.settings_text(),
+            Sampler::File(f) => {
+                let mut items: Vec<String> = vec![format!("adapt:{}", f.adapt)];
+                if let Some(t) = f.target_accept {
+                    items.push(format!("target_accept:{t}"));
+                }
+                items.extend(f.sets.iter().map(|(k, v)| format!("{k}:{v}")));
+                items.sort();
+                items.join(" ")
+            }
+        }
+    }
+
+    pub fn build(
+        &self,
+        target: Arc<dyn Target>,
+        warmup: u64,
+        draws: u64,
+    ) -> anyhow::Result<(Box<dyn Kernel>, Option<Adapter>)> {
+        let f = match self {
+            Sampler::BuiltIn(s) => return s.build(target, warmup, draws),
+            Sampler::File(f) => f,
+        };
+        let dim = target.dim();
+        let kernel = InterpretedKernel::new(f.file.clone(), dim, &f.sets)?;
+        let step_size = kernel.adapts(AdaptKind::StepSize);
+        let metric = kernel.adapts(AdaptKind::Metric);
+        let adapter = if f.adapt && (step_size || metric) {
+            let config = AdaptConfig {
+                target_accept: f
+                    .target_accept
+                    .or(kernel.target_accept())
+                    .unwrap_or(DEFAULT_TARGET_ACCEPT),
+                step_size,
+                metric,
+            };
+            let initial = kernel.tuning().step_size.unwrap_or(1.0);
+            Some(Adapter::new(config, warmup, dim, initial))
+        } else {
+            None
+        };
+        Ok((Box::new(kernel), adapter))
     }
 }
 

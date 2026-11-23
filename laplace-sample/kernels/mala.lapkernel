@@ -1,0 +1,24 @@
+//@laplace
+//@brief Metropolis-adjusted Langevin algorithm with a diagonal metric
+//@param eps Step size (adapted toward 0.574 acceptance)
+//@param m Diagonal inverse metric (adapted in warmup)
+//
+// The .lapkernel twin of the built-in `mala` (src/kernels/mala.rs): same
+// proposal, same arithmetic order, same random numbers in the same order
+// (dim normal draws, then propose()'s one uniform). The normal densities'
+// constants cancel in the difference, so the Metropolis ratio equals the
+// Rust kernel's to rounding (Phase 2.5 equivalence tests, 1e-10).
+kernel mala {
+  tuning {
+    real<lower=0> eps = 1 @adapt(step_size, target_accept = 0.574);
+    vector<lower=0>[dim] m = rep_vector(1, dim) @adapt(metric);
+  }
+  step {
+    vector[dim] mu_fwd = q + 0.5 * eps^2 * m .* grad;
+    vector[dim] q_new = mu_fwd + eps * sqrt(m) .* std_normal_rng(dim);
+    (real lp_new, vector[dim] g_new) = log_density_grad(q_new);
+    vector[dim] mu_bwd = q_new + 0.5 * eps^2 * m .* g_new;
+    vector[dim] sd = eps * sqrt(m);
+    propose(q_new, normal_lpdf(q | mu_bwd, sd) - normal_lpdf(q_new | mu_fwd, sd));
+  }
+}

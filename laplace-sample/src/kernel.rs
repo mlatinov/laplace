@@ -48,7 +48,13 @@ pub trait Kernel {
 
     /// The kernel's own source text, hashed into the CSV provenance line
     /// ("no hidden behaviour": every kernel that ran is readable source).
-    fn source(&self) -> &'static str;
+    fn source(&self) -> std::borrow::Cow<'static, str>;
+
+    /// The version recorded in the provenance line: the laplace-sample
+    /// version for built-ins, `local` for a `.lapkernel` file.
+    fn version(&self) -> String {
+        crate::VERSION.to_string()
+    }
 
     /// Called once, after the initial state is set and before the first step.
     fn init(

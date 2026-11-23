@@ -8,9 +8,9 @@ use std::sync::{Arc, Mutex};
 
 use bridgestan::{Model, StanLibrary};
 
-use crate::csv::{adaptation_lines, sampler_values, Header, Writer};
+use crate::csv::{adaptation_lines, sampler_values, Header, KernelLine, Writer};
 use crate::model;
-use crate::runner::{chain_rng, gq_seed, run_chain, BuiltIn, Init, SamplerSpec};
+use crate::runner::{chain_rng, gq_seed, run_chain, Init, Sampler};
 use crate::target::{BridgeStanTarget, Target};
 
 /// Everything `laplace-sample sample` was asked to do.
@@ -74,8 +74,7 @@ fn names(s: &str) -> Vec<String> {
 pub fn sample(args: &SampleArgs) -> anyhow::Result<Vec<PathBuf>> {
     anyhow::ensure!(args.chains >= 1, "--chains must be at least 1");
     anyhow::ensure!(args.draws >= 1, "--draws must be at least 1");
-    let kind = BuiltIn::parse(&args.sampler)?;
-    let spec = SamplerSpec::new(kind, &args.set)?;
+    let spec = Sampler::from_arg(&args.sampler, &args.set)?;
     let init = parse_init(&args.init, args.chains)?;
     let seed = args.seed.unwrap_or_else(|| rand::random::<u32>() as u64);
     if let Some(d) = &args.data {
@@ -128,7 +127,7 @@ fn data_arg(data: &Option<PathBuf>) -> anyhow::Result<Option<CString>> {
 #[allow(clippy::too_many_arguments)]
 fn run_one_chain(
     args: &SampleArgs,
-    spec: &SamplerSpec,
+    spec: &Sampler,
     init: &InitSpec,
     seed: u64,
     chain_id: u64,
@@ -164,14 +163,15 @@ fn run_one_chain(
         seed,
         warmup: args.warmup,
         draws: args.draws,
-        sampler: spec.kind.name().to_string(),
+        sampler: spec.name(),
         settings: spec.settings_text(),
         // Level 1: one kernel over the whole model, i.e. `rest : <kernel>`.
-        kernels: vec![(
-            "rest".to_string(),
-            kernel.name().to_string(),
-            kernel.source(),
-        )],
+        kernels: vec![KernelLine {
+            label: "rest".to_string(),
+            name: kernel.name().to_string(),
+            version: kernel.version(),
+            source: kernel.source().into_owned(),
+        }],
     };
     let path = args.output_dir.join(format!("{stem}-{chain_id}.csv"));
     let file = std::io::BufWriter::new(std::fs::File::create(&path)?);
