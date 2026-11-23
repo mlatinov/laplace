@@ -1,7 +1,7 @@
 # laplace-sample's statistical tests (tests/statistical.rs, all #[ignore]):
 # every built-in kernel on the reference targets through real BridgeStan
 # builds, judged by the moment-check harness (pass / fail /
-# did-not-converge). Slow and needs a C++ toolchain, so weekly and on demand
+# did-not-converge), and the SBC checks (tests/sbc.rs). Slow and needs a C++ toolchain, so weekly and on demand
 # rather than on every push.
 name: sampler-statistical
 
@@ -30,4 +30,10 @@ jobs:
       - name: Statistical tests
         run: >
           cargo test -p laplace-sample --release --locked --test statistical
+          -- --ignored --nocapture --test-threads 1
+      # Phase 5.2: simulation-based calibration passes NUTS and the shipped
+      # MALA, and fails the deliberately broken MALA fixture.
+      - name: SBC
+        run: >
+          cargo test -p laplace-sample --release --locked --test sbc
           -- --ignored --nocapture --test-threads 1
