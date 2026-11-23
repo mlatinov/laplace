@@ -1,0 +1,14 @@
+[package]
+name = "sampler-phase0-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone: never a member of the laplace compiler build (ground rule 5).
+[workspace]
+
+[dependencies]
+bridgestan = "=2.9.0"
+rand = { version = "0.10", features = ["chacha"] }
+anyhow = "1"
+

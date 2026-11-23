@@ -1,0 +1,5 @@
+/target
+/out
+/models/*.so
+/models/*.hpp
+/models/*.o
