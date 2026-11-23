@@ -202,6 +202,8 @@ pub struct Adapter {
     pub schedule: Schedule,
     pub da: DualAveraging,
     var: Welford,
+    /// The final averaged step size has been installed.
+    finished: bool,
 }
 
 impl Adapter {
@@ -211,7 +213,25 @@ impl Adapter {
             schedule: Schedule::stan(warmup),
             da: DualAveraging::new(config.target_accept, initial_step),
             var: Welford::new(dim),
+            finished: false,
         }
+    }
+
+    /// End of warmup: install the final averaged step size if the schedule
+    /// has not already (the kernel ran fewer warmup steps than expected,
+    /// e.g. inside mix). Nothing changes tuning after this.
+    pub fn finish(&mut self, kernel: &mut dyn Kernel) -> anyhow::Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+        self.finished = true;
+        if self.config.step_size {
+            kernel.set_tuning(&Tuning {
+                step_size: Some(self.da.final_step()),
+                inv_metric: None,
+            })?;
+        }
+        Ok(())
     }
 
     /// Call after every step. `iteration` counts from 0 over warmup and
@@ -225,7 +245,7 @@ impl Adapter {
         kernel: &mut dyn Kernel,
     ) -> anyhow::Result<()> {
         let warmup = self.schedule.warmup;
-        if iteration >= warmup {
+        if iteration >= warmup || self.finished {
             return Ok(()); // frozen
         }
         let mut t = Tuning {
@@ -247,10 +267,150 @@ impl Adapter {
                 }
             }
         }
-        if iteration + 1 == warmup && self.config.step_size {
-            t.step_size = Some(self.da.final_step());
+        if iteration + 1 == warmup {
+            self.finished = true;
+            if self.config.step_size {
+                t.step_size = Some(self.da.final_step());
+            }
         }
         kernel.set_tuning(&t)
+    }
+}
+
+/// `adapt(k)` (Phase 3.3): warmup adaptation of one kernel, as a kernel.
+///
+/// Stan's windowed adaptation (dual averaging toward `target_accept`, the
+/// diagonal metric from the slow windows) driven through `k`'s tuning
+/// hooks, for whatever `k` declares adaptable ([`Kernel::adaptable`]: the
+/// `@adapt` tags of a `.lapkernel`, the tuning of a built-in). The schedule
+/// is sized to the warmup steps `k` is expected to take (warmup x uses per
+/// sweep); at `end_warmup` everything freezes wherever the schedule is.
+pub struct Adapt {
+    pub inner: Box<dyn Kernel>,
+    config: AdaptConfig,
+    expected: u64,
+    adapter: Option<Adapter>,
+    count: u64,
+    warm: bool,
+}
+
+impl Adapt {
+    /// `target_accept`: `adapt(k, target_accept = ...)`, else `k`'s own
+    /// default (a `.lapkernel`'s tag, a built-in's documented default).
+    /// `expected_warmup_steps`: warmup iterations x the times `k` runs per
+    /// iteration.
+    pub fn new(
+        inner: Box<dyn Kernel>,
+        target_accept: Option<f64>,
+        expected_warmup_steps: u64,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !inner.adapts_itself(),
+            "adapt({0}): {0} adapts its own step size and metric; use it without adapt()",
+            inner.name()
+        );
+        let a = inner.adaptable();
+        anyhow::ensure!(
+            a.step_size || a.metric,
+            "adapt({}): {}",
+            inner.name(),
+            a.missing
+        );
+        let target = match (target_accept, a.step_size) {
+            (Some(t), _) => t,
+            (None, true) => inner.default_target_accept().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "adapt({}): no target_accept given and the kernel has no default",
+                    inner.name()
+                )
+            })?,
+            (None, false) => 0.5, // metric only: no step size to aim
+        };
+        anyhow::ensure!(
+            target > 0.0 && target < 1.0,
+            "target_accept must be in (0, 1), got {target}"
+        );
+        Ok(Self {
+            config: AdaptConfig {
+                target_accept: target,
+                step_size: a.step_size,
+                metric: a.metric,
+            },
+            inner,
+            expected: expected_warmup_steps,
+            adapter: None,
+            count: 0,
+            warm: true,
+        })
+    }
+
+    pub fn target_accept(&self) -> f64 {
+        self.config.target_accept
+    }
+}
+
+impl Kernel for Adapt {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+    fn source(&self) -> std::borrow::Cow<'static, str> {
+        self.inner.source()
+    }
+    fn version(&self) -> String {
+        self.inner.version()
+    }
+    fn init(
+        &mut self,
+        state: &crate::state::ChainState,
+        ev: &mut crate::state::Evaluator,
+        rng: &mut crate::kernel::ChainRng,
+    ) -> anyhow::Result<()> {
+        self.inner.init(state, ev, rng)?;
+        let initial = self.inner.tuning().step_size.unwrap_or(1.0);
+        self.adapter = Some(Adapter::new(
+            self.config,
+            self.expected,
+            state.q.len(),
+            initial,
+        ));
+        Ok(())
+    }
+    fn step(
+        &mut self,
+        state: &mut crate::state::ChainState,
+        ev: &mut crate::state::Evaluator,
+        rng: &mut crate::kernel::ChainRng,
+    ) -> anyhow::Result<StepInfo> {
+        let info = self.inner.step(state, ev, rng)?;
+        if self.warm {
+            let a = self.adapter.as_mut().expect("init before step");
+            a.after_step(self.count, &state.q, &info, self.inner.as_mut())?;
+            self.count += 1;
+        }
+        Ok(info)
+    }
+    fn tuning(&self) -> Tuning {
+        self.inner.tuning()
+    }
+    fn set_tuning(&mut self, t: &Tuning) -> anyhow::Result<()> {
+        self.inner.set_tuning(t)
+    }
+    fn end_warmup(&mut self) -> anyhow::Result<()> {
+        self.warm = false;
+        if let Some(a) = self.adapter.as_mut() {
+            a.finish(self.inner.as_mut())?;
+        }
+        self.inner.end_warmup()
+    }
+    fn tunings(&self) -> Vec<(String, Tuning)> {
+        self.inner
+            .tunings()
+            .into_iter()
+            .map(|(p, t)| (format!("adapt/{p}"), t))
+            .collect()
+    }
+    fn adaptable(&self) -> crate::kernel::Adaptable {
+        crate::kernel::Adaptable::none("it is already inside adapt()")
     }
 }
 
@@ -301,5 +461,125 @@ mod tests {
         let var0: f64 = xs.iter().map(|x| (x[0] - mean0).powi(2)).sum::<f64>() / (n - 1.0);
         let reg = (n / (n + 5.0)) * var0 + 1e-3 * (5.0 / (n + 5.0));
         assert!((w.regularized_variance()[0] - reg).abs() < 1e-12);
+    }
+}
+
+#[cfg(test)]
+mod adapt_combinator_tests {
+    use super::*;
+    use crate::combinators::Mix;
+    use crate::kernels::{mala::Mala, nuts::Nuts};
+    use crate::lapkernel::kernel::{InterpretedKernel, LapKernelFile};
+    use crate::runner::{chain_rng, run_chain, Init};
+    use crate::target::analytic::DiagGaussian;
+    use crate::target::Target;
+    use std::sync::Arc;
+
+    fn shipped(name: &str) -> Arc<LapKernelFile> {
+        let p = format!("{}/kernels/{name}.lapkernel", env!("CARGO_MANIFEST_DIR"));
+        Arc::new(LapKernelFile::load(std::path::Path::new(&p)).unwrap())
+    }
+
+    fn mean_accept(k: &mut dyn Kernel, t: &dyn Target, seed: u64, chain: u64) -> f64 {
+        let mut acc = vec![];
+        run_chain(
+            t,
+            k,
+            &Init::Radius(2.0),
+            1000,
+            1000,
+            &mut chain_rng(seed, chain),
+            |_| Ok(()),
+            |_, i, _| {
+                acc.push(i.accept_prob.unwrap());
+                Ok(())
+            },
+        )
+        .unwrap();
+        acc.iter().sum::<f64>() / acc.len() as f64
+    }
+
+    /// 3.3: adapt(./kernels/mala.lapkernel) reaches its target acceptance
+    /// (0.574, the tag's) on the standard normal: the mean over 5 seeds x 4
+    /// chains is within +-0.15, the band the Phase 1 review set for Stan's
+    /// dual averaging.
+    #[test]
+    fn adapt_of_the_mala_lapkernel_reaches_its_target() {
+        let t = DiagGaussian::std_normal(10);
+        let mut means = vec![];
+        for seed in [11, 22, 33, 44, 55] {
+            for chain in 1..=4 {
+                let inner = InterpretedKernel::new(shipped("mala"), 10, &[]).unwrap();
+                let mut k = Adapt::new(Box::new(inner), None, 1000).unwrap();
+                assert_eq!(k.target_accept(), 0.574, "the tag's default");
+                means.push(mean_accept(&mut k, &t, seed, chain));
+            }
+        }
+        let m = means.iter().sum::<f64>() / means.len() as f64;
+        assert!((m - 0.574).abs() < 0.15, "mean acceptance {m}");
+    }
+
+    #[test]
+    fn the_sampler_can_override_the_target() {
+        let inner = InterpretedKernel::new(shipped("mala"), 3, &[]).unwrap();
+        let k = Adapt::new(Box::new(inner), Some(0.65), 1000).unwrap();
+        assert_eq!(k.target_accept(), 0.65);
+    }
+
+    #[test]
+    fn nothing_to_adapt_names_the_missing_tag() {
+        let f = Arc::new(
+            LapKernelFile::from_source(
+                "fixed.lapkernel",
+                "kernel fixed { tuning { real<lower=0> h = 0.1; } step { propose(q + h * std_normal_rng(dim), 0); } }"
+                    .into(),
+            )
+            .unwrap(),
+        );
+        let inner = InterpretedKernel::new(f, 3, &[]).unwrap();
+        let e = Adapt::new(Box::new(inner), None, 100).err().unwrap();
+        assert!(
+            e.to_string()
+                .contains("tag its step size @adapt(step_size, target_accept = ...)"),
+            "{e}"
+        );
+        let t: Arc<dyn Target> = Arc::new(DiagGaussian::std_normal(2));
+        let e = Adapt::new(Box::new(Nuts::new(t, 10, 10)), None, 10)
+            .err()
+            .unwrap();
+        assert!(
+            e.to_string()
+                .contains("adapts its own step size and metric"),
+            "{e}"
+        );
+        let mix = Mix::new(&[1.0], vec![Box::new(Mala::new(0.1))]).unwrap();
+        let e = Adapt::new(Box::new(mix), None, 10).err().unwrap();
+        assert!(
+            e.to_string().contains("mix exposes no step size or metric"),
+            "{e}"
+        );
+    }
+
+    /// Inside mix the kernel runs fewer warmup steps than its schedule
+    /// expects; tuning still freezes exactly at the end of warmup.
+    #[test]
+    fn adapt_inside_mix_freezes_at_end_of_warmup() {
+        let t = DiagGaussian::std_normal(4);
+        let a = Adapt::new(Box::new(Mala::new(1.0)), None, 1000).unwrap();
+        let mut k = Mix::new(&[1.0, 1.0], vec![Box::new(a), Box::new(Mala::new(0.3))]).unwrap();
+        let mut ev = crate::state::Evaluator::new(&t);
+        let mut rng = chain_rng(3, 1);
+        let mut st = crate::runner::initial_state(&Init::Radius(2.0), &mut ev, &mut rng).unwrap();
+        k.init(&st, &mut ev, &mut rng).unwrap();
+        for _ in 0..1000 {
+            k.step(&mut st, &mut ev, &mut rng).unwrap();
+        }
+        k.end_warmup().unwrap();
+        let frozen = k.tunings();
+        assert_ne!(frozen[0].1.step_size, Some(1.0), "adapted during warmup");
+        for _ in 0..300 {
+            k.step(&mut st, &mut ev, &mut rng).unwrap();
+            assert_eq!(k.tunings(), frozen, "tuning changed after warmup");
+        }
     }
 }

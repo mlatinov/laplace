@@ -510,7 +510,6 @@ mod tests {
             run_chain(
                 &t,
                 &mut k,
-                None,
                 &Init::Radius(2.0),
                 500,
                 20_000,

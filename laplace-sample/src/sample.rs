@@ -155,7 +155,7 @@ fn run_one_chain(
     let mut gq_rng = bridgestan::Rng::new(lib.clone(), gq_seed(seed, chain_id))?;
     let target = Arc::new(BridgeStanTarget { model });
     let dyn_target: Arc<dyn Target> = target.clone();
-    let (mut kernel, adapter) = spec.build(dyn_target, args.warmup, args.draws)?;
+    let mut kernel = spec.build(dyn_target, args.warmup, args.draws)?;
 
     let header = Header {
         model: model_name,
@@ -178,7 +178,7 @@ fn run_one_chain(
     let w = std::cell::RefCell::new(Writer::new(file, &header, &param_names)?);
     let mut out = vec![0.0; param_names.len()];
     let mut rng = chain_rng(seed, chain_id);
-    let adapted = adapter.is_some() || kernel.adapts_itself();
+    let adapted = spec.adapts();
     // Wall-clock timing goes to stderr only: the CSV must stay
     // byte-identical across runs.
     let started = std::time::Instant::now();
@@ -186,7 +186,6 @@ fn run_one_chain(
     let summary = run_chain(
         target.as_ref(),
         kernel.as_mut(),
-        adapter,
         &init,
         args.warmup,
         args.draws,

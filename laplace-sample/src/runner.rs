@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use rand::{RngExt, SeedableRng};
 
-use crate::adapt::{AdaptConfig, Adapter};
+use crate::adapt::Adapt;
 use crate::kernel::{ChainRng, Kernel, StepInfo, Tuning};
 use crate::kernels::{hmc::Hmc, mala::Mala, nuts::Nuts, rwm::Rwm};
 use crate::lapkernel::check::AdaptKind;
@@ -111,7 +111,6 @@ pub struct ChainSummary {
 pub fn run_chain(
     target: &dyn Target,
     kernel: &mut dyn Kernel,
-    mut adapter: Option<Adapter>,
     init: &Init,
     warmup: u64,
     draws: u64,
@@ -119,32 +118,26 @@ pub fn run_chain(
     mut on_end_of_warmup: impl FnMut(&Tuning) -> anyhow::Result<()>,
     mut on_draw: impl FnMut(&ChainState, &StepInfo, &Tuning) -> anyhow::Result<()>,
 ) -> anyhow::Result<ChainSummary> {
-    anyhow::ensure!(
-        adapter.is_none() || !kernel.adapts_itself(),
-        "{} adapts itself and cannot also be wrapped in adaptation",
-        kernel.name()
-    );
     let mut ev = Evaluator::new(target);
     let mut state = initial_state(init, &mut ev, rng)?;
     kernel.init(&state, &mut ev, rng)?;
     let (mut warmup_grads, mut draw_grads) = (0, 0);
     for it in 0..warmup + draws {
         if it == warmup {
+            kernel.end_warmup()?;
             on_end_of_warmup(&kernel.tuning())?;
         }
         let tuning = kernel.tuning();
         let info = kernel.step(&mut state, &mut ev, rng)?;
         if it < warmup {
             warmup_grads += info.n_grad;
-            if let Some(a) = adapter.as_mut() {
-                a.after_step(it, &state.q, &info, kernel)?;
-            }
         } else {
             draw_grads += info.n_grad;
             on_draw(&state, &info, &tuning)?;
         }
     }
-    if warmup + draws == warmup {
+    if draws == 0 {
+        kernel.end_warmup()?;
         on_end_of_warmup(&kernel.tuning())?;
     }
     Ok(ChainSummary {
@@ -309,23 +302,22 @@ impl SamplerSpec {
             .join(" ")
     }
 
-    /// Build the kernel and its warmup adapter for one chain.
-    pub fn build(
+    /// The bare kernel (no adaptation wrapper). `target` is only used by
+    /// nuts, which runs its own integrator; `num_tune` is its warmup length.
+    pub fn kernel(
         &self,
         target: Arc<dyn Target>,
-        warmup: u64,
+        num_tune: u64,
         draws: u64,
-    ) -> anyhow::Result<(Box<dyn Kernel>, Option<Adapter>)> {
+    ) -> anyhow::Result<Box<dyn Kernel>> {
         let eps = self.f64("step_size")?;
-        let delta = self.f64("target_accept")?;
-        let dim = target.dim();
-        let kernel: Box<dyn Kernel> = match self.kind {
+        Ok(match self.kind {
             BuiltIn::Nuts => {
-                let mut k = Nuts::new(target, warmup, draws);
+                let mut k = Nuts::new(target, num_tune, draws);
                 k.set_initial_step_size(eps);
-                k.set_target_accept(delta);
+                k.set_target_accept(self.f64("target_accept")?);
                 k.set_max_depth(self.u64("max_depth")?);
-                return Ok((Box::new(k), None));
+                Box::new(k)
             }
             BuiltIn::Rwm => Box::new(Rwm::new(eps)),
             BuiltIn::Mala => Box::new(Mala::new(eps)),
@@ -334,20 +326,26 @@ impl SamplerSpec {
                 k.jitter = self.bool("jitter")?;
                 Box::new(k)
             }
-        };
-        let adapter = if self.bool("adapt")? {
-            // Stan's windowed adaptation: dual averaging toward the target
-            // acceptance, diagonal metric from the slow windows.
-            let config = AdaptConfig {
-                target_accept: delta,
-                step_size: true,
-                metric: true,
-            };
-            Some(Adapter::new(config, warmup, dim, eps))
-        } else {
-            None
-        };
-        Ok((kernel, adapter))
+        })
+    }
+
+    /// Level 1: the kernel on the whole model, inside `adapt()` unless it is
+    /// nuts (which adapts itself) or `adapt=false`.
+    pub fn build(
+        &self,
+        target: Arc<dyn Target>,
+        warmup: u64,
+        draws: u64,
+    ) -> anyhow::Result<Box<dyn Kernel>> {
+        let kernel = self.kernel(target, warmup, draws)?;
+        if self.kind == BuiltIn::Nuts || !self.bool("adapt")? {
+            return Ok(kernel);
+        }
+        Ok(Box::new(Adapt::new(
+            kernel,
+            Some(self.f64("target_accept")?),
+            warmup,
+        )?))
     }
 }
 
@@ -435,6 +433,19 @@ impl Sampler {
         Ok(Sampler::File(fs))
     }
 
+    /// Whether warmup adapts anything (the CSV then records the adapted
+    /// step size and metric, as CmdStan does).
+    pub fn adapts(&self) -> bool {
+        match self {
+            Sampler::BuiltIn(s) => s.kind == BuiltIn::Nuts || s.bool("adapt").unwrap_or(false),
+            Sampler::File(f) => {
+                f.adapt
+                    && (f.file.has_adapt(AdaptKind::StepSize)
+                        || f.file.has_adapt(AdaptKind::Metric))
+            }
+        }
+    }
+
     /// The name in the CSV `laplace_sampler` line.
     pub fn name(&self) -> String {
         match self {
@@ -458,34 +469,28 @@ impl Sampler {
         }
     }
 
+    /// Level 1: the kernel on the whole model. A `.lapkernel` with
+    /// `@adapt` tags runs inside `adapt()`, exactly like the built-ins.
     pub fn build(
         &self,
         target: Arc<dyn Target>,
         warmup: u64,
         draws: u64,
-    ) -> anyhow::Result<(Box<dyn Kernel>, Option<Adapter>)> {
+    ) -> anyhow::Result<Box<dyn Kernel>> {
         let f = match self {
             Sampler::BuiltIn(s) => return s.build(target, warmup, draws),
             Sampler::File(f) => f,
         };
-        let dim = target.dim();
-        let kernel = InterpretedKernel::new(f.file.clone(), dim, &f.sets)?;
-        let step_size = kernel.adapts(AdaptKind::StepSize);
-        let metric = kernel.adapts(AdaptKind::Metric);
-        let adapter = if f.adapt && (step_size || metric) {
-            let config = AdaptConfig {
-                // A step_size tag always carries one (checked); a
-                // metric-only kernel adapts no step size and ignores it.
-                target_accept: f.target_accept.or(kernel.target_accept()).unwrap_or(0.5),
-                step_size,
-                metric,
-            };
-            let initial = kernel.tuning().step_size.unwrap_or(1.0);
-            Some(Adapter::new(config, warmup, dim, initial))
-        } else {
-            None
-        };
-        Ok((Box::new(kernel), adapter))
+        let kernel = InterpretedKernel::new(f.file.clone(), target.dim(), &f.sets)?;
+        let adaptable = kernel.adapts(AdaptKind::StepSize) || kernel.adapts(AdaptKind::Metric);
+        if !(f.adapt && adaptable) {
+            return Ok(Box::new(kernel));
+        }
+        Ok(Box::new(Adapt::new(
+            Box::new(kernel),
+            f.target_accept,
+            warmup,
+        )?))
     }
 }
 
@@ -504,13 +509,12 @@ mod tests {
     ) -> (Vec<(ChainState, StepInfo, Tuning)>, ChainSummary) {
         let sets: Vec<String> = sets.iter().map(|s| s.to_string()).collect();
         let spec = SamplerSpec::new(kind, &sets).unwrap();
-        let (mut k, a) = spec.build(target.clone(), warmup, draws).unwrap();
+        let mut k = spec.build(target.clone(), warmup, draws).unwrap();
         let mut rng = chain_rng(seed, 1);
         let mut out = vec![];
         let s = run_chain(
             target.as_ref(),
             k.as_mut(),
-            a,
             &Init::Radius(2.0),
             warmup,
             draws,
