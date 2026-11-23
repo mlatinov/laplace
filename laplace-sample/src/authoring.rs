@@ -1,6 +1,6 @@
-//! Library-author commands (Phase 4.3-4.4): `laplace sampler doc`,
-//! `laplace new kernel`, and `laplace sampler check` on a single
-//! `.lapkernel`.
+//! Library-author commands (Phase 4.3-4.5): `laplace sampler doc`,
+//! `laplace sampler list`, `laplace new kernel`, and `laplace sampler
+//! check` on a single `.lapkernel`.
 
 use std::path::{Path, PathBuf};
 
@@ -63,6 +63,59 @@ fn builtin_line(b: BuiltIn) -> String {
         ),
     };
     format!("  {:<6} settings: {settings}; {adapts}", b.name())
+}
+
+/// Built-in kernels, then every kernel package of the current project with
+/// each kernel's tuning values.
+pub fn list(project: &Project) -> String {
+    let mut out = String::from("Built-in kernels:\n");
+    for b in BuiltIn::ALL {
+        out += &builtin_line(b);
+        out += "\n";
+    }
+    let libs = crate::libraries::installed(project);
+    if libs.is_empty() {
+        out += &format!(
+            "\nNo kernel packages in {} (add one with `laplace add <name> --path <dir>`).\n",
+            project.dir.join("laplace.lock").display()
+        );
+        return out;
+    }
+    for lib in libs {
+        match lib {
+            Err(e) => out += &format!("\n{e}\n"),
+            Ok(lib) => {
+                out += &format!("\n{} {} (`import {}`):\n", lib.name, lib.version, lib.name);
+                for k in lib.kernels() {
+                    match load_library_kernel(&lib, &k) {
+                        Err(e) => out += &format!("  {}::{k}: does not load: {e}\n", lib.name),
+                        Ok(f) => {
+                            let d = kernel_doc(&f, &format!("{}::{k}", lib.name), "");
+                            let tuning: Vec<String> = d
+                                .tuning
+                                .iter()
+                                .map(|t| match &t.adapt {
+                                    Some(a) => format!("{} {a}", t.name),
+                                    None => t.name.clone(),
+                                })
+                                .collect();
+                            out += &format!(
+                                "  {}::{k:<10} tuning: {}{}\n",
+                                lib.name,
+                                if tuning.is_empty() {
+                                    "none".to_string()
+                                } else {
+                                    tuning.join(", ")
+                                },
+                                d.brief.map(|b| format!("\n      {b}")).unwrap_or_default()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// `laplace sampler check kernels/x.lapkernel`: parse and check one kernel.
@@ -264,6 +317,53 @@ pub fn new_kernel(name: &str, kind: KernelKind, dir: &Path) -> anyhow::Result<Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_shows_built_ins_and_the_projects_kernel_packages() {
+        use laplace::resolve::lockfile::{write_lockfile, LockedPackage, Lockfile};
+        let tmp = tempfile::tempdir().unwrap();
+        new_kernel("pmala", KernelKind::Proposal, tmp.path()).unwrap();
+        new_kernel("exact", KernelKind::Direct, &tmp.path().join("pmala")).unwrap();
+        let dir = tmp.path().join("project");
+        std::fs::create_dir(&dir).unwrap();
+        let project = Project {
+            dir: dir.clone(),
+            cache_root: tmp.path().join("home/.laplace/packages"),
+        };
+        let none = list(&project);
+        assert!(
+            none.contains("nuts   settings: step_size, target_accept, max_depth"),
+            "{none}"
+        );
+        assert!(none.contains("No kernel packages in"), "{none}");
+        write_lockfile(
+            &dir.join("laplace.lock"),
+            &Lockfile {
+                root: vec!["gps".into(), "pmala".into()],
+                packages: vec![
+                    LockedPackage::leaf("gps", "1.0.0", "sha256:0", "registry"),
+                    LockedPackage {
+                        kind: PackageKind::Kernels,
+                        ..LockedPackage::leaf("pmala", "0.1.0", "sha256:0", "path+../pmala")
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        let out = list(&project);
+        assert!(out.contains("pmala 0.1.0 (`import pmala`):"), "{out}");
+        assert!(out.contains("pmala::exact      tuning: none"), "{out}");
+        assert!(
+            out.contains(
+                "pmala::pmala      tuning: eps @adapt(step_size, target_accept = 0.234), m @adapt(metric)"
+            ),
+            "{out}"
+        );
+        assert!(
+            !out.contains("gps"),
+            "function libraries are not listed: {out}"
+        );
+    }
 
     #[test]
     fn a_new_kernel_package_scaffolds_and_checks_unchanged() {

@@ -122,6 +122,9 @@ enum SamplerAction {
     /// `<package>::<kernel>` (an installed kernel package; `laplace doc`
     /// forwards here) or a .lapkernel file.
     Doc { spec: String },
+    /// The built-in kernels and the kernels of this project's kernel
+    /// packages, with their settings and tuning values
+    List,
 }
 
 fn main() -> ExitCode {
@@ -149,6 +152,9 @@ fn main() -> ExitCode {
         Command::Sampler {
             action: SamplerAction::Doc { spec },
         } => report(authoring::doc(&spec, &project())),
+        Command::Sampler {
+            action: SamplerAction::List,
+        } => report(Ok(authoring::list(&project()))),
         Command::New {
             what: NewWhat::Kernel { name, kind },
         } => {
