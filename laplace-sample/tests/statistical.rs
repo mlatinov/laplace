@@ -148,13 +148,12 @@ fn run_seeded(r: &Reference, kind: BuiltIn, sets: &[&str], n: Counts, seed: u64)
                         .map(|p| CString::new(p.to_str().unwrap()).unwrap());
                     let model = Model::new(r.lib.clone(), data, seed as u32).unwrap();
                     let target: Arc<dyn Target> = Arc::new(BridgeStanTarget { model });
-                    let (mut k, a) = spec.build(target.clone(), warmup, draws).unwrap();
+                    let mut k = spec.build(target.clone(), warmup, draws).unwrap();
                     let (mut qs, mut infos) = (vec![], vec![]);
                     let mut i = 0u64;
                     run_chain(
                         target.as_ref(),
                         k.as_mut(),
-                        a,
                         &Init::Radius(2.0),
                         warmup,
                         draws,
@@ -379,12 +378,11 @@ fn twin_trace(
         .map(|p| CString::new(p.to_str().unwrap()).unwrap());
     let model = Model::new(r.lib.clone(), data, SEED as u32).unwrap();
     let target: Arc<dyn Target> = Arc::new(BridgeStanTarget { model });
-    let (mut k, a) = sampler.build(target.clone(), 1000, 1000).unwrap();
+    let mut k = sampler.build(target.clone(), 1000, 1000).unwrap();
     let mut rows = vec![];
     run_chain(
         target.as_ref(),
         k.as_mut(),
-        a,
         &Init::Radius(2.0),
         1000,
         1000,
@@ -488,13 +486,12 @@ fn interpreter_overhead_on_the_gp_model() {
     let fixed = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     let steps = 3000u64;
     let time = |sampler: &Sampler| -> (f64, u64) {
-        let (mut k, a) = sampler.build(target.clone(), 0, steps).unwrap();
+        let mut k = sampler.build(target.clone(), 0, steps).unwrap();
         let mut grads = 0;
         let t0 = Instant::now();
         run_chain(
             target.as_ref(),
             k.as_mut(),
-            a,
             &Init::Radius(0.5),
             0,
             steps,

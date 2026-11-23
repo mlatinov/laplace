@@ -183,6 +183,26 @@ impl Kernel for InterpretedKernel {
         "local".to_string()
     }
 
+    fn adaptable(&self) -> crate::kernel::Adaptable {
+        let (step_size, metric) = (
+            self.adapts(AdaptKind::StepSize),
+            self.adapts(AdaptKind::Metric),
+        );
+        crate::kernel::Adaptable {
+            step_size,
+            metric,
+            missing: format!(
+                "{} has nothing to adapt: tag its step size @adapt(step_size, target_accept = ...) \
+                 and/or its inverse metric @adapt(metric)",
+                self.file.path
+            ),
+        }
+    }
+
+    fn default_target_accept(&self) -> Option<f64> {
+        self.target_accept()
+    }
+
     fn init(
         &mut self,
         state: &ChainState,
@@ -326,12 +346,11 @@ mod tests {
     /// Run a sampler; returns (tuning before each saved step, step infos).
     fn run(s: &Sampler, warmup: u64, draws: u64) -> Vec<(Tuning, StepInfo)> {
         let t = target();
-        let (mut k, a) = s.build(t.clone(), warmup, draws).unwrap();
+        let mut k = s.build(t.clone(), warmup, draws).unwrap();
         let mut out = vec![];
         run_chain(
             t.as_ref(),
             k.as_mut(),
-            a,
             &Init::Radius(2.0),
             warmup,
             draws,

@@ -35,12 +35,11 @@ fn kernel_path(name: &str) -> String {
 
 fn trace(sampler: &Sampler, target: Arc<dyn Target>, seed: u64, chain: u64) -> Trace {
     let (warmup, draws) = (1000, 1000);
-    let (mut k, a) = sampler.build(target.clone(), warmup, draws).unwrap();
+    let mut k = sampler.build(target.clone(), warmup, draws).unwrap();
     let mut t = Trace::default();
     run_chain(
         target.as_ref(),
         k.as_mut(),
-        a,
         &Init::Radius(2.0),
         warmup,
         draws,

@@ -54,6 +54,15 @@ impl Kernel for Mala {
         include_str!("mala.rs").into()
     }
 
+    fn adaptable(&self) -> crate::kernel::Adaptable {
+        crate::kernel::Adaptable::both()
+    }
+
+    /// The built-in's documented default (`--sampler mala`).
+    fn default_target_accept(&self) -> Option<f64> {
+        Some(0.574)
+    }
+
     fn step(
         &mut self,
         state: &mut ChainState,

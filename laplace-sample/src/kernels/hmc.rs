@@ -70,6 +70,15 @@ impl Kernel for Hmc {
         include_str!("hmc.rs").into()
     }
 
+    fn adaptable(&self) -> crate::kernel::Adaptable {
+        crate::kernel::Adaptable::both()
+    }
+
+    /// The built-in's documented default (`--sampler hmc`).
+    fn default_target_accept(&self) -> Option<f64> {
+        Some(0.8)
+    }
+
     fn step(
         &mut self,
         state: &mut ChainState,

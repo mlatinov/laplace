@@ -44,6 +44,32 @@ pub struct BlockInfo {
     pub step_size: Option<f64>,
 }
 
+/// Which tuning values `adapt()` can drive.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Adaptable {
+    pub step_size: bool,
+    pub metric: bool,
+    /// Why neither, for the error `adapt()` gives.
+    pub missing: String,
+}
+
+impl Adaptable {
+    pub fn both() -> Self {
+        Self {
+            step_size: true,
+            metric: true,
+            missing: String::new(),
+        }
+    }
+    pub fn none(why: &str) -> Self {
+        Self {
+            step_size: false,
+            metric: false,
+            missing: why.to_string(),
+        }
+    }
+}
+
 /// The values adaptation may change. Named after the `@adapt` tags of the
 /// Phase 2 kernel language (`step_size`, `metric`).
 #[derive(Clone, Debug, PartialEq)]
@@ -94,6 +120,20 @@ pub trait Kernel {
     /// runner must not wrap it in [`crate::adapt::Adapter`].
     fn adapts_itself(&self) -> bool {
         false
+    }
+
+    /// What `adapt()` may tune on this kernel. Default: nothing, with the
+    /// reason `adapt()` reports.
+    fn adaptable(&self) -> Adaptable {
+        Adaptable::none(&format!(
+            "{} exposes no step size or metric to adapt",
+            self.name()
+        ))
+    }
+
+    /// The acceptance rate `adapt()` aims for when the sampler gives none.
+    fn default_target_accept(&self) -> Option<f64> {
+        None
     }
 
     /// Called exactly once, after the last warmup step and before the first
