@@ -13,8 +13,8 @@
 //! `propto = true` BridgeStan needs autodiff for the density anyway, so the
 //! extra cost is small (Phase 0.6: 169 vs 205 us on the gp model).
 
-use super::{check_metric, check_step_size, grads_since, metric_or_unit, normals};
-use crate::kernel::{mh_accept, ChainRng, Kernel, StepInfo, Tuning};
+use super::{check_metric, check_step_size, metric_or_unit, normals};
+use crate::kernel::{mh_accept, ChainRng, Cost, Kernel, StepInfo, Tuning};
 use crate::state::{ChainState, Evaluator};
 
 pub struct Rwm {
@@ -54,27 +54,27 @@ impl Kernel for Rwm {
         ev: &mut Evaluator,
         rng: &mut ChainRng,
     ) -> anyhow::Result<StepInfo> {
-        let before = ev.n_grad();
+        let before = Cost::now(ev);
         let d = state.q.len();
         let m = metric_or_unit(&self.inv_metric, d);
         let z = normals(rng, d);
         let q_new: Vec<f64> = (0..d)
             .map(|i| state.q[i] + self.step_size * m[i].sqrt() * z[i])
             .collect();
-        let (lp_new, g_new) = ev.eval(&q_new)?;
+        // Density only: rwm uses no gradient (cost accounting, Phase 4).
+        let lp_new = ev.eval_lp(&q_new)?;
         let log_alpha = lp_new - state.lp;
         let (accepted, p) = mh_accept(log_alpha, rng);
         if accepted {
             *state = ChainState {
                 q: q_new,
                 lp: lp_new,
-                grad: g_new,
+                grad: None,
             };
         }
         Ok(StepInfo {
             accept_prob: Some(p),
-            n_grad: grads_since(ev, before),
-            ..Default::default()
+            ..before.since(ev)
         })
     }
 

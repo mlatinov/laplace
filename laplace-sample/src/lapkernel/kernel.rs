@@ -12,7 +12,7 @@ use super::check::{check, AdaptKind, Checked};
 use super::interp::{Interp, Outcome};
 use super::parse::parse;
 use super::types::Value;
-use crate::kernel::{mh_accept, ChainRng, Kernel, StepInfo, Tuning};
+use crate::kernel::{mh_accept, ChainRng, Cost, Kernel, StepInfo, Tuning};
 use crate::state::{ChainState, Evaluator};
 
 /// A parsed `.lapkernel` file, checked without a dimension (types and
@@ -210,9 +210,13 @@ impl Kernel for InterpretedKernel {
         rng: &mut ChainRng,
     ) -> anyhow::Result<()> {
         let metric = self.metric_value();
+        let mut state = state.clone();
+        if self.interp.checked.uses_grad {
+            state.grad(ev)?;
+        }
         let mut ctx = Ctx {
             dim: self.dim,
-            state: Some(state),
+            state: Some(&state),
             ev: Some(ev),
             rng: Some(rng),
             metric: metric.as_ref(),
@@ -230,8 +234,11 @@ impl Kernel for InterpretedKernel {
         ev: &mut Evaluator,
         rng: &mut ChainRng,
     ) -> anyhow::Result<StepInfo> {
-        let before = ev.n_grad();
+        let before = Cost::now(ev);
         let metric = self.metric_value();
+        if self.interp.checked.uses_grad {
+            state.grad(ev)?;
+        }
         let outcome = {
             let mut ctx = Ctx {
                 dim: self.dim,
@@ -250,8 +257,10 @@ impl Kernel for InterpretedKernel {
                 log_correction,
             } => {
                 let q_new: Vec<f64> = q_new.iter().copied().collect();
-                // Usually a free cache hit: the kernel evaluated q_new itself.
-                let (lp_new, g_new) = ev.eval(&q_new)?;
+                // Usually a free cache hit: the kernel evaluated q_new
+                // itself. Density only: a gradient is computed (or found in
+                // the cache) only when a step that reads `grad` asks.
+                let lp_new = ev.eval_lp(&q_new)?;
                 let log_alpha = if lp_new == f64::NEG_INFINITY {
                     f64::NEG_INFINITY
                 } else {
@@ -262,14 +271,14 @@ impl Kernel for InterpretedKernel {
                     *state = ChainState {
                         q: q_new,
                         lp: lp_new,
-                        grad: g_new,
+                        grad: None,
                     };
                 }
                 Some(p)
             }
             Outcome::Move { q_new } => {
                 let q_new: Vec<f64> = q_new.iter().copied().collect();
-                let (lp_new, g_new) = ev.eval(&q_new)?;
+                let lp_new = ev.eval_lp(&q_new)?;
                 anyhow::ensure!(
                     lp_new.is_finite(),
                     "{}: move() to a point where the log density is {lp_new}",
@@ -278,15 +287,14 @@ impl Kernel for InterpretedKernel {
                 *state = ChainState {
                     q: q_new,
                     lp: lp_new,
-                    grad: g_new,
+                    grad: None,
                 };
                 None
             }
         };
         Ok(StepInfo {
             accept_prob,
-            n_grad: ev.n_grad() - before,
-            ..Default::default()
+            ..before.since(ev)
         })
     }
 

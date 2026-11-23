@@ -56,7 +56,7 @@ pub fn initial_state(
     rng: &mut ChainRng,
 ) -> anyhow::Result<ChainState> {
     let d = ev.dim();
-    let ok = |s: &ChainState| s.lp.is_finite() && s.grad.iter().all(|g| g.is_finite());
+    let ok = |s: &ChainState| s.lp.is_finite() && s.grad.iter().flatten().all(|g| g.is_finite());
     match init {
         Init::Point(q) => {
             anyhow::ensure!(q.len() == d, "init has {} values, model has {d}", q.len());
@@ -102,6 +102,9 @@ pub struct ChainSummary {
     pub final_tuning: Tuning,
     pub warmup_grads: u64,
     pub draw_grads: u64,
+    /// Density-only evaluations (cost accounting, Phase 4).
+    pub warmup_logps: u64,
+    pub draw_logps: u64,
 }
 
 /// Run one chain: `warmup` adapted iterations, then `draws` saved ones.
@@ -122,6 +125,7 @@ pub fn run_chain(
     let mut state = initial_state(init, &mut ev, rng)?;
     kernel.init(&state, &mut ev, rng)?;
     let (mut warmup_grads, mut draw_grads) = (0, 0);
+    let (mut warmup_logps, mut draw_logps) = (0, 0);
     for it in 0..warmup + draws {
         if it == warmup {
             kernel.end_warmup()?;
@@ -131,8 +135,10 @@ pub fn run_chain(
         let info = kernel.step(&mut state, &mut ev, rng)?;
         if it < warmup {
             warmup_grads += info.n_grad;
+            warmup_logps += info.n_logp;
         } else {
             draw_grads += info.n_grad;
+            draw_logps += info.n_logp;
             on_draw(&state, &info, &tuning)?;
         }
     }
@@ -144,6 +150,8 @@ pub fn run_chain(
         final_tuning: kernel.tuning(),
         warmup_grads,
         draw_grads,
+        warmup_logps,
+        draw_logps,
     })
 }
 

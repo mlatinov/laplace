@@ -13,7 +13,7 @@
 use rand::RngExt;
 
 use crate::blocks::Block;
-use crate::kernel::{BlockInfo, ChainRng, Kernel, StepInfo, Tuning};
+use crate::kernel::{BlockInfo, ChainRng, Cost, Kernel, StepInfo, Tuning};
 use crate::state::{ChainState, Evaluator, View};
 
 /// Statistics of several steps folded into one: gradients and leapfrog
@@ -25,6 +25,7 @@ pub fn fold(infos: &[StepInfo]) -> StepInfo {
     StepInfo {
         accept_prob: mean(infos.iter().filter_map(|i| i.accept_prob).collect()),
         n_grad: infos.iter().map(|i| i.n_grad).sum(),
+        n_logp: infos.iter().map(|i| i.n_logp).sum(),
         divergent: infos
             .iter()
             .filter_map(|i| i.divergent)
@@ -59,7 +60,7 @@ impl On {
         ChainState {
             q: self.block.take(&s.q),
             lp: s.lp,
-            grad: self.block.take(&s.grad),
+            grad: s.grad.as_ref().map(|g| self.block.take(g)),
         }
     }
 
@@ -119,14 +120,23 @@ impl Kernel for On {
                 .any(|(a, b)| a.to_bits() != b.to_bits());
         if moved {
             self.block.put(&mut state.q, &bs.q);
-            // Full gradient at the new point: a cache hit when the block
+            // The full state at the new point: a cache hit when the block
             // kernel evaluated it through the view; otherwise (nuts-rs runs
-            // its own integrator) one real evaluation, counted.
-            let before = ev.n_grad();
-            let (lp, g) = ev.eval_full(&state.q)?;
-            info.n_grad += ev.n_grad() - before;
-            state.lp = lp;
-            state.grad = g;
+            // its own integrator) one real evaluation, counted. The full
+            // gradient only if the block kernel had one: a density-only
+            // kernel leaves it to whoever needs it next.
+            let before = Cost::now(ev);
+            if bs.grad.is_some() {
+                let (lp, g) = ev.eval_full(&state.q)?;
+                state.lp = lp;
+                state.grad = Some(g);
+            } else {
+                state.lp = ev.eval_full_lp(&state.q)?;
+                state.grad = None;
+            }
+            let c = before.since(ev);
+            info.n_grad += c.n_grad;
+            info.n_logp += c.n_logp;
         }
         let mut flat = info.clone();
         flat.blocks.clear();
@@ -487,6 +497,55 @@ mod tests {
 
     /// 3.2: a seq of two kernels, each leaving pi invariant on its block,
     /// passes the moment check, on a target whose blocks are correlated.
+    /// Cost accounting (Phase 4): rwm evaluates density-only; a gradient
+    /// kernel after it pays one gradient for the point rwm moved to, and
+    /// nothing when rwm rejected (the gradient there is known).
+    #[test]
+    fn density_only_moves_are_counted_apart_and_gradients_paid_lazily() {
+        let (t, _) = coupled();
+        let mut ev = Evaluator::new(&t);
+        let mut st = ChainState::at(vec![0.1; 6], &mut ev).unwrap();
+        let mut rng = chain_rng(4, 1);
+        let mut k = Seq {
+            items: vec![Box::new(Rwm::new(0.5)), Box::new(Mala::new(0.3))],
+        };
+        let (mut rwm_moved, mut rwm_stayed) = (0, 0);
+        for _ in 0..200 {
+            let mut r = Rwm::new(0.5);
+            let before = st.clone();
+            let i = r.step(&mut st, &mut ev, &mut rng).unwrap();
+            assert_eq!(
+                (i.n_grad, i.n_logp),
+                (0, 1),
+                "rwm: one density-only evaluation"
+            );
+            let moved = st.q != before.q;
+            assert_eq!(
+                st.grad.is_none(),
+                moved,
+                "no gradient paid for at a new point"
+            );
+            let m = Mala::new(0.3).step(&mut st, &mut ev, &mut rng).unwrap();
+            // mala: its own proposal (one gradient), plus one at rwm's new
+            // point if rwm moved.
+            assert_eq!(m.n_grad, 1 + u64::from(moved));
+            assert_eq!(m.n_logp, 0);
+            if moved {
+                rwm_moved += 1
+            } else {
+                rwm_stayed += 1
+            }
+        }
+        assert!(
+            rwm_moved > 20 && rwm_stayed > 20,
+            "{rwm_moved} {rwm_stayed}"
+        );
+        // The same through seq(): totals add up.
+        let i = k.step(&mut st, &mut ev, &mut rng).unwrap();
+        assert_eq!(i.n_logp, 1);
+        assert!(i.n_grad == 1 || i.n_grad == 2);
+    }
+
     #[test]
     fn seq_of_block_kernels_passes_the_moment_check() {
         let (t, var) = coupled();
@@ -561,7 +620,7 @@ mod tests {
             let lp = crate::target::Target::log_density_gradient(&t, &st.q, &mut g).unwrap();
             assert_eq!(
                 (st.lp, &st.grad),
-                (lp, &g),
+                (lp, &Some(g.clone())),
                 "lp and full gradient match the full position"
             );
             assert_eq!(&st.q[3..], &[0.3; 3], "block b never moves");

@@ -21,6 +21,24 @@ pub trait Target: Send + Sync {
     /// Writes the gradient into `grad` (length `dim`) and returns the log
     /// density. When the log density is `-inf` the gradient is unspecified.
     fn log_density_gradient(&self, q: &[f64], grad: &mut [f64]) -> anyhow::Result<f64>;
+    /// The log density alone, for kernels that use no gradient. Must equal
+    /// the value [`Target::log_density_gradient`] returns, bit for bit. The
+    /// default computes the gradient and drops it.
+    fn log_density(&self, q: &[f64]) -> anyhow::Result<f64> {
+        let mut g = vec![0.0; self.dim()];
+        self.log_density_gradient(q, &mut g)
+    }
+}
+
+/// BridgeStan's error convention -> ours: domain errors and `reject()` mean
+/// "this point has zero density", and so does a NaN.
+fn bridgestan_lp(r: Result<f64, bridgestan::BridgeStanError>) -> anyhow::Result<f64> {
+    match r {
+        Ok(lp) if lp.is_nan() => Ok(f64::NEG_INFINITY),
+        Ok(lp) => Ok(lp),
+        Err(bridgestan::BridgeStanError::EvaluationFailed(_)) => Ok(f64::NEG_INFINITY),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// A BridgeStan model instance. Each chain gets its own instance built from
@@ -35,14 +53,15 @@ impl Target for BridgeStanTarget {
     }
 
     fn log_density_gradient(&self, q: &[f64], grad: &mut [f64]) -> anyhow::Result<f64> {
-        match self.model.log_density_gradient(q, true, true, grad) {
-            Ok(lp) if lp.is_nan() => Ok(f64::NEG_INFINITY),
-            Ok(lp) => Ok(lp),
-            // BridgeStan reports domain errors and `reject()` as evaluation
-            // failures; both mean "this point has zero density".
-            Err(bridgestan::BridgeStanError::EvaluationFailed(_)) => Ok(f64::NEG_INFINITY),
-            Err(e) => Err(e.into()),
-        }
+        bridgestan_lp(self.model.log_density_gradient(q, true, true, grad))
+    }
+
+    /// BridgeStan's density-only call. With `propto = true` it still runs
+    /// Stan's forward pass on autodiff variables (constants can only be
+    /// dropped that way) but skips the reverse sweep: cheaper than a
+    /// gradient, not free, and the same value.
+    fn log_density(&self, q: &[f64]) -> anyhow::Result<f64> {
+        bridgestan_lp(self.model.log_density(q, true, true))
     }
 }
 

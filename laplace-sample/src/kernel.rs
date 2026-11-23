@@ -23,6 +23,8 @@ pub struct StepInfo {
     pub accept_prob: Option<f64>,
     /// Real gradient evaluations this step (`n_grad__`).
     pub n_grad: u64,
+    /// Real density-only evaluations this step (`n_logp__`).
+    pub n_logp: u64,
     pub divergent: Option<bool>,
     /// Hamiltonian at the returned state (`energy__`).
     pub energy: Option<f64>,
@@ -193,5 +195,31 @@ mod tests {
         assert_eq!(mh_accept(f64::NEG_INFINITY, &mut r), (false, 0.0));
         let (_, p) = mh_accept((0.25f64).ln(), &mut r);
         assert!((p - 0.25).abs() < 1e-15);
+    }
+}
+
+/// Evaluation counters at the start of a step; [`Cost::since`] turns them
+/// into the step's `n_grad`/`n_logp`.
+#[derive(Clone, Copy, Debug)]
+pub struct Cost {
+    n_grad: u64,
+    n_logp: u64,
+}
+
+impl Cost {
+    pub fn now(ev: &crate::state::Evaluator) -> Self {
+        Self {
+            n_grad: ev.n_grad(),
+            n_logp: ev.n_logp(),
+        }
+    }
+
+    /// A [`StepInfo`] holding the evaluations made since `self`.
+    pub fn since(self, ev: &crate::state::Evaluator) -> StepInfo {
+        StepInfo {
+            n_grad: ev.n_grad() - self.n_grad,
+            n_logp: ev.n_logp() - self.n_logp,
+            ..Default::default()
+        }
     }
 }

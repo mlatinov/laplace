@@ -32,8 +32,8 @@
 
 use rand::RngExt;
 
-use super::{check_metric, check_step_size, grads_since, metric_or_unit, normals};
-use crate::kernel::{mh_accept, ChainRng, Kernel, StepInfo, Tuning};
+use super::{check_metric, check_step_size, metric_or_unit, normals};
+use crate::kernel::{mh_accept, ChainRng, Cost, Kernel, StepInfo, Tuning};
 use crate::state::{ChainState, Evaluator};
 
 /// Stan's divergence threshold on the energy error.
@@ -85,7 +85,7 @@ impl Kernel for Hmc {
         ev: &mut Evaluator,
         rng: &mut ChainRng,
     ) -> anyhow::Result<StepInfo> {
-        let before = ev.n_grad();
+        let before = Cost::now(ev);
         let d = state.q.len();
         let eps = self.step_size;
         let m = metric_or_unit(&self.inv_metric, d);
@@ -101,7 +101,7 @@ impl Kernel for Hmc {
         let mut q = state.q.clone();
         let mut p = p0;
         let mut lp = state.lp;
-        let mut g = state.grad.clone();
+        let mut g = state.grad(ev)?.to_vec();
         let mut broke = false;
         for _ in 0..steps {
             for i in 0..d {
@@ -132,18 +132,21 @@ impl Kernel for Hmc {
         };
         let (accepted, prob) = mh_accept(log_alpha, rng);
         let energy = if accepted {
-            *state = ChainState { q, lp, grad: g };
+            *state = ChainState {
+                q,
+                lp,
+                grad: Some(g),
+            };
             h1
         } else {
             h0
         };
         Ok(StepInfo {
             accept_prob: Some(prob),
-            n_grad: grads_since(ev, before),
             divergent: Some(divergent),
             energy: Some(energy),
             n_leapfrog: Some(steps),
-            ..Default::default()
+            ..before.since(ev)
         })
     }
 

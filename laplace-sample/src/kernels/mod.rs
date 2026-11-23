@@ -18,7 +18,6 @@ use rand::RngExt;
 use rand_distr::StandardNormal;
 
 use crate::kernel::ChainRng;
-use crate::state::Evaluator;
 
 /// `dim` normal draws, in index order.
 pub(crate) fn normals(rng: &mut ChainRng, dim: usize) -> Vec<f64> {
@@ -52,9 +51,4 @@ pub(crate) fn check_metric(m: &[f64], dim: usize) -> anyhow::Result<()> {
         "inverse metric entries must be positive and finite"
     );
     Ok(())
-}
-
-/// Gradient evaluations made since `before`.
-pub(crate) fn grads_since(ev: &Evaluator, before: u64) -> u64 {
-    ev.n_grad() - before
 }

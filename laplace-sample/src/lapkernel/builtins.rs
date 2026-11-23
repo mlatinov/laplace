@@ -128,7 +128,16 @@ impl Registry {
             needs_chain: true,
             kind: Kind::Value {
                 ty: dim_vector,
-                get: |c| Ok(Value::Vector(DVector::from_column_slice(&c.state()?.grad))),
+                // The interpreter computes it before the step of a kernel
+                // that reads `grad` (Checked::uses_grad).
+                get: |c| {
+                    let g = c
+                        .state()?
+                        .grad
+                        .as_deref()
+                        .ok_or("the gradient at q was not computed")?;
+                    Ok(Value::Vector(DVector::from_column_slice(g)))
+                },
             },
         });
         entries.push(Entry {

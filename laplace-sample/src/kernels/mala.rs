@@ -18,8 +18,8 @@
 //! 1. `dim` normal draws `z[0..dim]`, in index order;
 //! 2. one uniform in [`mh_accept`].
 
-use super::{check_metric, check_step_size, grads_since, metric_or_unit, normals};
-use crate::kernel::{mh_accept, ChainRng, Kernel, StepInfo, Tuning};
+use super::{check_metric, check_step_size, metric_or_unit, normals};
+use crate::kernel::{mh_accept, ChainRng, Cost, Kernel, StepInfo, Tuning};
 use crate::state::{ChainState, Evaluator};
 
 pub struct Mala {
@@ -69,12 +69,13 @@ impl Kernel for Mala {
         ev: &mut Evaluator,
         rng: &mut ChainRng,
     ) -> anyhow::Result<StepInfo> {
-        let before = ev.n_grad();
+        let before = Cost::now(ev);
         let d = state.q.len();
         let eps = self.step_size;
         let m = metric_or_unit(&self.inv_metric, d);
+        let grad = state.grad(ev)?.to_vec();
         let mu_fwd: Vec<f64> = (0..d)
-            .map(|i| state.q[i] + 0.5 * eps * eps * m[i] * state.grad[i])
+            .map(|i| state.q[i] + 0.5 * eps * eps * m[i] * grad[i])
             .collect();
         let z = normals(rng, d);
         let q_new: Vec<f64> = (0..d)
@@ -98,13 +99,12 @@ impl Kernel for Mala {
             *state = ChainState {
                 q: q_new,
                 lp: lp_new,
-                grad: g_new,
+                grad: Some(g_new),
             };
         }
         Ok(StepInfo {
             accept_prob: Some(p),
-            n_grad: grads_since(ev, before),
-            ..Default::default()
+            ..before.since(ev)
         })
     }
 

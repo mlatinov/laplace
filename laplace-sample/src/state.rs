@@ -2,34 +2,60 @@
 
 use crate::target::Target;
 
-/// Where a chain is. Invariant: `lp` and `grad` are the target's values at
-/// `q`, under the target as it is *now*. Kernels keep it true; [`Evaluator`]
-/// is how they get values that satisfy it.
+/// Where a chain is. Invariant: `lp` is the target's log density at `q`,
+/// and `grad`, when present, its gradient there, under the target as it is
+/// *now*. Kernels keep it true; [`Evaluator`] is how they get values that
+/// satisfy it.
+///
+/// `grad` is `None` after a kernel that needs no gradient (`rwm`, a
+/// `.lapkernel` that never reads `grad`) moved the chain: nothing paid for
+/// it. A kernel that needs it calls [`ChainState::grad`], which evaluates it
+/// then, once, counted as a gradient evaluation (cost accounting, Phase 4).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChainState {
     pub q: Vec<f64>,
     pub lp: f64,
-    pub grad: Vec<f64>,
+    pub grad: Option<Vec<f64>>,
 }
 
 impl ChainState {
-    /// Evaluate the target at `q` and build a consistent state.
+    /// Evaluate the target and its gradient at `q`.
     pub fn at(q: Vec<f64>, ev: &mut Evaluator) -> anyhow::Result<Self> {
         let (lp, grad) = ev.eval(&q)?;
-        Ok(Self { q, lp, grad })
+        Ok(Self {
+            q,
+            lp,
+            grad: Some(grad),
+        })
+    }
+
+    /// The gradient at `q`, evaluated now if nobody has yet. The log density
+    /// is not changed: the cache keeps the value first computed at a point.
+    pub fn grad(&mut self, ev: &mut Evaluator) -> anyhow::Result<&[f64]> {
+        if self.grad.is_none() {
+            let (_, g) = ev.eval(&self.q)?;
+            self.grad = Some(g);
+        }
+        Ok(self.grad.as_deref().unwrap())
     }
 }
 
 /// One cached evaluation. The key is the exact bit pattern of the position,
 /// so a hit can only ever return the value computed at that very point.
+/// `grad` is `None` for a density-only evaluation.
 struct Entry {
     key: Vec<u64>,
     lp: f64,
-    grad: Vec<f64>,
+    grad: Option<Vec<f64>>,
 }
 
 /// Evaluates a [`Target`] with a small cache keyed by position, and counts
-/// real gradient evaluations (cache hits are free and not counted).
+/// real evaluations, density-only and gradient separately (cache hits are
+/// free and not counted).
+///
+/// A gradient asked for at a point evaluated density-only is one gradient
+/// evaluation; the log density then stays the one first computed, so the
+/// same point never yields two values in one chain.
 ///
 /// The cache never returns a stale value for a *moved point*: keys are exact
 /// bit patterns (1 ulp apart is a miss, and so is `-0.0` vs `0.0`). It cannot
@@ -41,6 +67,7 @@ pub struct Evaluator<'t> {
     cache: Vec<Entry>, // most recent last
     capacity: usize,
     n_grad: u64,
+    n_logp: u64,
     hits: u64,
     view: Option<View>,
 }
@@ -74,6 +101,7 @@ impl<'t> Evaluator<'t> {
             cache: Vec::with_capacity(capacity),
             capacity,
             n_grad: 0,
+            n_logp: 0,
             hits: 0,
             view: None,
         }
@@ -100,10 +128,10 @@ impl<'t> Evaluator<'t> {
         self.target
     }
 
-    /// Log density and gradient at `q`.
-    pub fn eval(&mut self, q: &[f64]) -> anyhow::Result<(f64, Vec<f64>)> {
+    /// The full position for a position `q` as kernels see it.
+    fn full_position(&self, q: &[f64]) -> anyhow::Result<Vec<f64>> {
         let Some(view) = &self.view else {
-            return self.eval_full(q);
+            return Ok(q.to_vec());
         };
         anyhow::ensure!(
             q.len() == view.indices.len(),
@@ -115,35 +143,86 @@ impl<'t> Evaluator<'t> {
         for (i, &j) in view.indices.iter().enumerate() {
             full[j] = q[i];
         }
-        let indices = view.indices.clone();
+        Ok(full)
+    }
+
+    /// Log density and gradient at `q`.
+    pub fn eval(&mut self, q: &[f64]) -> anyhow::Result<(f64, Vec<f64>)> {
+        let full = self.full_position(q)?;
         let (lp, g) = self.eval_full(&full)?;
-        Ok((lp, indices.iter().map(|&j| g[j]).collect()))
+        Ok(match &self.view {
+            Some(v) => (lp, v.indices.iter().map(|&j| g[j]).collect()),
+            None => (lp, g),
+        })
+    }
+
+    /// Log density only at `q` (no gradient computed or counted).
+    pub fn eval_lp(&mut self, q: &[f64]) -> anyhow::Result<f64> {
+        let full = self.full_position(q)?;
+        self.eval_full_lp(&full)
+    }
+
+    fn lookup(&mut self, key: &[u64]) -> Option<&mut Entry> {
+        let pos = self.cache.iter().position(|e| e.key == key)?;
+        let e = self.cache.remove(pos);
+        self.cache.push(e);
+        self.cache.last_mut()
+    }
+
+    fn insert(&mut self, e: Entry) {
+        if self.capacity > 0 {
+            if self.cache.len() == self.capacity {
+                self.cache.remove(0);
+            }
+            self.cache.push(e);
+        }
     }
 
     /// Log density and full gradient at a full position, ignoring any view.
     pub fn eval_full(&mut self, q: &[f64]) -> anyhow::Result<(f64, Vec<f64>)> {
         let key: Vec<u64> = q.iter().map(|x| x.to_bits()).collect();
-        if let Some(pos) = self.cache.iter().position(|e| e.key == key) {
-            self.hits += 1;
-            let e = self.cache.remove(pos);
-            let out = (e.lp, e.grad.clone());
-            self.cache.push(e);
-            return Ok(out);
+        let target = self.target;
+        if let Some(e) = self.lookup(&key) {
+            if let Some(g) = &e.grad {
+                let out = (e.lp, g.clone());
+                self.hits += 1;
+                return Ok(out);
+            }
+            // Evaluated density-only before: the gradient is new work.
+            let mut grad = vec![0.0; q.len()];
+            target.log_density_gradient(q, &mut grad)?;
+            e.grad = Some(grad.clone());
+            let lp = e.lp;
+            self.n_grad += 1;
+            return Ok((lp, grad));
         }
         let mut grad = vec![0.0; q.len()];
-        let lp = self.target.log_density_gradient(q, &mut grad)?;
+        let lp = target.log_density_gradient(q, &mut grad)?;
         self.n_grad += 1;
-        if self.capacity > 0 {
-            if self.cache.len() == self.capacity {
-                self.cache.remove(0);
-            }
-            self.cache.push(Entry {
-                key,
-                lp,
-                grad: grad.clone(),
-            });
-        }
+        self.insert(Entry {
+            key,
+            lp,
+            grad: Some(grad.clone()),
+        });
         Ok((lp, grad))
+    }
+
+    /// Log density only at a full position, ignoring any view.
+    pub fn eval_full_lp(&mut self, q: &[f64]) -> anyhow::Result<f64> {
+        let key: Vec<u64> = q.iter().map(|x| x.to_bits()).collect();
+        if let Some(e) = self.lookup(&key) {
+            let lp = e.lp;
+            self.hits += 1;
+            return Ok(lp);
+        }
+        let lp = self.target.log_density(q)?;
+        self.n_logp += 1;
+        self.insert(Entry {
+            key,
+            lp,
+            grad: None,
+        });
+        Ok(lp)
     }
 
     /// Forget every cached value. Required whenever the target itself
@@ -155,6 +234,11 @@ impl<'t> Evaluator<'t> {
     /// Real gradient evaluations so far (what `n_grad__` reports).
     pub fn n_grad(&self) -> u64 {
         self.n_grad
+    }
+
+    /// Real density-only evaluations so far (what `n_logp__` reports).
+    pub fn n_logp(&self) -> u64 {
+        self.n_logp
     }
 
     pub fn cache_hits(&self) -> u64 {
@@ -280,6 +364,57 @@ mod tests {
         ev.eval(&[1.0, 0.0]).unwrap();
         ev.eval(&[1.0, 0.0]).unwrap();
         assert_eq!(ev.n_grad(), 2);
+    }
+
+    #[test]
+    fn density_only_and_gradient_are_counted_apart() {
+        let t = mutable(1.0);
+        let mut ev = Evaluator::new(&t);
+        let lp = ev.eval_lp(&[1.0, 2.0]).unwrap();
+        assert_eq!((ev.n_logp(), ev.n_grad()), (1, 0));
+        assert_eq!(ev.eval_lp(&[1.0, 2.0]).unwrap(), lp, "a hit");
+        assert_eq!((ev.n_logp(), ev.n_grad()), (1, 0));
+        // The gradient at a density-only point is one gradient evaluation,
+        // and keeps the log density already computed there.
+        let (lp2, g) = ev.eval(&[1.0, 2.0]).unwrap();
+        assert_eq!((lp2, g), (lp, vec![-1.0, -2.0]));
+        assert_eq!((ev.n_logp(), ev.n_grad()), (1, 1));
+        ev.eval(&[1.0, 2.0]).unwrap();
+        ev.eval_lp(&[1.0, 2.0]).unwrap();
+        assert_eq!((ev.n_logp(), ev.n_grad()), (1, 1), "both hits now");
+        // A gradient evaluation also serves later density-only requests.
+        ev.eval(&[3.0, 0.0]).unwrap();
+        ev.eval_lp(&[3.0, 0.0]).unwrap();
+        assert_eq!((ev.n_logp(), ev.n_grad()), (1, 2));
+    }
+
+    #[test]
+    fn a_state_computes_its_missing_gradient_once() {
+        let t = mutable(1.0);
+        let mut ev = Evaluator::new(&t);
+        let lp = ev.eval_lp(&[1.0, 2.0]).unwrap();
+        let mut s = ChainState {
+            q: vec![1.0, 2.0],
+            lp,
+            grad: None,
+        };
+        assert_eq!(s.grad(&mut ev).unwrap(), &[-1.0, -2.0]);
+        assert_eq!(s.grad(&mut ev).unwrap(), &[-1.0, -2.0]);
+        assert_eq!(ev.n_grad(), 1);
+    }
+
+    #[test]
+    fn density_only_goes_through_the_view() {
+        let t = mutable(1.0);
+        let mut ev = Evaluator::new(&t);
+        ev.set_view(Some(View {
+            indices: vec![1],
+            base: vec![3.0, 0.0],
+        }));
+        assert_eq!(ev.eval_lp(&[4.0]).unwrap(), -12.5);
+        ev.set_view(None);
+        assert_eq!(ev.eval_full_lp(&[3.0, 4.0]).unwrap(), -12.5);
+        assert_eq!(ev.n_logp(), 1, "the same full point: a hit");
     }
 
     #[test]

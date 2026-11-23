@@ -18,7 +18,7 @@ use std::io::Write;
 use crate::kernel::{StepInfo, Tuning};
 use crate::sha256_hex;
 
-pub const SAMPLER_COLUMNS: [&str; 8] = [
+pub const SAMPLER_COLUMNS: [&str; 9] = [
     "lp__",
     "accept_stat__",
     "stepsize__",
@@ -27,6 +27,7 @@ pub const SAMPLER_COLUMNS: [&str; 8] = [
     "divergent__",
     "energy__",
     "n_grad__",
+    "n_logp__",
 ];
 
 /// Everything the header says about a run.
@@ -206,6 +207,7 @@ pub fn composite_values(lp: f64, info: &StepInfo) -> Vec<String> {
         opt_u(divergent.map(u64::from)),
         "NaN".into(),
         info.n_grad.to_string(),
+        info.n_logp.to_string(),
     ]
 }
 
@@ -225,6 +227,7 @@ pub fn single_block_values(lp: f64, info: &StepInfo) -> Vec<String> {
         opt_u(s.divergent.map(u64::from)),
         opt_f(s.energy),
         info.n_grad.to_string(),
+        info.n_logp.to_string(),
     ]
 }
 
@@ -239,6 +242,7 @@ pub fn sampler_values(lp: f64, info: &StepInfo, tuning: &Tuning) -> Vec<String> 
         opt_u(info.divergent.map(u64::from)),
         opt_f(info.energy),
         info.n_grad.to_string(),
+        info.n_logp.to_string(),
     ]
 }
 
@@ -365,6 +369,7 @@ mod tests {
         let info = StepInfo {
             accept_prob: Some(0.5),
             n_grad: 1,
+            n_logp: 2,
             ..Default::default()
         };
         let t = Tuning {
@@ -373,7 +378,7 @@ mod tests {
         };
         assert_eq!(
             sampler_values(-1.5, &info, &t),
-            vec!["-1.5", "0.5", "0.25", "NaN", "NaN", "NaN", "NaN", "1"]
+            vec!["-1.5", "0.5", "0.25", "NaN", "NaN", "NaN", "NaN", "1", "2"]
         );
     }
 
@@ -417,6 +422,7 @@ mod tests {
         // beta: nuts (divergence applies); sc: mala, updated twice (repeat).
         let info = StepInfo {
             n_grad: 12,
+            n_logp: 3,
             blocks: vec![
                 block("beta", 0.9, Some(true), 8, 0.4),
                 block("sc", 0.2, None, 2, 1.1),
@@ -433,8 +439,8 @@ mod tests {
         );
         assert_eq!(
             composite_values(-2.0, &info),
-            vec!["-2", "NaN", "NaN", "NaN", "NaN", "1", "NaN", "12"],
-            "divergent__ = any block; n_grad__ = total"
+            vec!["-2", "NaN", "NaN", "NaN", "NaN", "1", "NaN", "12", "3"],
+            "divergent__ = any block; n_grad__ and n_logp__ = totals"
         );
     }
 
@@ -447,7 +453,7 @@ mod tests {
         };
         assert_eq!(
             single_block_values(-1.0, &info),
-            vec!["-1", "0.8", "0.3", "3", "7", "0", "1.5", "8"]
+            vec!["-1", "0.8", "0.3", "3", "7", "0", "1.5", "8", "0"]
         );
     }
 
@@ -459,7 +465,7 @@ mod tests {
         w.finish().unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains(
-            "lp__,accept_stat__,stepsize__,treedepth__,n_leapfrog__,divergent__,energy__,n_grad__,x.1,x.2\n"
+            "lp__,accept_stat__,stepsize__,treedepth__,n_leapfrog__,divergent__,energy__,n_grad__,n_logp__,x.1,x.2\n"
         ));
         assert!(s.ends_with("1,2,0.5,NaN\n"));
     }

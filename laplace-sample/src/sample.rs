@@ -296,14 +296,20 @@ fn run_one_chain(
     w.into_inner().finish()?;
     let sampling = warmup_done.get().map_or(0.0, |t| t.elapsed().as_secs_f64());
     let warmup_secs = started.elapsed().as_secs_f64() - sampling;
+    // Density-only evaluations (rwm, propose()/move()) are listed apart:
+    // they skip the reverse sweep, so they cost less than a gradient.
+    let logps = if summary.warmup_logps + summary.draw_logps > 0 {
+        format!(
+            " and {} + {} density-only",
+            summary.warmup_logps, summary.draw_logps
+        )
+    } else {
+        String::new()
+    };
     eprintln!(
-        "chain {chain_id}: {} warmup + {} draws, {} + {} gradient evaluations; \
-         {warmup_secs:.2} s warmup, {sampling:.2} s sampling ({:.1} us per gradient, sampler and output included)",
-        run.warmup,
-        run.draws,
-        summary.warmup_grads,
-        summary.draw_grads,
-        1e6 * sampling / summary.draw_grads.max(1) as f64
+        "chain {chain_id}: {} warmup + {} draws, {} + {} gradient evaluations{logps}; \
+         {warmup_secs:.2} s warmup, {sampling:.2} s sampling",
+        run.warmup, run.draws, summary.warmup_grads, summary.draw_grads,
     );
     Ok(path)
 }

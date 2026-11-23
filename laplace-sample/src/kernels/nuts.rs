@@ -257,7 +257,7 @@ impl Kernel for Nuts {
         *state = ChainState {
             q: position.into_vec(),
             lp: stats.point.logp,
-            grad,
+            grad: Some(grad),
         };
         self.step_size = Some(progress.step_size);
         // Emitted only on draws where nuts-rs changed its metric. The field

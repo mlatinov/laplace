@@ -132,6 +132,49 @@ struct Run {
     /// draws[c][i] = unconstrained point of draw i in chain c
     draws: Vec<Vec<Vec<f64>>>,
     infos: Vec<Vec<StepInfo>>,
+    /// Sampling-phase wall time, summed over chains.
+    secs: f64,
+}
+
+/// What a run cost in its sampling phase (cost accounting, Phase 4):
+/// gradient and density-only evaluations counted apart, and wall time
+/// summed over chains (chains run in parallel threads; the harness's own
+/// per-draw work is included, the same for every sampler it compares).
+#[derive(Clone, Copy, Debug, Default)]
+struct Cost {
+    grads: u64,
+    logps: u64,
+    secs: f64,
+}
+
+impl Cost {
+    fn add_info(&mut self, i: &StepInfo) {
+        self.grads += i.n_grad;
+        self.logps += i.n_logp;
+    }
+    fn merge(&mut self, o: Cost) {
+        self.grads += o.grads;
+        self.logps += o.logps;
+        self.secs += o.secs;
+    }
+    /// `ess_per_grad` is n/a for a run with no gradient (rwm).
+    fn report(&self, min_ess: f64) -> String {
+        let per_grad = if self.grads > 0 {
+            format!("{:.5}", min_ess / self.grads as f64)
+        } else {
+            "n/a".into()
+        };
+        format!(
+            "grads={} logps={} ess_per_grad={per_grad} secs={:.3} ess_per_s={:.0}",
+            self.grads,
+            self.logps,
+            self.secs,
+            min_ess / self.secs
+        )
+    }
+    fn ess_per_s(&self, min_ess: f64) -> f64 {
+        min_ess / self.secs
+    }
 }
 
 /// Run `n.chains` chains, keeping every `n.thin`-th draw for the
@@ -149,7 +192,7 @@ fn run_seeded(r: &Reference, kind: BuiltIn, sets: &[&str], n: Counts, seed: u64)
     } = n;
     let sets: Vec<String> = sets.iter().map(|s| s.to_string()).collect();
     let spec = SamplerSpec::new(kind, &sets).unwrap();
-    let results: Vec<(Vec<Vec<f64>>, Vec<StepInfo>)> = std::thread::scope(|s| {
+    let results: Vec<(Vec<Vec<f64>>, Vec<StepInfo>, f64)> = std::thread::scope(|s| {
         let handles: Vec<_> = (1..=chains)
             .map(|chain| {
                 let spec = spec.clone();
@@ -163,6 +206,7 @@ fn run_seeded(r: &Reference, kind: BuiltIn, sets: &[&str], n: Counts, seed: u64)
                     let mut k = spec.build(target.clone(), warmup, draws).unwrap();
                     let (mut qs, mut infos) = (vec![], vec![]);
                     let mut i = 0u64;
+                    let sampling = std::cell::Cell::new(None);
                     run_chain(
                         target.as_ref(),
                         k.as_mut(),
@@ -170,7 +214,10 @@ fn run_seeded(r: &Reference, kind: BuiltIn, sets: &[&str], n: Counts, seed: u64)
                         warmup,
                         draws,
                         &mut chain_rng(seed, chain),
-                        |_| Ok(()),
+                        |_| {
+                            sampling.set(Some(std::time::Instant::now()));
+                            Ok(())
+                        },
                         |st, info, _| {
                             if i.is_multiple_of(thin) {
                                 qs.push(st.q.clone());
@@ -181,14 +228,16 @@ fn run_seeded(r: &Reference, kind: BuiltIn, sets: &[&str], n: Counts, seed: u64)
                         },
                     )
                     .unwrap();
-                    (qs, infos)
+                    let secs = sampling.get().map_or(0.0, |t| t.elapsed().as_secs_f64());
+                    (qs, infos, secs)
                 })
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    let (draws, infos) = results.into_iter().unzip();
-    Run { draws, infos }
+    let secs = results.iter().map(|r| r.2).sum();
+    let (draws, infos) = results.into_iter().map(|(d, i, _)| (d, i)).unzip();
+    Run { draws, infos, secs }
 }
 
 /// Moment check: prints one RESULT line (and the unhealthy or failing rows)
@@ -214,7 +263,11 @@ fn moment_check(r: &Reference, kind: BuiltIn, run: &Run, n: Counts) -> (Verdict,
         ));
     }
     let v = verdict(&rows);
-    let grads: u64 = run.infos.iter().flatten().map(|i| i.n_grad).sum();
+    let mut cost = Cost {
+        secs: run.secs,
+        ..Default::default()
+    };
+    run.infos.iter().flatten().for_each(|i| cost.add_info(i));
     let min_ess = rows
         .iter()
         .map(|m| m.ess_bulk)
@@ -222,7 +275,7 @@ fn moment_check(r: &Reference, kind: BuiltIn, run: &Run, n: Counts) -> (Verdict,
     let max_rhat = rows.iter().map(|m| m.rhat).fold(0.0, f64::max);
     let max_z = rows.iter().map(|m| m.z.abs()).fold(0.0, f64::max);
     println!(
-        "RESULT target={} sampler={} chains={} warmup={} draws={} thin={} max|z|={:.2} max_rhat={:.4} min_ess_bulk={:.0} grads={} ess_per_grad={:.5} verdict={}",
+        "RESULT target={} sampler={} chains={} warmup={} draws={} thin={} max|z|={:.2} max_rhat={:.4} min_ess_bulk={:.0} {} verdict={}",
         r.name,
         kind.name(),
         n.chains,
@@ -232,8 +285,7 @@ fn moment_check(r: &Reference, kind: BuiltIn, run: &Run, n: Counts) -> (Verdict,
         max_z,
         max_rhat,
         min_ess,
-        grads,
-        min_ess / grads as f64,
+        cost.report(min_ess),
         v.label()
     );
     (v, rows)
@@ -563,7 +615,7 @@ struct Constrained {
     names: Vec<String>,
     /// cols[k][c][i]: quantity k, chain c, kept draw i
     cols: Vec<Vec<Vec<f64>>>,
-    grads: u64,
+    cost: Cost,
 }
 
 fn run_constrained(
@@ -572,7 +624,7 @@ fn run_constrained(
     n: Counts,
     seed: u64,
 ) -> Constrained {
-    let per_chain: Vec<(Vec<String>, Vec<Vec<f64>>, u64)> = std::thread::scope(|s| {
+    let per_chain: Vec<(Vec<String>, Vec<Vec<f64>>, Cost)> = std::thread::scope(|s| {
         let hs: Vec<_> = (1..=n.chains)
             .map(|chain| {
                 s.spawn(move || {
@@ -594,7 +646,8 @@ fn run_constrained(
                         .unwrap();
                     let mut out = vec![0.0; names.len()];
                     let mut cols: Vec<Vec<f64>> = vec![vec![]; names.len()];
-                    let (mut i, mut grads) = (0u64, 0u64);
+                    let (mut i, mut cost) = (0u64, Cost::default());
+                    let sampling = std::cell::Cell::new(None);
                     run_chain(
                         target.as_ref(),
                         built.kernel.as_mut(),
@@ -602,9 +655,12 @@ fn run_constrained(
                         n.warmup,
                         n.draws,
                         &mut chain_rng(seed, chain),
-                        |_| Ok(()),
+                        |_| {
+                            sampling.set(Some(std::time::Instant::now()));
+                            Ok(())
+                        },
                         |st, info, _| {
-                            grads += info.n_grad;
+                            cost.add_info(info);
                             if i.is_multiple_of(n.thin) {
                                 target.model.param_constrain::<&StanLibrary>(
                                     &st.q, true, false, &mut out, None,
@@ -618,7 +674,8 @@ fn run_constrained(
                         },
                     )
                     .unwrap();
-                    (names, cols, grads)
+                    cost.secs = sampling.get().map_or(0.0, |t| t.elapsed().as_secs_f64());
+                    (names, cols, cost)
                 })
             })
             .collect();
@@ -626,14 +683,14 @@ fn run_constrained(
     });
     let names = per_chain[0].0.clone();
     let mut cols: Vec<Vec<Vec<f64>>> = vec![vec![]; names.len()];
-    let mut grads = 0;
+    let mut cost = Cost::default();
     for (_, c, g) in per_chain {
         for (k, col) in c.into_iter().enumerate() {
             cols[k].push(col);
         }
-        grads += g;
+        cost.merge(g);
     }
-    Constrained { names, cols, grads }
+    Constrained { names, cols, cost }
 }
 
 /// Truth for E[x] and E[x^2] by quantity name: exact, or a reference with
@@ -744,7 +801,8 @@ fn hybrid_counts(sampler: &str) -> (String, Counts) {
     )
 }
 
-fn summarize(label: &str, rows: &[Moment], grads: u64) -> (Verdict, f64) {
+/// Prints one RESULT line; returns the verdict, min bulk ESS and the cost.
+fn summarize(label: &str, rows: &[Moment], cost: Cost) -> (Verdict, f64, Cost) {
     let v = verdict(rows);
     let min_ess = rows
         .iter()
@@ -753,11 +811,11 @@ fn summarize(label: &str, rows: &[Moment], grads: u64) -> (Verdict, f64) {
     let max_rhat = rows.iter().map(|m| m.rhat).fold(0.0, f64::max);
     let max_z = rows.iter().map(|m| m.z.abs()).fold(0.0, f64::max);
     println!(
-        "RESULT {label} max|z|={max_z:.2} max_rhat={max_rhat:.4} min_ess_bulk={min_ess:.0} grads={grads} ess_per_grad={:.5} verdict={}",
-        min_ess / grads as f64,
+        "RESULT {label} max|z|={max_z:.2} max_rhat={max_rhat:.4} min_ess_bulk={min_ess:.0} {} verdict={}",
+        cost.report(min_ess),
         v.label()
     );
-    (v, min_ess / grads as f64)
+    (v, min_ess, cost)
 }
 
 /// 3.7: a .lapsampler hybrid on its model passes the health-gated moment
@@ -774,14 +832,27 @@ fn check_hybrid(sampler_file: &str) {
         "hybrid={sampler_file} target={target} chains={} warmup={} draws={} thin={}",
         n.chains, n.warmup, n.draws, n.thin
     );
-    let (v, _) = summarize(&label, &rows, c.grads);
-    // Plain NUTS on the whole model, for the ESS-per-gradient comparison.
+    let (v, ess, cost) = summarize(&label, &rows, c.cost);
+    // Plain NUTS on the whole model, for the comparison (Q15: reported,
+    // never a threshold).
     let nuts = Sampler::from_arg("nuts", &[]).unwrap();
     let cn = run_constrained(&m, &nuts, n, SEED);
-    summarize(
+    let (_, ess_n, cost_n) = summarize(
         &format!("nuts target={target} (comparison)"),
         &hybrid_moments(&target, &cn),
-        cn.grads,
+        cn.cost,
+    );
+    let ratio = |a: f64, b: f64| {
+        if a.is_finite() && b > 0.0 {
+            format!("{:.2}", a / b)
+        } else {
+            "n/a".into()
+        }
+    };
+    println!(
+        "RESULT ratio {sampler_file} / nuts on {target}: ess_per_grad {} ess_per_s {}",
+        ratio(ess / cost.grads as f64, ess_n / cost_n.grads as f64),
+        ratio(cost.ess_per_s(ess), cost_n.ess_per_s(ess_n)),
     );
     assert_eq!(
         v,
@@ -809,4 +880,69 @@ fn hybrid_nuts_mala_on_eight_schools() {
 #[ignore]
 fn hybrid_with_a_simplex_block() {
     check_hybrid("hybrid_simplex.lapsampler");
+}
+
+// ---- Phase 4 cost accounting ------------------------------------------------------
+
+/// Report only: BridgeStan time per density-only evaluation against per
+/// gradient evaluation, on the shipped models and the gp library model.
+/// Density-only with `propto = true` still runs Stan's forward pass on
+/// autodiff variables and skips the reverse sweep, so the ratio is between
+/// "about the same" and "much cheaper" depending on the model.
+#[test]
+#[ignore]
+fn density_only_against_gradient_cost() {
+    use std::time::Instant;
+    let gp = Path::new(env!("CARGO_MANIFEST_DIR")).join("validation/models");
+    let models: Vec<(String, PathBuf, Option<PathBuf>)> = vec![
+        (
+            "corr_gauss_10".into(),
+            targets_dir().join("corr_gauss_10.stan"),
+            Some(targets_dir().join("corr_gauss_10.json")),
+        ),
+        (
+            "eight_schools_nc".into(),
+            targets_dir().join("eight_schools_nc.stan"),
+            Some(targets_dir().join("eight_schools_nc.json")),
+        ),
+        ("gp".into(), gp.join("gp.stan"), Some(gp.join("gp.json"))),
+    ];
+    for (name, stan, data) in models {
+        let prepared = model::prepare(&stan).unwrap();
+        let lib = Arc::new(bridgestan::open_library(&prepared.library).unwrap());
+        let data = data.map(|p| CString::new(p.to_str().unwrap()).unwrap());
+        let t = BridgeStanTarget {
+            model: Model::new(lib, data, 1).unwrap(),
+        };
+        let d = t.dim();
+        let q: Vec<f64> = (0..d).map(|i| 0.1 * (i as f64 % 5.0) - 0.2).collect();
+        let mut g = vec![0.0; d];
+        let n = if name == "gp" { 2000 } else { 200_000 };
+        let time = |f: &mut dyn FnMut()| {
+            let mut best = f64::INFINITY;
+            for _ in 0..3 {
+                let t0 = Instant::now();
+                for _ in 0..n {
+                    f();
+                }
+                best = best.min(t0.elapsed().as_secs_f64() / n as f64);
+            }
+            best
+        };
+        let lp_a = t.log_density(&q).unwrap();
+        let lp_b = t.log_density_gradient(&q, &mut g).unwrap();
+        assert_eq!(lp_a.to_bits(), lp_b.to_bits(), "same value, bit for bit");
+        let logp = time(&mut || {
+            std::hint::black_box(t.log_density(&q).unwrap());
+        });
+        let grad = time(&mut || {
+            std::hint::black_box(t.log_density_gradient(&q, &mut g).unwrap());
+        });
+        println!(
+            "RESULT cost {name} (dim {d}): density-only {:.2} us, gradient {:.2} us, ratio {:.2}",
+            logp * 1e6,
+            grad * 1e6,
+            logp / grad
+        );
+    }
 }

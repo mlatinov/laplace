@@ -1,0 +1,8 @@
+# Cost accounting: draws before (Phase 3 tip) and after, seed 5, 2 chains, chain 1
+# corr_gauss_10 at Level 1 (rwm, mala, hmc, nuts, rwm.lapkernel); eight schools hybrid
+hmc draws identical | n_grad before 10082 after 10082 n_logp after 0
+hyb draws identical | n_grad before 7307 after 7307 n_logp after 0
+mala draws identical | n_grad before 1000 after 1000 n_logp after 0
+nuts draws identical | n_grad before 11980 after 11980 n_logp after 0
+rwm draws identical | n_grad before 1000 after 0 n_logp after 1000
+rwmlk draws identical | n_grad before 1000 after 0 n_logp after 1000

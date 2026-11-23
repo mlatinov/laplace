@@ -52,6 +52,9 @@ pub struct Checked {
     pub metric: Option<usize>,
     /// `@adapt(step_size, target_accept = ...)`, if given.
     pub target_accept: Option<f64>,
+    /// The kernel reads the built-in `grad` (the gradient at `q`). When it
+    /// does not, the chain never pays for a gradient on its behalf.
+    pub uses_grad: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -86,6 +89,7 @@ struct Checker<'r> {
     scopes: Vec<HashMap<String, Var>>,
     ctx: Ctx,
     fun_ret: Option<Ty>,
+    uses_grad: bool,
 }
 
 /// Check a parsed kernel. `dim` is the size of the block it will update,
@@ -105,6 +109,7 @@ pub fn check(
         scopes: vec![HashMap::new()],
         ctx: Ctx::TuningDefault,
         fun_ret: None,
+        uses_grad: false,
     };
     let checked = c.kernel(k);
     if c.errors.is_empty() {
@@ -260,6 +265,7 @@ impl<'r> Checker<'r> {
             step_size,
             metric,
             target_accept,
+            uses_grad: self.uses_grad,
         }
     }
 
@@ -760,6 +766,9 @@ impl<'r> Checker<'r> {
                 match self.reg.get(name).map(|en| (en.needs_chain, &en.kind)) {
                     Some((needs_chain, Kind::Value { ty, .. })) => {
                         let ty = ty(self.dim);
+                        if name == "grad" {
+                            self.uses_grad = true;
+                        }
                         self.chain_allowed(name, needs_chain, e.span);
                         Some(ty)
                     }
