@@ -18,7 +18,7 @@ ancestor of it, so the merge can be a fast-forward.
 | `sampler/phase-2` (pushed) | 33 | superseded: delete locally and on `origin` |
 | `sampler/phase-3` (pushed) | 43 | superseded: delete locally and on `origin` |
 | `sampler/phase-4` | 53 | superseded: delete |
-| `sampler/phase-5` | 65 at the time of writing | **merge this one** |
+| `sampler/phase-5` | 67 at the time of writing | **merge this one** |
 
 The other local branches (`ecosystem-test-fixes`,
 `patch-1-visibility-hofs-templates-macros`, `patch-1.1-availability-support`)
@@ -40,7 +40,7 @@ default branch.
 | `sampler/phase-4` | `a38323d` | deleting the branch (not in `phase-5`) |
 | `sampler/phase-5` | `7031b53` | **the rebase below**: it sits under the Phase 5 commits |
 
-Check that it is the only one left: `git log --oneline --grep=TEMPORARY
+Check that it is the only one left: `git log --oneline --grep='^ci: TEMPORARY'
 main..sampler/phase-5` prints exactly `7031b53`.
 
 ## Steps
@@ -48,17 +48,23 @@ main..sampler/phase-5` prints exactly `7031b53`.
 ```sh
 git switch -c sampler/merge sampler/phase-5
 git rebase --onto 7031b53~1 7031b53          # drop the TEMPORARY trigger
-git log --oneline --grep=TEMPORARY main..HEAD   # must print nothing
+git log --oneline --grep='^ci: TEMPORARY' main..HEAD   # must print nothing
 git diff sampler/phase-5 HEAD --stat         # must be: sampler-statistical.yml, 6 deletions
 cargo fmt --check && cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 git switch main && git merge --ff-only sampler/merge
 ```
 
-**Rehearsed** (in a scratch worktree, on `sampler/phase-5` at the time of
-writing): the rebase is conflict-free; no TEMPORARY commit is left; the
-only difference from the branch is the six trigger lines; a fast-forward
-is possible. Rerun the rehearsal on the final tip before doing it for real.
+**Rehearsed** (in a scratch worktree, twice; last on the tip after the
+Phase 5 review):
+- the rebase is conflict-free;
+- no trigger commit is left;
+- the only difference from the branch is the six trigger lines;
+- a fast-forward is possible.
+
+The check greps for the subject `^ci: TEMPORARY`: a plain `TEMPORARY`
+also matches this plan's own commit message. Rerun the rehearsal on the
+final tip before doing it for real.
 
 Then, after pushing `main`, delete the superseded branches (`git branch
 -D sampler/phase-{0..5} sampler/merge`; `git push origin --delete
