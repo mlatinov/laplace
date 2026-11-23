@@ -336,3 +336,79 @@ fn rest_that_covers_nothing() {
         "4:5: `rest` covers no parameters: every parameter is already in a block"
     );
 }
+
+// ---- never re-tune after warmup, for every combinator (Phase 3 review) -----------
+
+/// Six coordinates in two correlated blocks `a` and `b`.
+fn coupled_model() -> (std::sync::Arc<dyn crate::target::Target>, Vec<Param>) {
+    let mut p = vec![vec![0.0; 6]; 6];
+    for (i, row) in p.iter_mut().enumerate() {
+        for (j, x) in row.iter_mut().enumerate() {
+            *x = if i == j {
+                2.0
+            } else {
+                0.3 + 0.05 * (i + j) as f64
+            };
+        }
+    }
+    let names: Vec<String> = ["a.1", "a.2", "a.3", "b.1", "b.2", "b.3"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    (
+        std::sync::Arc::new(crate::target::analytic::Gaussian { precision: p }),
+        parameters(&names).unwrap(),
+    )
+}
+
+fn assert_frozen_after_warmup(src: &str) {
+    use crate::runner::{chain_rng, initial_state, Init};
+    use crate::state::Evaluator;
+    let (target, params) = coupled_model();
+    let f = load(src).unwrap_or_else(|e| panic!("{e:#?}"));
+    let (warmup, draws) = (400, 300);
+    let mut k = f
+        .instantiate(&params, target.clone(), warmup, draws)
+        .unwrap()
+        .kernel;
+    let mut ev = Evaluator::new(target.as_ref());
+    let mut rng = chain_rng(9, 1);
+    let mut st = initial_state(&Init::Radius(2.0), &mut ev, &mut rng).unwrap();
+    k.init(&st, &mut ev, &mut rng).unwrap();
+    let start = k.tunings();
+    for _ in 0..warmup {
+        k.step(&mut st, &mut ev, &mut rng).unwrap();
+    }
+    k.end_warmup().unwrap();
+    let frozen = k.tunings();
+    for ((path, before), (_, after)) in start.iter().zip(&frozen) {
+        if path.contains("adapt/") || path.contains("nuts") {
+            assert_ne!(before, after, "{path}: nothing adapted during warmup");
+        }
+    }
+    for i in 0..draws {
+        k.step(&mut st, &mut ev, &mut rng).unwrap();
+        assert_eq!(
+            k.tunings(),
+            frozen,
+            "{src}\nre-tuned at post-warmup step {i}"
+        );
+    }
+}
+
+#[test]
+fn no_combinator_re_tunes_after_warmup() {
+    // seq, repeat, adapt of Rust kernels, on (every line), mix with adapt()
+    // inside (fewer warmup steps than the schedule expects), a .lapkernel.
+    assert_frozen_after_warmup(
+        "sampler s {\n  kernel {\n    block(a) : seq(adapt(mala()), repeat(2, adapt(hmc(steps = 4))))\n    \
+         block(b) : mix(1: adapt(rwm()), 2: adapt(./kernels/mala.lapkernel))\n  }\n}\n",
+    );
+    // nuts() as a block, beside adapt(); and nuts() under repeat().
+    assert_frozen_after_warmup(
+        "sampler s {\n  kernel {\n    block(a) : nuts()\n    block(b) : repeat(3, nuts())\n  }\n}\n",
+    );
+    assert_frozen_after_warmup(
+        "sampler s {\n  kernel {\n    block(a) : repeat(2, seq(nuts(), adapt(mala())))\n    rest : adapt(./kernels/rwm.lapkernel, target_accept = 0.3)\n  }\n}\n",
+    );
+}

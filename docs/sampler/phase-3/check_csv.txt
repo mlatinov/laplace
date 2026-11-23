@@ -1,0 +1,112 @@
+== hybrid_corr: as_cmdstan_fit OK, 4 chains x 1000 draws, 11 variables
+   diagnostic_summary: num_divergent1=0 num_divergent2=0 num_divergent3=0 num_divergent4=0 num_max_treedepth1=0 num_max_treedepth2=0 num_max_treedepth3=0 num_max_treedepth4=0 ebfmi=NA 
+   metadata: laplace_sampler = laplace-sample/tests/targets/hybrid_corr.lapsampler (sha256: e14ecdbd0532d689d450922998d7d418af2561c70ea2bf8eef859ee9fa4fe7db) 
+             laplace_kernel_rest = 
+             step_size_adaptation = 
+   inv_metric: none (several blocks, each with its own; see stepsize_<label>__)
+   sampler_diagnostics: accept_stat__,stepsize__,treedepth__,n_leapfrog__,divergent__,energy__,n_grad__,accept_stat_a__,stepsize_a__,divergent_a__,energy_a__,treedepth_a__,n_leapfrog_a__,accept_stat_b__,stepsize_b__,divergent_b__,energy_b__,treedepth_b__,n_leapfrog_b__ 
+# A tibble: 11 × 5
+   variable     mean    sd  rhat ess_bulk
+   <chr>       <dbl> <dbl> <dbl>    <dbl>
+ 1 lp__     -5.00     2.26  1.01    469. 
+ 2 a[1]     -0.895    6.04  1.01    235. 
+ 3 a[2]      0.213    5.09  1.02    333. 
+ 4 a[3]      0.586    4.99  1.02    121. 
+ 5 a[4]      0.252    6.77  1.01    135. 
+ 6 a[5]      0.00135  4.14  1.01    214. 
+ 7 b[1]     -0.330    3.58  1.02     90.1
+ 8 b[2]     -0.648    4.31  1.01    185. 
+ 9 b[3]      0.188    5.05  1.03     92.6
+10 b[4]      0.611    5.32  1.04    128. 
+11 b[5]      0.208    3.27  1.03    133. 
+== hybrid_eight: as_cmdstan_fit OK, 4 chains x 1000 draws, 19 variables
+   diagnostic_summary: num_divergent1=0 num_divergent2=0 num_divergent3=0 num_divergent4=0 num_max_treedepth1=0 num_max_treedepth2=0 num_max_treedepth3=0 num_max_treedepth4=0 ebfmi=NA 
+   metadata: laplace_sampler = laplace-sample/tests/targets/hybrid_eight_schools.lapsampler (sha256: 32b8794a48a35b91bca3faa318b25ecf39db32e84ce238a0da713342759a892a) 
+             laplace_kernel_rest = 
+             step_size_adaptation = 
+   inv_metric: none (several blocks, each with its own; see stepsize_<label>__)
+   sampler_diagnostics: accept_stat__,stepsize__,treedepth__,n_leapfrog__,divergent__,energy__,n_grad__,accept_stat_theta_tilde__,stepsize_theta_tilde__,divergent_theta_tilde__,energy_theta_tilde__,treedepth_theta_tilde__,n_leapfrog_theta_tilde__,accept_stat_hyper__,stepsize_hyper__,divergent_hyper__,energy_hyper__,treedepth_hyper__,n_leapfrog_hyper__ 
+# A tibble: 19 × 5
+   variable          mean    sd  rhat ess_bulk
+   <chr>            <dbl> <dbl> <dbl>    <dbl>
+ 1 lp__           -6.99   2.30  1.00     1292.
+ 2 mu              4.73   3.25  1.00      879.
+ 3 tau             3.44   3.01  1.00      895.
+ 4 theta_tilde[1]  0.293  1.02  1.000    4471.
+ 5 theta_tilde[2]  0.0842 0.932 1.000    4894.
+ 6 theta_tilde[3] -0.0741 0.959 1.00     5688.
+ 7 theta_tilde[4]  0.0619 0.978 1.00     6069.
+ 8 theta_tilde[5] -0.176  0.943 1.00     4946.
+ 9 theta_tilde[6] -0.0951 0.933 1.00     5928.
+10 theta_tilde[7]  0.357  0.979 1.00     4122.
+11 theta_tilde[8]  0.0755 0.978 1.000    5735.
+12 theta[1]        6.33   5.53  1.00     1679.
+13 theta[2]        5.17   4.39  1.00     2259.
+14 theta[3]        4.31   5.03  1.00     1999.
+15 theta[4]        5.03   4.73  1.00     2206.
+16 theta[5]        3.93   4.50  1.00     1825.
+17 theta[6]        4.36   4.65  1.00     2055.
+18 theta[7]        6.51   4.98  1.00     1734.
+19 theta[8]        5.14   5.34  1.00     2005.
+== hybrid_simplex: as_cmdstan_fit OK, 4 chains x 1000 draws, 8 variables
+   diagnostic_summary: num_divergent1=0 num_divergent2=0 num_divergent3=0 num_divergent4=0 num_max_treedepth1=0 num_max_treedepth2=0 num_max_treedepth3=0 num_max_treedepth4=0 ebfmi=NA 
+   metadata: laplace_sampler = laplace-sample/tests/targets/hybrid_simplex.lapsampler (sha256: a904e3a2c192ef073ac28517c3e62aa0b689cf036f568ff0b34daa1f8ec25372) 
+             laplace_kernel_rest = nuts() 0.1.0 sha256:ca24d74b2f06258079143c291e8cf4d18db58207841d0b9a07ba3cc682fdc2c7 
+             step_size_adaptation = 
+   inv_metric: none (several blocks, each with its own; see stepsize_<label>__)
+   sampler_diagnostics: accept_stat__,stepsize__,treedepth__,n_leapfrog__,divergent__,energy__,n_grad__,accept_stat_simplex__,stepsize_simplex__,divergent_simplex__,energy_simplex__,treedepth_simplex__,n_leapfrog_simplex__,accept_stat_rest__,stepsize_rest__,divergent_rest__,energy_rest__,treedepth_rest__,n_leapfrog_rest__ 
+# A tibble: 8 × 5
+  variable    mean     sd  rhat ess_bulk
+  <chr>      <dbl>  <dbl> <dbl>    <dbl>
+1 lp__     -21.1   1.79    1.00    1119.
+2 theta[1]   0.146 0.0909  1.00     992.
+3 theta[2]   0.218 0.106   1.00    1337.
+4 theta[3]   0.280 0.118   1.00    1477.
+5 theta[4]   0.356 0.124   1.00    1406.
+6 beta[1]    0.271 1.01    1.00    5562.
+7 beta[2]    0.461 1.02    1.00    4972.
+8 beta[3]    0.534 1.03    1.00    5287.
+== level1_mala: as_cmdstan_fit OK, 4 chains x 1000 draws, 11 variables
+   diagnostic_summary: num_divergent1=NaN num_divergent2=NaN num_divergent3=NaN num_divergent4=NaN num_max_treedepth1=0 num_max_treedepth2=0 num_max_treedepth3=0 num_max_treedepth4=0 ebfmi=NA 
+   metadata: laplace_sampler = mala (sha256: fd88b68949bc4aa72a2105431962c88866aa1dcb638dbc6f745313802042cc30) 
+             laplace_kernel_rest = mala 0.1.0 sha256:b07797c34b16a77ffdb5ecd28cb226ecd61dc2a2a177e3cfe086312d7b597dce 
+             step_size_adaptation = 0.4452464 0.4714514 0.4246219 0.318761 
+   inv_metric(chain 1): 18.9 14.5 8.55 17.5 19.3 11.6 5.62 36.5 9.15 12.7 
+   sampler_diagnostics: accept_stat__,stepsize__,treedepth__,n_leapfrog__,divergent__,energy__,n_grad__ 
+# A tibble: 11 × 5
+   variable    mean    sd  rhat ess_bulk
+   <chr>      <dbl> <dbl> <dbl>    <dbl>
+ 1 lp__     -4.74    2.13  1.03    211. 
+ 2 a[1]      1.03    6.01  1.05     70.4
+ 3 a[2]     -0.504   4.70  1.04    104. 
+ 4 a[3]     -0.684   3.86  1.26     11.6
+ 5 a[4]     -0.0242  5.90  1.28     11.5
+ 6 a[5]     -0.186   4.06  1.10     33.6
+ 7 b[1]      0.107   3.41  1.08     37.5
+ 8 b[2]      0.513   3.47  1.18     18.5
+ 9 b[3]     -0.352   4.48  1.08     34.5
+10 b[4]     -0.901   4.85  1.05     71.0
+11 b[5]     -0.642   2.98  1.02     73.0
+== single_nuts: as_cmdstan_fit OK, 4 chains x 1000 draws, 11 variables
+   diagnostic_summary: num_divergent1=0 num_divergent2=0 num_divergent3=0 num_divergent4=0 num_max_treedepth1=0 num_max_treedepth2=0 num_max_treedepth3=0 num_max_treedepth4=0 ebfmi1=1.12 ebfmi2=1.03 ebfmi3=1.12 ebfmi4=1.07 
+   metadata: laplace_sampler = laplace-sample/tests/targets/single_nuts.lapsampler (sha256: ec7befd218dca411c4ad3ae39eb8b2bb6f15ac31b63f7b2dcc9c0df032077c0d) 
+             laplace_kernel_rest = nuts() 0.1.0 sha256:ca24d74b2f06258079143c291e8cf4d18db58207841d0b9a07ba3cc682fdc2c7 
+             step_size_adaptation = 0.4604783 0.476705 0.4849109 0.4659212 
+   inv_metric(chain 1): 19 19.6 7.23 12.9 8.1 7.45 6.04 14.7 11.7 7.29 
+   sampler_diagnostics: accept_stat__,stepsize__,treedepth__,n_leapfrog__,divergent__,energy__,n_grad__ 
+# A tibble: 11 × 5
+   variable     mean    sd  rhat ess_bulk
+   <chr>       <dbl> <dbl> <dbl>    <dbl>
+ 1 lp__     -4.93     2.20  1.00    1778.
+ 2 a[1]     -0.0518   5.74  1.00    2380.
+ 3 a[2]      0.0278   5.04  1.00    3144.
+ 4 a[3]     -0.152    4.98  1.00    1078.
+ 5 a[4]     -0.126    6.67  1.00    1262.
+ 6 a[5]     -0.0321   4.25  1.00    1697.
+ 7 b[1]     -0.0152   3.53  1.00    2150.
+ 8 b[2]      0.107    4.06  1.00    1491.
+ 9 b[3]     -0.00843  5.35  1.00    1289.
+10 b[4]     -0.0582   5.38  1.00    2078.
+11 b[5]     -0.0194   3.57  1.00    2175.
+
+ALL OK
