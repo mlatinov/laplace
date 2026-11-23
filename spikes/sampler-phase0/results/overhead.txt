@@ -1,0 +1,4 @@
+gp (N=40): BridgeStan log_density_gradient = 204.60 us/eval, log_density = 168.23 us/eval  (20000 evals each)
+CmdStan 2.39 (cmdstanr, 4 chains, seed 1), sampling time / n_leapfrog__ from out/cmdstan/gp-*.csv: 166.1, 171.1, 163.6, 163.1 us per leapfrog
+CmdStan 2.39 with STAN_THREADS=true: 164.7, 167.3, 165.1, 163.6 us per leapfrog
+nuts-rs full-model run on gp: 7.35 s / 32849 gradients (incl. warmup + one extra log_density per saved draw)
