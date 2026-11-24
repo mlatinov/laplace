@@ -1,7 +1,7 @@
 [workspace]
 # The root package stays the default: `cargo build` / `cargo install --path .`
 # at the repo root still build only the `laplace` compiler.
-members = [".", "laplace-sample"]
+members = [".", "laplace-sample", "laplace-sampler-syntax"]
 # Phase 0 spike crates carry their own [workspace] and are never members.
 exclude = ["spikes"]
 

@@ -5,9 +5,10 @@ use nalgebra::DVector;
 use rand::{RngExt, SeedableRng};
 use rand_distr::StandardNormal;
 
-use super::builtins::{Ctx, Kind, Registry};
+use super::builtins::Registry;
 use super::check::{check, Checked};
 use super::interp::{Interp, Outcome};
+use super::natives::{Ctx, Native, Natives};
 use super::parse::parse;
 use super::types::Value;
 use crate::kernel::ChainRng;
@@ -54,11 +55,10 @@ fn call(name: &str, args: &[Value], seed: u64) -> (Value, ChainRng, u64) {
             rng: Some(&mut r),
             metric: Some(&metric),
         };
-        let reg = Registry::standard();
-        match &reg.get(name).unwrap().kind {
-            Kind::Function { call: Some(f), .. } => f(&mut ctx, args).unwrap(),
-            Kind::Value { get, .. } => get(&ctx).unwrap(),
-            _ => panic!("{name} is not callable"),
+        match Natives::standard().get(name) {
+            Some(Native::Function(f)) => f(&mut ctx, args).unwrap(),
+            Some(Native::Value(get)) => get(&ctx).unwrap(),
+            None => panic!("{name} is not callable"),
         }
     };
     (out, r, ev.n_grad() - before)
@@ -131,8 +131,7 @@ fn context_values() {
 
 #[test]
 fn metric_defaults_to_ones_without_an_adapted_one() {
-    let reg = Registry::standard();
-    let Kind::Value { get, .. } = &reg.get("metric").unwrap().kind else {
+    let Some(Native::Value(get)) = Natives::standard().get("metric") else {
         panic!()
     };
     let ctx = Ctx {

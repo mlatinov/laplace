@@ -1,75 +1,35 @@
-//! The built-in kernel context and function library, as one registry.
+//! The built-in kernel context and function library, as one registry: what
+//! each built-in is called, its documentation, its type rule and its RNG use.
 //!
 //! Everything a `.lapkernel` can name without declaring it lives here:
 //! context values (`q`, `lp`, `grad`, `dim`, `metric`), context functions
 //! (`log_density`, `log_density_grad`, `leapfrog`), the terminal statements
 //! (`propose`, `move`), and the small function library. Each [`Entry`]
-//! carries its type rule (used by the checker, 2.2), its implementation
-//! (used by the interpreter, 2.3), and its RNG use, documented because the
-//! Phase 2 equivalence tests replay the random stream draw for draw.
+//! carries its type rule (used by the checker, 2.2) and its RNG use,
+//! documented because the Phase 2 equivalence tests replay the random
+//! stream draw for draw. The implementations live in laplace-sample
+//! (`lapkernel::natives`), keyed by the same names; a test there checks the
+//! two lists agree.
 //!
-//! Adding a built-in is one `entries.push(...)` in [`Registry::standard`].
+//! Adding a built-in is one `entries.push(...)` in [`Registry::standard`]
+//! plus its implementation in `natives`.
 //! Candidates recorded for after v1 (`docs/sampler/open-questions.md`):
 //! Hessian, Hessian-vector product, `is_warmup`, `iteration`.
 //!
 //! Elementwise arithmetic (`+ - * / .* ./ ^`, unary `-`) is built into the
 //! interpreter, not this table.
 
-use nalgebra::DVector;
-use rand::RngExt;
-use rand_distr::StandardNormal;
-
-use super::types::{Size, Ty, Value};
-use crate::kernel::ChainRng;
-use crate::state::{ChainState, Evaluator};
-
-/// What a built-in may touch when it runs. Outside a running chain (tuning
-/// defaults are evaluated before any chain exists) the chain parts are
-/// `None`, and the checker only lets chain-free entries appear there.
-pub struct Ctx<'a, 't> {
-    pub dim: usize,
-    pub state: Option<&'a ChainState>,
-    pub ev: Option<&'a mut Evaluator<'t>>,
-    pub rng: Option<&'a mut ChainRng>,
-    pub metric: Option<&'a DVector<f64>>,
-}
-
-impl<'a, 't> Ctx<'a, 't> {
-    fn state(&self) -> Result<&ChainState, String> {
-        self.state
-            .ok_or_else(|| "needs a running chain".to_string())
-    }
-    fn ev(&mut self) -> Result<&mut Evaluator<'t>, String> {
-        self.ev
-            .as_deref_mut()
-            .ok_or_else(|| "needs a running chain".to_string())
-    }
-    fn rng(&mut self) -> Result<&mut ChainRng, String> {
-        self.rng
-            .as_deref_mut()
-            .ok_or_else(|| "needs a running chain".to_string())
-    }
-}
+use super::types::{Size, Ty};
 
 /// Type rule: argument types, their values when they are compile-time
 /// integer constants, and `dim` when known.
 pub type SigFn = fn(&[Ty], &[Option<i64>], Option<usize>) -> Result<Ty, String>;
-pub type CallFn = for<'a, 't> fn(&mut Ctx<'a, 't>, &[Value]) -> Result<Value, String>;
-pub type GetFn = for<'a, 't> fn(&Ctx<'a, 't>) -> Result<Value, String>;
 
 pub enum Kind {
     /// A context value such as `q`.
-    Value {
-        ty: fn(Option<usize>) -> Ty,
-        get: GetFn,
-    },
-    /// A function. Terminal functions (`propose`, `move`) end a step; the
-    /// interpreter implements them, so `call` is `None`.
-    Function {
-        sig: SigFn,
-        call: Option<CallFn>,
-        terminal: bool,
-    },
+    Value { ty: fn(Option<usize>) -> Ty },
+    /// A function. Terminal functions (`propose`, `move`) end a step.
+    Function { sig: SigFn, terminal: bool },
 }
 
 pub struct Entry {
@@ -106,64 +66,35 @@ impl Registry {
             doc: "current position (unconstrained), vector[dim]",
             rng: "none",
             needs_chain: true,
-            kind: Kind::Value {
-                ty: dim_vector,
-                get: |c| Ok(Value::Vector(DVector::from_column_slice(&c.state()?.q))),
-            },
+            kind: Kind::Value { ty: dim_vector },
         });
         entries.push(Entry {
             name: "lp",
             doc: "log density at q (propto, jacobian)",
             rng: "none",
             needs_chain: true,
-            kind: Kind::Value {
-                ty: |_| Ty::Real,
-                get: |c| Ok(Value::Real(c.state()?.lp)),
-            },
+            kind: Kind::Value { ty: |_| Ty::Real },
         });
         entries.push(Entry {
             name: "grad",
             doc: "gradient of the log density at q, vector[dim]",
             rng: "none",
             needs_chain: true,
-            kind: Kind::Value {
-                ty: dim_vector,
-                // The interpreter computes it before the step of a kernel
-                // that reads `grad` (Checked::uses_grad).
-                get: |c| {
-                    let g = c
-                        .state()?
-                        .grad
-                        .as_deref()
-                        .ok_or("the gradient at q was not computed")?;
-                    Ok(Value::Vector(DVector::from_column_slice(g)))
-                },
-            },
+            kind: Kind::Value { ty: dim_vector },
         });
         entries.push(Entry {
             name: "dim",
             doc: "number of unconstrained coordinates the kernel updates",
             rng: "none",
             needs_chain: false,
-            kind: Kind::Value {
-                ty: |_| Ty::Int,
-                get: |c| Ok(Value::Int(c.dim as i64)),
-            },
+            kind: Kind::Value { ty: |_| Ty::Int },
         });
         entries.push(Entry {
             name: "metric",
             doc: "diagonal inverse metric, vector[dim]: the kernel's @adapt(metric) tuning value if it has one, else all ones",
             rng: "none",
             needs_chain: true,
-            kind: Kind::Value {
-                ty: dim_vector,
-                get: |c| {
-                    Ok(Value::Vector(match c.metric {
-                        Some(m) => m.clone(),
-                        None => DVector::from_element(c.dim, 1.0),
-                    }))
-                },
-            },
+            kind: Kind::Value { ty: dim_vector },
         });
 
         // ---- context functions -------------------------------------------
@@ -177,11 +108,6 @@ impl Registry {
                     expect(a, &[Ty::Vector(dim_size(d))], "log_density(vector[dim] x)")?;
                     Ok(Ty::Real)
                 },
-                call: Some(|c, a| {
-                    let x = vec_arg(&a[0])?;
-                    let (lp, _) = c.ev()?.eval(x.as_slice()).map_err(|e| e.to_string())?;
-                    Ok(Value::Real(lp))
-                }),
                 terminal: false,
             },
         });
@@ -195,11 +121,6 @@ impl Registry {
                     expect(a, &[Ty::Vector(dim_size(d))], "log_density_grad(vector[dim] x)")?;
                     Ok(Ty::Tuple(vec![Ty::Real, Ty::Vector(dim_size(d))]))
                 },
-                call: Some(|c, a| {
-                    let x = vec_arg(&a[0])?;
-                    let (lp, g) = c.ev()?.eval(x.as_slice()).map_err(|e| e.to_string())?;
-                    Ok(Value::Tuple(vec![Value::Real(lp), Value::Vector(DVector::from_vec(g))]))
-                }),
                 terminal: false,
             },
         });
@@ -220,7 +141,6 @@ impl Registry {
                     )?;
                     Ok(Ty::Tuple(vec![v.clone(), v.clone(), Ty::Real, v]))
                 },
-                call: Some(leapfrog),
                 terminal: false,
             },
         });
@@ -237,7 +157,6 @@ impl Registry {
                     expect(a, &[Ty::Vector(dim_size(d)), Ty::Real], "propose(vector[dim] q_new, real log_correction)")?;
                     Ok(Ty::Void)
                 },
-                call: None,
                 terminal: true,
             },
         });
@@ -251,7 +170,6 @@ impl Registry {
                     expect(a, &[Ty::Vector(dim_size(d))], "move(vector[dim] q_new)")?;
                     Ok(Ty::Void)
                 },
-                call: None,
                 terminal: true,
             },
         });
@@ -268,20 +186,6 @@ impl Registry {
                     [Ty::Int] => Ok(Ty::Vector(const_size(k[0])?)),
                     _ => Err(bad_args("std_normal_rng() or std_normal_rng(int n)", a)),
                 },
-                call: Some(|c, a| {
-                    let rng = c.rng()?;
-                    match a {
-                        [] => Ok(Value::Real(rng.sample(StandardNormal))),
-                        [n] => {
-                            let n = size_arg(n)?;
-                            Ok(Value::Vector(DVector::from_iterator(
-                                n,
-                                (0..n).map(|_| rng.sample::<f64, _>(StandardNormal)),
-                            )))
-                        }
-                        _ => unreachable!(),
-                    }
-                }),
                 terminal: false,
             },
         });
@@ -297,23 +201,6 @@ impl Registry {
                     }
                     broadcast_type(a)
                 },
-                call: Some(|c, a| {
-                    let n = broadcast_len(a)?;
-                    let rng = c.rng()?;
-                    match n {
-                        None => {
-                            let z: f64 = rng.sample(StandardNormal);
-                            Ok(Value::Real(elem(&a[0], 0) + elem(&a[1], 0) * z))
-                        }
-                        Some(n) => Ok(Value::Vector(DVector::from_iterator(
-                            n,
-                            (0..n).map(|i| {
-                                let z: f64 = rng.sample(StandardNormal);
-                                elem(&a[0], i) + elem(&a[1], i) * z
-                            }),
-                        ))),
-                    }
-                }),
                 terminal: false,
             },
         });
@@ -327,11 +214,6 @@ impl Registry {
                     expect(a, &[Ty::Real, Ty::Real], "uniform_rng(real a, real b)")?;
                     Ok(Ty::Real)
                 },
-                call: Some(|c, a| {
-                    let (lo, hi) = (real_arg(&a[0])?, real_arg(&a[1])?);
-                    let u: f64 = c.rng()?.random();
-                    Ok(Value::Real(lo + (hi - lo) * u))
-                }),
                 terminal: false,
             },
         });
@@ -350,19 +232,6 @@ impl Registry {
                     broadcast_type(a)?;
                     Ok(Ty::Real)
                 },
-                call: Some(|_, a| {
-                    let n = broadcast_len(a)?.unwrap_or(1);
-                    let mut s = 0.0;
-                    for i in 0..n {
-                        let sigma = elem(&a[2], i);
-                        if sigma.is_nan() || sigma <= 0.0 {
-                            return Err(format!("normal_lpdf: sigma must be positive, got {sigma}"));
-                        }
-                        let z = (elem(&a[0], i) - elem(&a[1], i)) / sigma;
-                        s += -0.5 * z * z - sigma.ln() - HALF_LN_2PI;
-                    }
-                    Ok(Value::Real(s))
-                }),
                 terminal: false,
             },
         });
@@ -376,17 +245,6 @@ impl Registry {
                     [t] if t.is_scalar() || matches!(t, Ty::Vector(_)) => Ok(Ty::Real),
                     _ => Err(bad_args("std_normal_lpdf(real|vector y)", a)),
                 },
-                call: Some(|_, a| {
-                    let n = broadcast_len(a)?.unwrap_or(1);
-                    Ok(Value::Real(
-                        (0..n)
-                            .map(|i| {
-                                let y = elem(&a[0], i);
-                                -0.5 * y * y - HALF_LN_2PI
-                            })
-                            .sum(),
-                    ))
-                }),
                 terminal: false,
             },
         });
@@ -405,13 +263,6 @@ impl Registry {
                     }
                     _ => Err(bad_args("dot_product(vector a, vector b)", a)),
                 },
-                call: Some(|_, a| {
-                    let (x, y) = (vec_arg(&a[0])?, vec_arg(&a[1])?);
-                    same_len("dot_product", x, y)?;
-                    Ok(Value::Real(
-                        x.iter().zip(y.iter()).map(|(a, b)| a * b).sum(),
-                    ))
-                }),
                 terminal: false,
             },
         });
@@ -425,7 +276,6 @@ impl Registry {
                     [Ty::Vector(_)] => Ok(Ty::Real),
                     _ => Err(bad_args("sum(vector v)", a)),
                 },
-                call: Some(|_, a| Ok(Value::Real(vec_arg(&a[0])?.iter().sum()))),
                 terminal: false,
             },
         });
@@ -439,34 +289,16 @@ impl Registry {
                     [x, Ty::Int] if x.is_scalar() => Ok(Ty::Vector(const_size(k[1])?)),
                     _ => Err(bad_args("rep_vector(real x, int n)", a)),
                 },
-                call: Some(|_, a| {
-                    let x = real_arg(&a[0])?;
-                    Ok(Value::Vector(DVector::from_element(size_arg(&a[1])?, x)))
-                }),
                 terminal: false,
             },
         });
-        let unary: [(&'static str, &'static str, CallFn); 4] = [
-            ("exp", "exp(x): e^x, elementwise for vectors", |_, a| {
-                unary_math(&a[0], f64::exp)
-            }),
-            (
-                "log",
-                "log(x): natural logarithm, elementwise for vectors",
-                |_, a| unary_math(&a[0], f64::ln),
-            ),
-            (
-                "sqrt",
-                "sqrt(x): square root, elementwise for vectors",
-                |_, a| unary_math(&a[0], f64::sqrt),
-            ),
-            (
-                "square",
-                "square(x): x * x, elementwise for vectors",
-                |_, a| unary_math(&a[0], |x| x * x),
-            ),
+        let unary: [(&'static str, &'static str); 4] = [
+            ("exp", "exp(x): e^x, elementwise for vectors"),
+            ("log", "log(x): natural logarithm, elementwise for vectors"),
+            ("sqrt", "sqrt(x): square root, elementwise for vectors"),
+            ("square", "square(x): x * x, elementwise for vectors"),
         ];
-        for (name, doc, call) in unary {
+        for (name, doc) in unary {
             entries.push(Entry {
                 name,
                 doc,
@@ -474,7 +306,6 @@ impl Registry {
                 needs_chain: false,
                 kind: Kind::Function {
                     sig: unary_math_sig,
-                    call: Some(call),
                     terminal: false,
                 },
             });
@@ -483,8 +314,6 @@ impl Registry {
         Registry { entries }
     }
 }
-
-const HALF_LN_2PI: f64 = 0.918_938_533_204_672_8;
 
 fn dim_size(d: Option<usize>) -> Size {
     d.map_or(Size::Unknown, Size::Known)
@@ -524,13 +353,6 @@ fn unary_math_sig(a: &[Ty], _: &[Option<i64>], _: Option<usize>) -> Result<Ty, S
     }
 }
 
-fn unary_math(v: &Value, f: fn(f64) -> f64) -> Result<Value, String> {
-    match v {
-        Value::Vector(x) => Ok(Value::Vector(x.map(f))),
-        other => Ok(Value::Real(f(real_arg(other)?))),
-    }
-}
-
 /// Real for all-scalar arguments; vector of the common size otherwise.
 fn broadcast_type(a: &[Ty]) -> Result<Ty, String> {
     let mut size: Option<Size> = None;
@@ -544,88 +366,4 @@ fn broadcast_type(a: &[Ty]) -> Result<Ty, String> {
         }
     }
     Ok(size.map_or(Ty::Real, Ty::Vector))
-}
-
-fn broadcast_len(a: &[Value]) -> Result<Option<usize>, String> {
-    let mut n: Option<usize> = None;
-    for v in a {
-        if let Value::Vector(x) = v {
-            match n {
-                Some(m) if m != x.len() => {
-                    return Err(format!("vector sizes {m} and {} differ", x.len()))
-                }
-                _ => n = Some(x.len()),
-            }
-        }
-    }
-    Ok(n)
-}
-
-/// Element `i` of a scalar-or-vector argument (scalars broadcast).
-fn elem(v: &Value, i: usize) -> f64 {
-    match v {
-        Value::Vector(x) => x[i],
-        other => other.as_real().unwrap_or(f64::NAN),
-    }
-}
-
-fn real_arg(v: &Value) -> Result<f64, String> {
-    v.as_real()
-        .ok_or_else(|| format!("expected a real, got {}", v.type_name()))
-}
-
-fn vec_arg(v: &Value) -> Result<&DVector<f64>, String> {
-    v.as_vector()
-        .ok_or_else(|| format!("expected a vector, got {}", v.type_name()))
-}
-
-fn size_arg(v: &Value) -> Result<usize, String> {
-    match v.as_int() {
-        Some(n) if n >= 0 => Ok(n as usize),
-        Some(n) => Err(format!("size must be non-negative, got {n}")),
-        None => Err(format!("expected an int size, got {}", v.type_name())),
-    }
-}
-
-fn same_len(f: &str, x: &DVector<f64>, y: &DVector<f64>) -> Result<(), String> {
-    if x.len() == y.len() {
-        Ok(())
-    } else {
-        Err(format!("{f}: sizes {} and {} differ", x.len(), y.len()))
-    }
-}
-
-fn leapfrog(c: &mut Ctx<'_, '_>, a: &[Value]) -> Result<Value, String> {
-    let mut q = vec_arg(&a[0])?.clone();
-    let mut p = vec_arg(&a[1])?.clone();
-    let eps = real_arg(&a[2])?;
-    let steps = a[3].as_int().ok_or("leapfrog: steps must be an int")?;
-    let m = vec_arg(&a[4])?.clone();
-    same_len("leapfrog", &q, &p)?;
-    same_len("leapfrog", &q, &m)?;
-    let ev = c.ev()?;
-    let (mut lp, g) = ev.eval(q.as_slice()).map_err(|e| e.to_string())?;
-    let mut g = DVector::from_vec(g);
-    for _ in 0..steps.max(0) {
-        for i in 0..q.len() {
-            p[i] += 0.5 * eps * g[i];
-            q[i] += eps * m[i] * p[i];
-        }
-        let (lp_new, g_new) = ev.eval(q.as_slice()).map_err(|e| e.to_string())?;
-        lp = lp_new;
-        g = DVector::from_vec(g_new);
-        if !lp.is_finite() {
-            lp = f64::NEG_INFINITY;
-            break;
-        }
-        for i in 0..q.len() {
-            p[i] += 0.5 * eps * g[i];
-        }
-    }
-    Ok(Value::Tuple(vec![
-        Value::Vector(q),
-        Value::Vector(p),
-        Value::Real(lp),
-        Value::Vector(g),
-    ]))
 }

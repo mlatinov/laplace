@@ -1,7 +1,6 @@
 //! Chains: random streams, initial values, the warmup/draw loop, and the
 //! built-in sampler table (`--sampler` and `--set`).
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use rand::{RngExt, SeedableRng};
@@ -11,6 +10,7 @@ use crate::kernel::{ChainRng, Kernel, StepInfo, Tuning};
 use crate::kernels::{hmc::Hmc, mala::Mala, nuts::Nuts, rwm::Rwm};
 use crate::lapkernel::check::AdaptKind;
 use crate::lapkernel::kernel::{InterpretedKernel, LapKernelFile};
+use crate::lapsampler::SamplerRuntime;
 use crate::state::{ChainState, Evaluator};
 use crate::target::Target;
 
@@ -155,164 +155,34 @@ pub fn run_chain(
     })
 }
 
-/// The built-in samplers of `--sampler`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BuiltIn {
-    Nuts,
-    Rwm,
-    Mala,
-    Hmc,
-}
+/// The built-in samplers of `--sampler` and their settings: defined in
+/// laplace-sampler-syntax (the checker and the editor need them without a
+/// runtime), re-exported here.
+pub use laplace_sampler_syntax::builtin_kernels::{BuiltIn, SamplerSpec};
 
-impl BuiltIn {
-    pub const ALL: [BuiltIn; 4] = [BuiltIn::Nuts, BuiltIn::Rwm, BuiltIn::Mala, BuiltIn::Hmc];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            BuiltIn::Nuts => "nuts",
-            BuiltIn::Rwm => "rwm",
-            BuiltIn::Mala => "mala",
-            BuiltIn::Hmc => "hmc",
-        }
-    }
-
-    pub fn parse(s: &str) -> anyhow::Result<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|b| b.name() == s)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "unknown sampler `{s}`; built-in samplers are: {}",
-                    Self::ALL.map(|b| b.name()).join(", ")
-                )
-            })
-    }
-
-    /// `--set` keys and their defaults, in the order they are documented.
-    pub fn defaults(self) -> Vec<(&'static str, &'static str)> {
-        match self {
-            BuiltIn::Nuts => vec![
-                ("step_size", "1"),
-                ("target_accept", "0.8"),
-                ("max_depth", "10"),
-            ],
-            BuiltIn::Rwm => vec![
-                ("step_size", "1"),
-                ("target_accept", "0.234"),
-                ("adapt", "true"),
-            ],
-            BuiltIn::Mala => vec![
-                ("step_size", "1"),
-                ("target_accept", "0.574"),
-                ("adapt", "true"),
-            ],
-            BuiltIn::Hmc => vec![
-                ("step_size", "1"),
-                ("target_accept", "0.8"),
-                ("steps", "10"),
-                ("jitter", "true"),
-                ("adapt", "true"),
-            ],
-        }
-    }
-}
-
-/// A built-in sampler with its `--set` values resolved.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SamplerSpec {
-    pub kind: BuiltIn,
-    /// Every setting, defaults filled in, sorted by key.
-    pub settings: BTreeMap<String, String>,
-}
-
-impl SamplerSpec {
-    /// `sets` are the raw `key=value` strings of `--set`.
-    pub fn new(kind: BuiltIn, sets: &[String]) -> anyhow::Result<Self> {
-        let mut settings: BTreeMap<String, String> = kind
-            .defaults()
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        for s in sets {
-            let (k, v) = s
-                .split_once('=')
-                .ok_or_else(|| anyhow::anyhow!("--set expects key=value, got `{s}`"))?;
-            let (k, v) = (k.trim(), v.trim());
-            anyhow::ensure!(
-                settings.contains_key(k),
-                "`{}` has no setting `{k}`; its settings are: {}",
-                kind.name(),
-                kind.defaults()
-                    .iter()
-                    .map(|(k, _)| *k)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            settings.insert(k.to_string(), v.to_string());
-        }
-        let spec = Self { kind, settings };
-        // Validate every value now, before any chain starts.
-        spec.f64("step_size")?;
-        let ta = spec.f64("target_accept")?;
-        anyhow::ensure!(
-            ta > 0.0 && ta < 1.0,
-            "target_accept must be in (0, 1), got {ta}"
-        );
-        for key in ["adapt", "jitter"] {
-            if spec.settings.contains_key(key) {
-                spec.bool(key)?;
-            }
-        }
-        if spec.settings.contains_key("steps") {
-            anyhow::ensure!(spec.u64("steps")? >= 1, "steps must be at least 1");
-        }
-        if spec.settings.contains_key("max_depth") {
-            anyhow::ensure!(spec.u64("max_depth")? >= 1, "max_depth must be at least 1");
-        }
-        Ok(spec)
-    }
-
-    fn get(&self, k: &str) -> &str {
-        &self.settings[k]
-    }
-    pub fn f64(&self, k: &str) -> anyhow::Result<f64> {
-        let v = self.get(k);
-        let x: f64 = v
-            .parse()
-            .map_err(|_| anyhow::anyhow!("{k}: `{v}` is not a number"))?;
-        anyhow::ensure!(x.is_finite(), "{k}: `{v}` is not finite");
-        if k == "step_size" {
-            anyhow::ensure!(x > 0.0, "step_size must be positive, got {x}");
-        }
-        Ok(x)
-    }
-    pub fn u64(&self, k: &str) -> anyhow::Result<u64> {
-        let v = self.get(k);
-        v.parse()
-            .map_err(|_| anyhow::anyhow!("{k}: `{v}` is not a whole number"))
-    }
-    pub fn bool(&self, k: &str) -> anyhow::Result<bool> {
-        match self.get(k) {
-            "true" => Ok(true),
-            "false" => Ok(false),
-            v => anyhow::bail!("{k}: expected true or false, got `{v}`"),
-        }
-    }
-
-    /// `key:value` pairs, sorted, space separated (the CSV settings line). Not
-    /// `key=value`: cmdstanr drops a `# key = value` header line whose value
-    /// contains another `=`, so `$metadata()` would lose it.
-    pub fn settings_text(&self) -> String {
-        self.settings
-            .iter()
-            .map(|(k, v)| format!("{k}:{v}"))
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-
+/// Building a [`SamplerSpec`]'s kernel: the runtime half of the spec.
+pub trait BuildKernel {
     /// The bare kernel (no adaptation wrapper). `target` is only used by
     /// nuts, which runs its own integrator; `num_tune` is its warmup length.
-    pub fn kernel(
+    fn kernel(
+        &self,
+        target: Arc<dyn Target>,
+        num_tune: u64,
+        draws: u64,
+    ) -> anyhow::Result<Box<dyn Kernel>>;
+
+    /// Level 1: the kernel on the whole model, inside `adapt()` unless it is
+    /// nuts (which adapts itself) or `adapt=false`.
+    fn build(
+        &self,
+        target: Arc<dyn Target>,
+        warmup: u64,
+        draws: u64,
+    ) -> anyhow::Result<Box<dyn Kernel>>;
+}
+
+impl BuildKernel for SamplerSpec {
+    fn kernel(
         &self,
         target: Arc<dyn Target>,
         num_tune: u64,
@@ -337,9 +207,7 @@ impl SamplerSpec {
         })
     }
 
-    /// Level 1: the kernel on the whole model, inside `adapt()` unless it is
-    /// nuts (which adapts itself) or `adapt=false`.
-    pub fn build(
+    fn build(
         &self,
         target: Arc<dyn Target>,
         warmup: u64,

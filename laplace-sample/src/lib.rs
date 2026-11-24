@@ -16,12 +16,10 @@ pub mod combinators;
 pub mod compiler;
 pub mod csv;
 pub mod diagnostics;
-pub mod editor;
 pub mod kernel;
 pub mod kernels;
 pub mod lapkernel;
 pub mod lapsampler;
-pub mod libraries;
 pub mod model;
 pub mod runner;
 pub mod sample;
@@ -29,6 +27,10 @@ pub mod sbc;
 pub mod state;
 pub mod suite;
 pub mod target;
+
+// Parsing, the model-free checks and kernel-package lookup live in
+// laplace-sampler-syntax (shared with the editor); these keep their paths.
+pub use laplace_sampler_syntax::{editor, libraries};
 
 /// Version recorded in every CSV this binary writes.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
