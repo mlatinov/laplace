@@ -9,17 +9,28 @@ API. It does not describe any LSP features: none are built here.
 
 ## What it needs
 
-- The `laplace-sample` crate as a library dependency (crate name
-  `laplace_sample`).
-- **No BridgeStan, no C++ toolchain, no compiled model.**
-  - The `bridgestan` crate is compiled in, but it loads BridgeStan only at
-    run time and only when sampling, which these functions never do.
-  - Nothing is downloaded or built.
+- The `laplace-sampler-syntax` crate (crate name `laplace_sampler_syntax`)
+  as a library dependency, from this repository, for example as a git
+  dependency pinned to a commit or tag. It holds the parsers and every
+  model-free check; laplace-sample builds on it.
+- **No BridgeStan, no libclang, no C++ toolchain, no compiled model.**
+  - Its dependencies are `anyhow`, `laplace` (the compiler's library),
+    `nalgebra` and `pest`. Building it needs a C compiler: pest assembles
+    one small file through `cc`. Linking any Rust program on Linux or macOS
+    needs the same toolchain, so in practice nothing extra is installed.
+  - CI builds it in a container without libclang (`sampler.yml`,
+    `syntax-without-libclang`).
+  - Do **not** depend on `laplace-sample` for this. It needs libclang at
+    build time (bridgestan's build script runs bindgen), and it does not
+    compile outside this workspace, because its vendored nuts-rs comes from
+    a `[patch]` that applies only here.
+- `laplace_sample::editor` is the same module, re-exported, for code that
+  already links laplace-sample.
 
 ## The API
 
 ```rust
-use laplace_sample::editor::{check_lapkernel, check_lapsampler, Diagnostic, Project, Severity};
+use laplace_sampler_syntax::editor::{check_lapkernel, check_lapsampler, Diagnostic, Project, Severity};
 
 // A .lapkernel, as the editor holds it (unsaved text is fine).
 let ds: Vec<Diagnostic> = check_lapkernel("kernels/mala.lapkernel", &text, None);
@@ -39,7 +50,7 @@ and `~/.laplace/packages`.
 | Field | Meaning |
 | --- | --- |
 | `file` | The file the problem is in. Usually the path you passed. A `.lapsampler` diagnostic about a library kernel names it `<package>/kernels/<name>.lapkernel`, never a machine-specific cache path. |
-| `line`, `column` | 1-based; columns count characters. Where the problem **starts**: a point, not a range. Highlight the token or line there. `0, 0` means the whole file (it could not be read). |
+| `line`, `column` | 1-based; columns count characters (Unicode scalar values: not bytes, not UTF-16 code units, so an editor speaking LSP converts). Where the problem **starts**: a point, not a range. Highlight the token or line there. `0, 0` means the whole file (it could not be read). |
 | `severity` | `Error` or `Warning`. Every diagnostic today is an `Error`: the file would be refused by `laplace sample`. `Warning` is in the API so adding warnings later is not a breaking change. |
 | `message` | One line, apart from one case below. |
 
@@ -87,4 +98,4 @@ model.laplace` does it on the command line.
 These two functions, `Diagnostic`, `Severity` and `Project` are the
 supported surface. Everything else in `laplace_sample` is internal and may
 change. Message wording may change; positions and severities are tested
-(`laplace-sample/src/editor.rs`).
+(`laplace-sampler-syntax/src/editor.rs`).
