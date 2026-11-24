@@ -13,6 +13,9 @@ pub mod graph;
 pub mod lockfile;
 mod path;
 
+/// `path+<dir>` lock sources: the directory, relative to the project.
+pub use path::parse_path_source;
+
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;

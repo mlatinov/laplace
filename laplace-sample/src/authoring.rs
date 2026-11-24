@@ -7,70 +7,22 @@ use std::path::{Path, PathBuf};
 use laplace::manifest::{self, PackageKind, KERNEL_PACKAGES_REQUIREMENT};
 use laplace::package::{KERNELS_DIR, LAPKERNEL_EXTENSION};
 
-use crate::lapkernel::doc::{kernel_doc, render};
+use crate::lapkernel::doc::kernel_doc;
 use crate::lapkernel::kernel::LapKernelFile;
-use crate::libraries::{display_path, resolve_import, KernelPackage, Project};
+use crate::libraries::Project;
 use crate::runner::BuiltIn;
+use laplace_sampler_syntax::symbols::load_package_kernel;
 
-fn load_library_kernel(lib: &KernelPackage, name: &str) -> anyhow::Result<LapKernelFile> {
-    let file = lib.kernel_file(name).map_err(anyhow::Error::msg)?;
-    let src = std::fs::read_to_string(&file)?;
-    LapKernelFile::from_source(&display_path(&lib.name, name), src)
-}
-
-/// `pkg::kernel` (an installed kernel package of the current project) or
-/// a `.lapkernel` path.
-pub fn doc(spec: &str, project: &Project) -> anyhow::Result<String> {
-    if let Some((package, name)) = spec.split_once("::") {
-        let lib = resolve_import(project, package).map_err(anyhow::Error::msg)?;
-        let file = load_library_kernel(&lib, name)?;
-        let origin = format!(
-            "{} {}, {KERNELS_DIR}/{name}.{LAPKERNEL_EXTENSION}",
-            lib.name, lib.version
-        );
-        return Ok(render(&kernel_doc(&file, spec, &origin)));
-    }
-    if spec.ends_with(&format!(".{LAPKERNEL_EXTENSION}")) {
-        let file = LapKernelFile::load(Path::new(spec))?;
-        return Ok(render(&kernel_doc(&file, spec, "local file")));
-    }
-    if let Ok(b) = BuiltIn::parse(spec) {
-        return Ok(format!(
-            "{spec} is a built-in kernel; `laplace sampler list` shows its settings.\n{}",
-            builtin_line(b)
-        ));
-    }
-    anyhow::bail!("expected `<package>::<kernel>` or a .lapkernel file, got `{spec}`")
-}
-
-fn builtin_line(b: BuiltIn) -> String {
-    let (settings, adapts) = match b {
-        BuiltIn::Nuts => (
-            "step_size, target_accept, max_depth",
-            "adapts itself (nuts-rs's warmup adaptation)",
-        ),
-        BuiltIn::Rwm => (
-            "step_size",
-            "adapt(rwm()) tunes step size and metric (target 0.234)",
-        ),
-        BuiltIn::Mala => (
-            "step_size",
-            "adapt(mala()) tunes step size and metric (target 0.574)",
-        ),
-        BuiltIn::Hmc => (
-            "step_size, steps, jitter",
-            "adapt(hmc()) tunes step size and metric (target 0.8)",
-        ),
-    };
-    format!("  {:<6} settings: {settings}; {adapts}", b.name())
-}
+/// `pkg::kernel` (an installed kernel package of the current project), a
+/// `.lapkernel` path, or a built-in.
+pub use laplace_sampler_syntax::symbols::doc;
 
 /// Built-in kernels, then every kernel package of the current project with
 /// each kernel's tuning values.
 pub fn list(project: &Project) -> String {
     let mut out = String::from("Built-in kernels:\n");
     for b in BuiltIn::ALL {
-        out += &builtin_line(b);
+        out += &b.line();
         out += "\n";
     }
     let libs = crate::libraries::installed(project);
@@ -87,7 +39,7 @@ pub fn list(project: &Project) -> String {
             Ok(lib) => {
                 out += &format!("\n{} {} (`import {}`):\n", lib.name, lib.version, lib.name);
                 for k in lib.kernels() {
-                    match load_library_kernel(&lib, &k) {
+                    match load_package_kernel(&lib, &k) {
                         Err(e) => out += &format!("  {}::{k}: does not load: {e}\n", lib.name),
                         Ok(f) => {
                             let d = kernel_doc(&f, &format!("{}::{k}", lib.name), "");
