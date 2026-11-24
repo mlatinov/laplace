@@ -123,8 +123,11 @@ let (kernels, problems) = kernel_index(&project, sampler_dir);
   - The kinds:
     - the built-ins, with their `.lapsampler` settings and defaults;
     - the kernels of each kernel package in `project`'s `laplace.lock`;
-    - the `.lapkernel` files under `project.dir`, skipping hidden
-      directories and `target`.
+    - the `.lapkernel` files under `project.dir` when it has a
+      `laplace.lock`, skipping hidden directories and `target`. Without a
+      lock, only the nearby ones: those directly in `project.dir` (and in
+      `from`) and under its `kernels/`, so a sampler saved in `~` doesn't
+      scan the home directory.
   - `name` is what the sampler writes: `mala`, `langevin::mala`, or
     `./kernels/mine.lapkernel`, relative to `from`.
   - `file` is the `.lapkernel` to open. For a path dependency, it is the

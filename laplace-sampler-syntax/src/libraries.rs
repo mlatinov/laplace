@@ -29,7 +29,7 @@ impl Project {
         }
     }
 
-    fn lockfile(&self) -> PathBuf {
+    pub(crate) fn lockfile(&self) -> PathBuf {
         self.dir.join("laplace.lock")
     }
 }

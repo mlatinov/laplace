@@ -188,9 +188,16 @@ pub struct KernelEntry {
 
 /// Every kernel a `.lapsampler` in `from` can name: the built-ins, the
 /// kernels of each kernel package in `project`'s laplace.lock (installed,
-/// as `laplace sample` finds them), and the `.lapkernel` files under
-/// `project.dir` (named by their path relative to `from`). A package that
-/// does not resolve is skipped; its message is in the second list.
+/// as `laplace sample` finds them), and local `.lapkernel` files, named by
+/// their path relative to `from`. A package that does not resolve is
+/// skipped; its message is in the second list.
+///
+/// Local files: in a project (a laplace.lock in `project.dir`), every one
+/// under `project.dir`. Without a lock, `project.dir` is just wherever the
+/// sampler is, possibly `~`, so only the nearby files are listed: those in
+/// the directory itself and under its `kernels/`. The same goes for `from`
+/// when it is outside the project. A file elsewhere can still be named by
+/// its path.
 pub fn kernel_index(project: &Project, from: &Path) -> (Vec<KernelEntry>, Vec<String>) {
     let mut kernels: Vec<KernelEntry> = BuiltIn::ALL.into_iter().map(builtin_entry).collect();
     let mut problems = vec![];
@@ -205,10 +212,14 @@ pub fn kernel_index(project: &Project, from: &Path) -> (Vec<KernelEntry>, Vec<St
         }
     }
     let mut files = vec![];
-    find_kernel_files(&project.dir, 0, &mut files);
+    if project.lockfile().is_file() {
+        find_kernel_files(&project.dir, 0, &mut files);
+    } else {
+        find_nearby_kernel_files(&project.dir, &mut files);
+    }
     // The sampler's own directory, when it is outside the project.
     if !from.starts_with(&project.dir) {
-        find_kernel_files(from, 0, &mut files);
+        find_nearby_kernel_files(from, &mut files);
     }
     files.sort();
     files.dedup();
@@ -314,6 +325,21 @@ fn failed(name: String, origin: KernelOrigin, file: PathBuf, e: anyhow::Error) -
 
 /// `.lapkernel` files under `dir`, skipping hidden directories and build
 /// output, at most 8 levels down.
+/// The `.lapkernel` files directly in `dir`, and under `dir/kernels`.
+fn find_nearby_kernel_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file()
+                && path.extension().and_then(|e| e.to_str()) == Some(LAPKERNEL_EXTENSION)
+            {
+                out.push(path);
+            }
+        }
+    }
+    find_kernel_files(&dir.join("kernels"), 0, out);
+}
+
 fn find_kernel_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     if depth > 8 {
         return;

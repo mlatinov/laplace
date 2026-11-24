@@ -319,6 +319,65 @@ fn without_a_lockfile_there_are_built_ins_and_local_files_only() {
 }
 
 #[test]
+fn without_a_lockfile_only_nearby_files_are_listed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    for f in [
+        "k.lapkernel",
+        "kernels/a.lapkernel",
+        "kernels/deep/b.lapkernel",
+        "far/c.lapkernel",
+        "far/kernels/d.lapkernel",
+    ] {
+        let path = dir.join(f);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::copy(MALA, path).unwrap();
+    }
+    let local = |p: &Project, from: &Path| -> Vec<String> {
+        let (kernels, _) = kernel_index(p, from);
+        kernels[BuiltIn::ALL.len()..]
+            .iter()
+            .map(|k| k.name.clone())
+            .collect()
+    };
+    assert_eq!(
+        local(&empty_project(dir), dir),
+        [
+            "./k.lapkernel",
+            "./kernels/a.lapkernel",
+            "./kernels/deep/b.lapkernel"
+        ]
+    );
+    // The same tree with a lock is a project: every file is listed.
+    std::fs::write(dir.join("laplace.lock"), "").unwrap();
+    assert_eq!(
+        local(&empty_project(dir), dir),
+        [
+            "./far/c.lapkernel",
+            "./far/kernels/d.lapkernel",
+            "./k.lapkernel",
+            "./kernels/a.lapkernel",
+            "./kernels/deep/b.lapkernel"
+        ]
+    );
+    // A sampler outside the project adds only its own nearby files.
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(outside.path().join("x/kernels")).unwrap();
+    std::fs::copy(MALA, outside.path().join("x/kernels/e.lapkernel")).unwrap();
+    std::fs::copy(MALA, outside.path().join("f.lapkernel")).unwrap();
+    let from = outside.path().join("x");
+    let names = local(&empty_project(dir), &from);
+    assert!(
+        names.contains(&"./kernels/e.lapkernel".to_string()),
+        "{names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n.ends_with("f.lapkernel")),
+        "{names:?}"
+    );
+}
+
+#[test]
 fn a_package_that_does_not_resolve_is_a_problem_not_an_entry() {
     let (_tmp, p) = project();
     std::fs::remove_dir_all(p.dir.join("../langevin")).unwrap();
