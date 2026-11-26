@@ -1130,7 +1130,7 @@ mod tests {
         assert!(close(log_phi(10.0), -7.619853024160527e-24, 1e-9));
         assert!(close(log_phi(0.0), -LN_2, 1e-15));
         // digamma: ψ(1) = -γ, ψ(1/2) = -γ - 2 ln 2, reflection
-        let gamma = 0.5772156649015329;
+        let gamma = std::f64::consts::EULER_GAMMA;
         assert!(close(digamma(1.0), -gamma, 1e-14));
         assert!(close(digamma(0.5), -gamma - 2.0 * LN_2, 1e-14));
         assert!(close(digamma(-0.5), 0.03648997397857652, 1e-12));
