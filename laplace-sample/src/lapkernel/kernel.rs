@@ -390,6 +390,69 @@ mod tests {
             .all(|(t, i)| i.accept_prob.is_none() && t.step_size.is_none()));
     }
 
+    /// The `slice` kernel from the Level 3 guide, verbatim, so the guide's
+    /// example cannot drift from what compiles and samples correctly.
+    fn guide_slice_kernel() -> String {
+        let guide = include_str!("../../../docs/sampler/wiki/Level-3-Write-kernels.md");
+        guide
+            .split("```stan\n")
+            .filter_map(|b| b.split_once("```").map(|(code, _)| code))
+            .find(|code| code.contains("kernel slice {"))
+            .expect("the guide has a slice kernel")
+            .to_string()
+    }
+
+    #[test]
+    fn the_guides_slice_sampler_targets_the_right_distribution() {
+        let src = guide_slice_kernel();
+        assert!(src.contains("break;") && src.contains("continue;"));
+        let f = LapKernelFile::from_source("slice.lapkernel", src).unwrap();
+        let s = Sampler::File(crate::runner::FileSampler {
+            file: Arc::new(f),
+            sets: vec![],
+            adapt: true,
+            target_accept: None,
+        });
+        let t = target();
+        let mut k = s.build(t.clone(), 200, 4000).unwrap();
+        let mut draws: Vec<Vec<f64>> = vec![];
+        run_chain(
+            t.as_ref(),
+            k.as_mut(),
+            &Init::Radius(2.0),
+            200,
+            4000,
+            &mut chain_rng(7, 1),
+            |_| Ok(()),
+            |state, info, _| {
+                assert!(info.accept_prob.is_none(), "a move() kernel");
+                draws.push(state.q.clone());
+                Ok(())
+            },
+        )
+        .unwrap();
+        // target(): independent normals, mu = (1, -2, 0.5), sd = (1, 3, 0.2).
+        // Slice draws are close to independent here, so 4000 of them put
+        // the mean within ~0.02 sd; the bounds are several times that.
+        let n = draws.len() as f64;
+        for (i, (mu, sd)) in [(1.0, 1.0), (-2.0, 3.0), (0.5, 0.2)]
+            .into_iter()
+            .enumerate()
+        {
+            let m = draws.iter().map(|d| d[i]).sum::<f64>() / n;
+            let v = draws.iter().map(|d| (d[i] - m).powi(2)).sum::<f64>() / (n - 1.0);
+            assert!(
+                (m - mu).abs() < 0.1 * sd,
+                "coordinate {i}: mean {m}, want {mu}"
+            );
+            assert!(
+                (v.sqrt() / sd - 1.0).abs() < 0.1,
+                "coordinate {i}: sd {}, want {sd}",
+                v.sqrt()
+            );
+        }
+    }
+
     #[test]
     fn a_file_that_does_not_check_is_rejected_up_front() {
         let e =

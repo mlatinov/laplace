@@ -51,7 +51,7 @@ param  = { fun_type ~ ident }
 // ---- statements ----------------------------------------------------------
 block = { "{" ~ stmt* ~ "}" }
 stmt  = { decl | destructure | if_stmt | for_stmt | while_stmt | return_stmt
-        | block | assign | expr_stmt }
+        | break_stmt | continue_stmt | block | assign | expr_stmt }
 
 destructure = { "(" ~ dtarget ~ ("," ~ dtarget)+ ~ ")" ~ "=" ~ expr ~ ";" }
 dtarget     = { sized_type ~ ident | ident }
@@ -62,6 +62,9 @@ if_stmt     = { kw_if ~ "(" ~ expr ~ ")" ~ stmt ~ (kw_else ~ stmt)? }
 for_stmt    = { kw_for ~ "(" ~ ident ~ kw_in ~ expr ~ ":" ~ expr ~ ")" ~ stmt }
 while_stmt  = { kw_while ~ "(" ~ expr ~ ")" ~ stmt }
 return_stmt = { kw_return ~ expr? ~ ";" }
+// Stan semantics: both act on the innermost enclosing loop only.
+break_stmt    = { kw_break ~ ";" }
+continue_stmt = { kw_continue ~ ";" }
 expr_stmt   = { expr ~ ";" }
 
 // ---- expressions (precedence climbing in parse.rs) -----------------------
@@ -115,7 +118,7 @@ ident_char = _{ ASCII_ALPHANUMERIC | "_" }
 keyword = @{
     ( "kernel" | "tuning" | "state" | "init" | "functions" | "step"
     | "int" | "real" | "vector" | "matrix" | "tuple" | "void" | "lower" | "upper"
-    | "if" | "else" | "for" | "in" | "while" | "return" ) ~ !ident_char
+    | "if" | "else" | "for" | "in" | "while" | "return" | "break" | "continue" ) ~ !ident_char
 }
 ident = @{ !keyword ~ (ASCII_ALPHA | "_") ~ ident_char* }
 
@@ -139,3 +142,5 @@ kw_for       = @{ "for" ~ !ident_char }
 kw_in        = @{ "in" ~ !ident_char }
 kw_while     = @{ "while" ~ !ident_char }
 kw_return    = @{ "return" ~ !ident_char }
+kw_break     = @{ "break" ~ !ident_char }
+kw_continue  = @{ "continue" ~ !ident_char }

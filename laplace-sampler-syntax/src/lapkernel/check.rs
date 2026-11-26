@@ -94,6 +94,9 @@ struct Checker<'r> {
     ctx: Ctx,
     fun_ret: Option<Ty>,
     uses_grad: bool,
+    /// Enclosing `for`/`while` loops at the statement being checked, for
+    /// `break` and `continue`. Function bodies start again at 0.
+    loop_depth: usize,
 }
 
 /// Check a parsed kernel. `dim` is the size of the block it will update,
@@ -114,6 +117,7 @@ pub fn check(
         ctx: Ctx::TuningDefault,
         fun_ret: None,
         uses_grad: false,
+        loop_depth: 0,
     };
     let checked = c.kernel(k);
     if c.errors.is_empty() {
@@ -628,12 +632,29 @@ impl<'r> Checker<'r> {
                 }
                 self.scopes.push(HashMap::new());
                 self.declare(var, Ty::Int, false, "loop variable", *span);
+                self.loop_depth += 1;
                 self.stmt(body);
+                self.loop_depth -= 1;
                 self.scopes.pop();
             }
             Stmt::While { cond, body, .. } => {
                 self.condition(cond);
+                self.loop_depth += 1;
                 self.stmt_in_scope(body);
+                self.loop_depth -= 1;
+            }
+            Stmt::Break(span) | Stmt::Continue(span) => {
+                if self.loop_depth == 0 {
+                    let kw = if matches!(s, Stmt::Break(_)) {
+                        "break"
+                    } else {
+                        "continue"
+                    };
+                    self.err(
+                        *span,
+                        format!("`{kw}` is only allowed inside a `for` or `while` loop"),
+                    );
+                }
             }
             Stmt::Return(e, span) => match (self.ctx, self.fun_ret.clone()) {
                 (Ctx::Function, Some(ret)) => match (e, &ret) {
@@ -1267,6 +1288,89 @@ mod tests {
     #[test]
     fn terminal_inside_a_loop() {
         let es = run(&kernel("    for (i in 1:3) {\n      move(q);\n    }"), None).unwrap_err();
+        assert!(
+            es.iter()
+                .any(|e| e.contains(":7:7: propose()/move() inside a loop")),
+            "{es:#?}"
+        );
+    }
+
+    #[test]
+    fn break_and_continue_need_a_loop() {
+        assert_eq!(
+            one_error(&kernel("    break;\n    move(q);"), None),
+            "6:5: `break` is only allowed inside a `for` or `while` loop"
+        );
+        assert_eq!(
+            one_error(&kernel("    if (lp > 0) { continue; }\n    move(q);"), None),
+            "6:19: `continue` is only allowed inside a `for` or `while` loop"
+        );
+        // After a loop ends, its body's depth no longer counts.
+        assert_eq!(
+            one_error(
+                &kernel("    while (lp > 0) { break; }\n    break;\n    move(q);"),
+                None
+            ),
+            "7:5: `break` is only allowed inside a `for` or `while` loop"
+        );
+        // A function body is not inside the caller's loop.
+        let src = "kernel k {\n  functions {\n    void f() { break; }\n  }\n  step {\n    for (i in 1:2) f();\n    move(q);\n  }\n}\n";
+        assert_eq!(
+            one_error(src, None),
+            "3:16: `break` is only allowed inside a `for` or `while` loop"
+        );
+    }
+
+    #[test]
+    fn break_and_continue_inside_loops_check() {
+        // Nested loops, `while (1)`, and inside an if or a block in a loop;
+        // in step and in functions.
+        let src = kernel(
+            "    for (i in 1:dim) {\n      for (j in 1:dim) {\n        if (j > i) break;\n        { continue; }\n      }\n      if (i == 2) continue; else break;\n    }\n    int n = 0;\n    while (1) {\n      n += 1;\n      if (n > 3) break;\n    }\n    move(q);",
+        );
+        run(&src, None).unwrap_or_else(|e| panic!("{e:#?}"));
+        let src = "kernel k {\n  functions {\n    int first_over(real x) {\n      int i = 0;\n      while (1) {\n        i += 1;\n        if (i * i > x) break;\n      }\n      return i;\n    }\n  }\n  step {\n    int n = first_over(10);\n    move(q);\n  }\n}\n";
+        run(src, None).unwrap_or_else(|e| panic!("{e:#?}"));
+    }
+
+    #[test]
+    fn break_does_not_change_the_terminal_rule() {
+        // A loop that may break is still not a terminal: the one after it is.
+        run(
+            &kernel(
+                "    for (i in 1:dim) {\n      if (q[i] > 0) break;\n    }\n    propose(q, 0);",
+            ),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{e:#?}"));
+        // ... and an if whose branches each end in one is fine around it.
+        run(
+            &kernel("    if (lp > 0) {\n      while (1) { break; }\n      move(q);\n    } else {\n      for (i in 1:2) continue;\n      propose(q, 0);\n    }"),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{e:#?}"));
+
+        // A terminal followed by `break` is still a terminal inside a loop,
+        // even in `while (1)`: the rule is about where it is, not about
+        // whether the loop runs exactly once.
+        for (step, at) in [
+            ("    while (1) {\n      propose(q, 0);\n      break;\n    }", "7:7"),
+            ("    for (i in 1:dim) {\n      if (i == 1) {\n        move(q);\n        break;\n      }\n    }", "8:9"),
+            ("    for (i in 1:2) {\n      for (j in 1:2) {\n        move(q);\n        break;\n      }\n      break;\n    }", "8:9"),
+        ] {
+            let es = run(&kernel(step), None).unwrap_err();
+            assert!(
+                es.iter().any(|e| e
+                    .contains(&format!(":{at}: propose()/move() inside a loop"))),
+                "{step}\n{es:#?}"
+            );
+        }
+        // Nor does `continue` after one, with the real terminal after the loop.
+        let es = run(
+            &kernel("    for (i in 1:2) {\n      move(q);\n      continue;\n    }\n    move(q);"),
+            None,
+        )
+        .unwrap_err();
         assert!(
             es.iter()
                 .any(|e| e.contains(":7:7: propose()/move() inside a loop")),

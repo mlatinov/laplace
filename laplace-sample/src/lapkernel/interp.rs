@@ -39,6 +39,10 @@ enum Flow {
     Normal,
     Return(Value),
     End(Outcome),
+    /// `break;`, travelling out to the innermost loop, which consumes it.
+    Break,
+    /// `continue;`, likewise.
+    Continue,
 }
 
 type Scope = HashMap<String, Value>;
@@ -346,7 +350,8 @@ impl Interp {
                     let f = self.stmt(body, scopes, ctx);
                     scopes.pop();
                     match f? {
-                        Flow::Normal => {}
+                        Flow::Normal | Flow::Continue => {}
+                        Flow::Break => break,
                         other => return Ok(other),
                     }
                 }
@@ -355,12 +360,16 @@ impl Interp {
             Stmt::While { cond, body, .. } => {
                 while self.truthy(cond, scopes, ctx)? {
                     match self.scoped(body, scopes, ctx)? {
-                        Flow::Normal => {}
+                        Flow::Normal | Flow::Continue => {}
+                        Flow::Break => break,
                         other => return Ok(other),
                     }
                 }
                 Ok(Flow::Normal)
             }
+            // The checker allows these only inside a loop, which consumes them.
+            Stmt::Break(_) => Ok(Flow::Break),
+            Stmt::Continue(_) => Ok(Flow::Continue),
             Stmt::Return(e, _) => Ok(Flow::Return(match e {
                 Some(e) => self.eval(e, scopes, ctx)?,
                 None => Value::Void,
