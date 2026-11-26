@@ -21,6 +21,9 @@ laplace = { path = ".." }
 # lookup: shared with the editor (laplace-lsp), which cannot build this
 # crate's runtime dependencies. Re-exported under the usual paths.
 laplace-sampler-syntax = { path = "../laplace-sampler-syntax" }
+# erf, erfc, lgamma and tgamma for the kernel standard library (Rust's std
+# has none). Pure Rust, and already in the tree through rand_distr.
+libm = "0.2"
 nalgebra = "0.35"
 pest = "2.9"
 pest_derive = "2.9"
