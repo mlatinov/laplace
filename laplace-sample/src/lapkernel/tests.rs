@@ -150,8 +150,9 @@ fn log_density_and_gradient_go_through_the_cache() {
     let x = [1.0, 0.0, 0.0];
     let mut g = vec![0.0; 3];
     let lp = t.log_density_gradient(&x, &mut g).unwrap();
+    // Density only: no gradient is computed or counted.
     let (out, _, grads) = call("log_density", &[v(&x)], 1);
-    assert_eq!((real(&out), grads), (lp, 1));
+    assert_eq!((real(&out), grads), (lp, 0));
     let (out, _, _) = call("log_density_grad", &[v(&x)], 1);
     let Value::Tuple(parts) = out else { panic!() };
     assert_eq!(real(&parts[0]), lp);
