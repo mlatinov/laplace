@@ -25,17 +25,6 @@ use crate::lapkernel::LapError;
 use crate::libraries::{display_path, resolve_import, KernelPackage, Project};
 use parse::{Arg, ArgValue, KExpr, LineTarget, SamplerAst};
 
-/// Settings each built-in accepts inside a `.lapsampler`. Adaptation is
-/// explicit at Level 2 (`adapt(...)`), so `adapt` and `target_accept` are
-/// not kernel settings here, except for nuts, which adapts itself.
-fn builtin_settings(b: BuiltIn) -> &'static [&'static str] {
-    match b {
-        BuiltIn::Nuts => &["step_size", "target_accept", "max_depth"],
-        BuiltIn::Rwm | BuiltIn::Mala => &["step_size"],
-        BuiltIn::Hmc => &["step_size", "steps", "jitter"],
-    }
-}
-
 /// A loaded, model-free-checked `.lapsampler` file.
 #[derive(Debug)]
 pub struct SamplerFile {
@@ -384,7 +373,7 @@ fn check_kexpr(
                          mix() makes that number random",
                     );
                 }
-                let allowed = builtin_settings(b);
+                let allowed = b.sampler_settings();
                 for a in args {
                     if !allowed.contains(&a.name.as_str()) {
                         c.err(

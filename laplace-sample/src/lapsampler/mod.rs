@@ -343,13 +343,7 @@ impl Build for SamplerFile {
 }
 
 fn builtin_source(b: BuiltIn) -> String {
-    match b {
-        BuiltIn::Nuts => include_str!("../kernels/nuts.rs"),
-        BuiltIn::Rwm => include_str!("../kernels/rwm.rs"),
-        BuiltIn::Mala => include_str!("../kernels/mala.rs"),
-        BuiltIn::Hmc => include_str!("../kernels/hmc.rs"),
-    }
-    .to_string()
+    b.source().1.to_string()
 }
 
 #[cfg(test)]

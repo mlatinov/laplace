@@ -29,7 +29,7 @@ impl Project {
         }
     }
 
-    fn lockfile(&self) -> PathBuf {
+    pub(crate) fn lockfile(&self) -> PathBuf {
         self.dir.join("laplace.lock")
     }
 }
@@ -39,7 +39,12 @@ impl Project {
 pub struct KernelPackage {
     pub name: String,
     pub version: String,
+    /// Where its files are read from: the installed copy (for a path
+    /// dependency, the cache entry it is synced into on every resolve).
     pub dir: PathBuf,
+    /// A path dependency's own directory, where its files are edited
+    /// (`None` for a registry or git package).
+    pub source_dir: Option<PathBuf>,
 }
 
 impl KernelPackage {
@@ -99,10 +104,13 @@ pub fn resolve_import(project: &Project, name: &str) -> Result<KernelPackage, St
             locked.version
         ));
     }
+    let source_dir = resolve::parse_path_source(&locked.source)
+        .and_then(|relative| project.dir.join(relative).canonicalize().ok());
     Ok(KernelPackage {
         name: name.to_string(),
         version: locked.version.clone(),
         dir,
+        source_dir,
     })
 }
 

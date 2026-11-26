@@ -1,4 +1,4 @@
-# Editor support: the `laplace_sample::editor` API
+# Editor support: the `laplace_sampler_syntax::editor` API
 
 Custom samplers are **experimental** in laplace 0.3.0.
 
@@ -93,9 +93,63 @@ block (D2). It needs the model's parameter list, which means compiling the
 model with BridgeStan. `laplace sampler check file.lapsampler --model
 model.laplace` does it on the command line.
 
+## Names: hover, completion, definitions
+
+Three functions describe the names in sampler files. Each one reads the
+table the checker uses, so it can't drift from what is checked.
+
+```rust
+use laplace_sampler_syntax::editor::{builtins, combinators, kernel_index};
+
+for b in builtins() { /* name, kind, signatures, doc, rng, needs_chain */ }
+for c in combinators() { /* name, signature, doc, settings, in_kernel_lines, example */ }
+let (kernels, problems) = kernel_index(&project, sampler_dir);
+```
+
+- **`builtins()`:** every `.lapkernel` built-in, from the registry, in the
+  checker's order.
+  - `kind` is `Value` (`q`, `lp`, `grad`, `dim`, `metric`), `Function`, or
+    `Terminal` (`propose`, `move`, which end a step).
+  - `signatures` has one entry per overload, with types:
+    `real log_density(vector[dim] x)`. A test checks each signature against
+    the type rule.
+- **`combinators()`:** `seq`, `mix`, `repeat`, `adapt` and `on`.
+  - `settings` lists the named arguments after the kernel (`adapt` takes
+    `target_accept`).
+  - `in_kernel_lines` is false for `on`: a kernel line already means
+    `on(block, kernel)`, so don't offer it in completion.
+- **`kernel_index(project, from)`:** every kernel a `.lapsampler` in
+  directory `from` can name.
+  - The kinds:
+    - the built-ins, with their `.lapsampler` settings and defaults;
+    - the kernels of each kernel package in `project`'s `laplace.lock`;
+    - the `.lapkernel` files under `project.dir` when it has a
+      `laplace.lock`, skipping hidden directories and `target`. Without a
+      lock, only the nearby ones: those directly in `project.dir` (and in
+      `from`) and under its `kernels/`, so a sampler saved in `~` doesn't
+      scan the home directory.
+  - `name` is what the sampler writes: `mala`, `langevin::mala`, or
+    `./kernels/mine.lapkernel`, relative to `from`.
+  - `file` is the `.lapkernel` to open. For a path dependency, it is the
+    file in the package's own directory, not the cache copy that each
+    resolve overwrites. A built-in has no `.lapkernel`;
+    `BuiltIn::source()` gives its Rust implementation.
+  - `settings` are a built-in's settings or a kernel's tuning values, each
+    with its declaration, default, `@adapt` tag and `//@param` text.
+    `ends_in` lists the terminals the step can end in.
+  - `doc` is the text `laplace sampler doc` prints.
+  - A kernel that does not check has `error` set. A package that does not
+    resolve isn't listed; its message is in `problems`.
+  - Resolving packages syncs path dependencies into the cache, as
+    `check_lapsampler` does.
+
 ## Stability
 
-These two functions, `Diagnostic`, `Severity` and `Project` are the
-supported surface. Everything else in `laplace_sample` is internal and may
-change. Message wording may change; positions and severities are tested
+The supported surface:
+
+- `check_lapkernel` and `check_lapsampler`, with `Diagnostic`, `Severity`
+  and `Project`;
+- `builtins`, `combinators` and `kernel_index`, with their types.
+
+Everything else is internal and may change. Message wording may change; positions and severities are tested
 (`laplace-sampler-syntax/src/editor.rs`).

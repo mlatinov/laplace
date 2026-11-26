@@ -38,6 +38,85 @@ impl BuiltIn {
             })
     }
 
+    /// Settings it accepts inside a `.lapsampler`. Adaptation is explicit
+    /// there (`adapt(...)`), so `adapt` and `target_accept` are not kernel
+    /// settings, except for nuts, which adapts itself.
+    pub fn sampler_settings(self) -> &'static [&'static str] {
+        match self {
+            BuiltIn::Nuts => &["step_size", "target_accept", "max_depth"],
+            BuiltIn::Rwm | BuiltIn::Mala => &["step_size"],
+            BuiltIn::Hmc => &["step_size", "steps", "jitter"],
+        }
+    }
+
+    /// One line: what it is (from the first line of its implementation's
+    /// module doc).
+    pub fn brief(self) -> &'static str {
+        match self {
+            BuiltIn::Nuts => {
+                "the No-U-Turn sampler (upstream nuts-rs), with its own warmup adaptation"
+            }
+            BuiltIn::Rwm => "random-walk Metropolis with a diagonal metric",
+            BuiltIn::Mala => "Metropolis-adjusted Langevin algorithm with a diagonal metric",
+            BuiltIn::Hmc => {
+                "static Hamiltonian Monte Carlo: leapfrog with a diagonal metric and no U-turn \
+                 criterion, then a Metropolis correction"
+            }
+        }
+    }
+
+    /// How it adapts in a `.lapsampler`.
+    pub fn adaptation(self) -> &'static str {
+        match self {
+            BuiltIn::Nuts => "adapts itself (nuts-rs's warmup adaptation)",
+            BuiltIn::Rwm => "adapt(rwm()) tunes step size and metric (target 0.234)",
+            BuiltIn::Mala => "adapt(mala()) tunes step size and metric (target 0.574)",
+            BuiltIn::Hmc => "adapt(hmc()) tunes step size and metric (target 0.8)",
+        }
+    }
+
+    /// Its line in `laplace sampler list`.
+    pub fn line(self) -> String {
+        format!(
+            "  {:<6} settings: {}; {}",
+            self.name(),
+            self.sampler_settings().join(", "),
+            self.adaptation()
+        )
+    }
+
+    /// What `laplace sampler doc <name>` prints.
+    pub fn doc(self) -> String {
+        format!(
+            "{} is a built-in kernel; `laplace sampler list` shows its settings.\n{}",
+            self.name(),
+            self.line()
+        )
+    }
+
+    /// Its implementation: the path in the laplace repository, and the
+    /// source (provenance hashes it; an editor can show it).
+    pub fn source(self) -> (&'static str, &'static str) {
+        match self {
+            BuiltIn::Nuts => (
+                "laplace-sample/src/kernels/nuts.rs",
+                include_str!("../../laplace-sample/src/kernels/nuts.rs"),
+            ),
+            BuiltIn::Rwm => (
+                "laplace-sample/src/kernels/rwm.rs",
+                include_str!("../../laplace-sample/src/kernels/rwm.rs"),
+            ),
+            BuiltIn::Mala => (
+                "laplace-sample/src/kernels/mala.rs",
+                include_str!("../../laplace-sample/src/kernels/mala.rs"),
+            ),
+            BuiltIn::Hmc => (
+                "laplace-sample/src/kernels/hmc.rs",
+                include_str!("../../laplace-sample/src/kernels/hmc.rs"),
+            ),
+        }
+    }
+
     /// `--set` keys and their defaults, in the order they are documented.
     pub fn defaults(self) -> Vec<(&'static str, &'static str)> {
         match self {

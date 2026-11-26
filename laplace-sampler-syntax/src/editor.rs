@@ -1,6 +1,8 @@
 //! Library API for editor support: parse and check `.lapkernel` and
 //! `.lapsampler` source text and get diagnostics back, without BridgeStan,
-//! a C++ toolchain or a compiled model.
+//! a C++ toolchain or a compiled model. Also what an editor shows about
+//! names ([`builtins`], [`combinators`], [`kernel_index`], from
+//! `crate::symbols`).
 //!
 //! Both functions take the text as the editor holds it (it need not be
 //! saved) and never touch a model. They run exactly the checks
@@ -23,6 +25,10 @@ use crate::lapkernel::builtins::Registry;
 use crate::lapkernel::{check, parse, LapError};
 use crate::lapsampler::SamplerFile;
 pub use crate::libraries::Project;
+pub use crate::symbols::{
+    builtins, combinators, kernel_index, Builtin, BuiltinKind, Combinator, KernelEntry,
+    KernelOrigin, KernelSetting,
+};
 
 /// How bad a diagnostic is. Every diagnostic the checkers produce today is
 /// an [`Severity::Error`] (the file would be refused by `laplace sample`);
