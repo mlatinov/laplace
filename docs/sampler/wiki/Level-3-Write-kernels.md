@@ -52,8 +52,12 @@ kernel mala {
 - **Types:** `int`, `real`, `vector[n]`, `matrix[r, c]`, `tuple(...)`, with
   optional `<lower=..., upper=...>` bounds.
 - **Statements:** declarations, assignments (`=`, `+=`, ...), `if`/`else`,
-  `for (i in 1:n)`, `while`, `return`, and tuple destructuring
-  `(real a, vector[dim] b) = f(...);`.
+  `for (i in 1:n)`, `while`, `break`, `continue`, `return`, and tuple
+  destructuring `(real a, vector[dim] b) = f(...);`. As in Stan, `break`
+  and `continue` act on the innermost enclosing loop only, and are an error
+  outside a loop (a function body does not count as inside its caller's
+  loop). `while (1) { ... if (done) break; }` is the idiom for "repeat
+  until".
 - **Operators:** `+ - * / % ^`, the elementwise `.*` and `./`,
   comparisons, `&&`, `||` and `!`. Indexing is 1-based, as in Stan:
   `v[i]` and `m[i, j]`, one element at a time. There are no arrays and no
@@ -95,6 +99,75 @@ Evaluations are cached by position, so evaluating the point you then
 propose costs nothing extra. A kernel that never reads `grad` never pays
 for a gradient: its evaluations are density-only and are counted in the
 CSV's `n_logp__`, not `n_grad__`.
+
+## A loop that runs until it is done: slice sampling
+
+A slice sampler (Neal 2003) needs loops whose length is not known in
+advance: step a bracket out until both ends leave the slice, then draw
+inside it, shrinking it on every miss, until a draw lands in the slice.
+This kernel updates one coordinate at a time and shows both forms of
+early exit: `while (1)` with `break` to stop stepping out, and
+`continue` to try again after a rejected draw.
+
+```stan
+//@laplace
+//@brief Coordinate-wise slice sampler: stepping out, then shrinkage
+//@param w Initial bracket width, in the units of the unconstrained parameters
+kernel slice {
+  tuning {
+    real<lower=0> w = 1;
+  }
+  step {
+    vector[dim] x = q;
+    real lp_x = lp;
+    for (i in 1:dim) {
+      real x0 = x[i];
+      // The slice is every point whose log density is above log_y.
+      real log_y = lp_x - exponential_rng(1);
+      real lo = x0 - w * uniform_rng(0, 1);
+      real hi = lo + w;
+
+      // Step out: widen each end until it leaves the slice.
+      while (1) {
+        x[i] = lo;
+        if (log_density(x) <= log_y) break;
+        lo -= w;
+      }
+      while (1) {
+        x[i] = hi;
+        if (log_density(x) <= log_y) break;
+        hi += w;
+      }
+
+      // Shrink: draw in (lo, hi). A miss pulls the end on its side of x0 in
+      // and tries again; a hit is the new value of coordinate i.
+      while (1) {
+        x[i] = uniform_rng(lo, hi);
+        lp_x = log_density(x);
+        if (lp_x <= log_y) {
+          if (x[i] < x0) lo = x[i]; else hi = x[i];
+          continue;
+        }
+        break;
+      }
+    }
+    move(x);
+  }
+}
+```
+
+Every shrinkage loop ends, because `x0` itself is in the slice and the
+bracket closes in on it. The step ends in `move(x)`: the slice update
+leaves the target invariant by itself, so there is nothing to accept or
+reject. This is the kind of kernel the [Rust advice](#when-to-write-rust-instead)
+below is about: it evaluates the density several times per coordinate.
+
+**The terminal stays outside the loop.** `propose()` and `move()` may not
+appear inside a `for` or `while`, and `break` does not change that, even
+`while (1) { move(x); break; }`, which would run exactly once. The checker
+judges where a terminal is written, not how many times a loop happens to
+run. Leave the loop with `break`, then end the step after it, as `slice`
+does.
 
 ## Doc comments
 

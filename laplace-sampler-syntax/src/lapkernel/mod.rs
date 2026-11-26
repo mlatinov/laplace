@@ -213,6 +213,63 @@ kernel everything {
     }
 
     #[test]
+    fn break_and_continue() {
+        let k = ok("kernel k {
+  step {
+    for (i in 1:3) {
+      for (j in 1:3) {
+        if (j > i) break;
+        continue;
+      }
+    }
+    while (1) { break; }
+    move(q);
+  }
+}
+");
+        let s = &k.step.as_ref().unwrap().stmts;
+        let Stmt::For { body: outer, .. } = &s[0] else {
+            panic!("{:?}", s[0])
+        };
+        let Stmt::Block(outer) = outer.as_ref() else {
+            panic!()
+        };
+        let Stmt::For { body: inner, .. } = &outer.stmts[0] else {
+            panic!()
+        };
+        let Stmt::Block(inner) = inner.as_ref() else {
+            panic!()
+        };
+        let Stmt::If { then, .. } = &inner.stmts[0] else {
+            panic!()
+        };
+        assert_eq!(**then, Stmt::Break(Span { line: 5, col: 20 }));
+        assert_eq!(inner.stmts[1], Stmt::Continue(Span { line: 6, col: 9 }));
+        let Stmt::While { body, .. } = &s[1] else {
+            panic!()
+        };
+        let Stmt::Block(b) = body.as_ref() else {
+            panic!()
+        };
+        assert_eq!(b.stmts, vec![Stmt::Break(Span { line: 9, col: 17 })]);
+    }
+
+    #[test]
+    fn break_and_continue_are_keywords() {
+        for kw in ["break", "continue"] {
+            let e = err(&format!(
+                "kernel k {{\n  step {{\n    real {kw} = 1;\n  }}\n}}\n"
+            ));
+            assert!(e.starts_with("t.lapkernel:3:10: syntax error"), "{e}");
+        }
+        // ... but only whole words: `breaker` is an ordinary name.
+        ok("kernel k { step { real breaker = 1; real continued = breaker; move(q); } }");
+        // and they take no argument, unlike `return`.
+        let e = err("kernel k {\n  step {\n    while (1) { break 2; }\n  }\n}\n");
+        assert!(e.starts_with("t.lapkernel:3:17: syntax error"), "{e}");
+    }
+
+    #[test]
     fn spans_point_at_the_construct() {
         let k = ok("kernel k {\n  step {\n    real x = 1;\n      move(q);\n  }\n}\n");
         let s = &k.step.as_ref().unwrap().stmts;

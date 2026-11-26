@@ -168,6 +168,10 @@ pub enum Stmt {
         span: Span,
     },
     Return(Option<Expr>, Span),
+    /// `break;`: leaves the innermost enclosing loop.
+    Break(Span),
+    /// `continue;`: starts the next iteration of the innermost enclosing loop.
+    Continue(Span),
     Block(Block),
     Expr(Expr),
 }
@@ -181,7 +185,9 @@ impl Stmt {
             | Stmt::If { span, .. }
             | Stmt::For { span, .. }
             | Stmt::While { span, .. }
-            | Stmt::Return(_, span) => *span,
+            | Stmt::Return(_, span)
+            | Stmt::Break(span)
+            | Stmt::Continue(span) => *span,
             Stmt::Block(b) => b.span,
             Stmt::Expr(e) => e.span,
         }

@@ -439,6 +439,125 @@ fn control_flow_functions_and_tuples() {
 }
 
 #[test]
+fn break_leaves_only_the_innermost_loop() {
+    let (vars, _) = run(
+        "kernel k {
+           state { int n; int m; int after; }
+           step {
+             n = 0; m = 0; after = 0;
+             for (i in 1:4) {
+               for (j in 1:10) {
+                 if (j > i) break;
+                 n += 1;
+               }
+               m += 1;           // the outer loop keeps going
+             }
+             for (i in 1:3) {
+               after += 1;
+               { break; }        // from inside a nested block
+               after += 100;     // never runs
+             }
+             move(q);
+           } }",
+        1,
+        1,
+    );
+    // n = 1 + 2 + 3 + 4; every outer iteration ran.
+    assert_eq!(vars, vec![Value::Int(10), Value::Int(4), Value::Int(1)]);
+}
+
+#[test]
+fn continue_skips_to_the_next_iteration_of_the_innermost_loop() {
+    let (vars, _) = run(
+        "kernel k {
+           state { int odd; int rows; int w; }
+           step {
+             odd = 0; rows = 0; w = 0;
+             for (i in 1:3) {
+               for (j in 1:5) {
+                 if (j % 2 == 0) continue;
+                 odd += 1;
+               }
+               rows += 1;
+             }
+             while (w < 10) {
+               w += 1;
+               if (w > 0) continue;
+               w = 1000;       // never runs; the condition is still re-tested
+             }
+             move(q);
+           } }",
+        1,
+        1,
+    );
+    assert_eq!(vars, vec![Value::Int(9), Value::Int(3), Value::Int(10)]);
+}
+
+#[test]
+fn while_one_runs_until_break() {
+    let (vars, _) = run(
+        "kernel k {
+           state { int k; int tries; int root; }
+           functions {
+             int first_over(real x) {
+               int i = 0;
+               while (1) {
+                 i += 1;
+                 if (i * i > x) break;
+               }
+               return i;
+             }
+           }
+           step {
+             k = 0;
+             while (1) {
+               k += 1;
+               if (k < 7) continue;
+               break;
+             }
+             // Rejection sampling, the shape the slice sampler uses.
+             tries = 0;
+             while (1) {
+               tries += 1;
+               if (uniform_rng(0, 1) < 0.25) break;
+             }
+             root = first_over(50);
+             move(q);
+           } }",
+        1,
+        11,
+    );
+    assert_eq!(vars[0], Value::Int(7));
+    assert_eq!(vars[2], Value::Int(8));
+    // `tries` is the index of the first uniform below 0.25 on this stream.
+    let mut r = rng(11);
+    let expected = (1..).find(|_| r.random::<f64>() < 0.25).unwrap();
+    assert_eq!(vars[1], Value::Int(expected));
+}
+
+#[test]
+fn break_in_a_loop_before_the_terminal() {
+    // A loop that breaks out early, then the step's one terminal.
+    let (_, out) = run(
+        "kernel k { step {
+           vector[dim] x = q;
+           for (i in 1:dim) {
+             if (x[i] < 0) break;
+             x[i] = 10;
+           }
+           move(x);
+         } }",
+        1,
+        1,
+    );
+    // q = (0.2, 0.3, -0.4): the third coordinate stops the loop.
+    let Outcome::Move { q_new } = &out[0] else {
+        panic!("{out:?}")
+    };
+    assert_eq!(q_new.as_slice(), &[10.0, 10.0, -0.4]);
+}
+
+#[test]
 fn short_circuit_skips_the_right_hand_side() {
     // The right-hand side would draw a random number; && must not evaluate it.
     let (vars, _) = run(

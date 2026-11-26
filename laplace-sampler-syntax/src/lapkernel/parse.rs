@@ -330,6 +330,8 @@ fn build_stmt(p: Pair<Rule>) -> Stmt {
                 .map(build_expr),
             sp,
         ),
+        Rule::break_stmt => Stmt::Break(sp),
+        Rule::continue_stmt => Stmt::Continue(sp),
         Rule::assign => {
             let mut it = inner.into_inner();
             let lv = it.next().expect("lvalue");
