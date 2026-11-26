@@ -85,7 +85,7 @@ kernel mala {
 | `leapfrog(q, p, eps, steps, m)` | `steps` leapfrog steps with diagonal inverse metric `m`: `(q, p, lp, grad)` |
 | `std_normal_rng()`, `std_normal_rng(n)`, `normal_rng(mu, sigma)`, `uniform_rng(a, b)` | random numbers from the chain's stream |
 | `normal_lpdf(y \| mu, sigma)`, `std_normal_lpdf(y)` | log densities, with constants |
-| `exp`, `log`, `sqrt`, `log1p_exp`, `inv_logit`, `log_sum_exp`, `fmax`, `norm2`, `softmax`, ... | math and matrices: about 40 functions, elementwise on vectors where that makes sense, numerically safe forms only. Full list: [`docs/sampler/kernel-functions.md`](../kernel-functions.md) |
+| `exp`, `log`, `sqrt`, `log1p_exp`, `inv_logit`, `log_sum_exp`, `fmax`, `norm2`, `softmax`, ... | math, linear algebra, about 25 random-number generators and 25 densities: about 180 functions in all, Stan's names and meanings, elementwise on vectors where that makes sense, numerically safe forms only. Full list: [`docs/sampler/kernel-functions.md`](../kernel-functions.md) |
 
 `laplace sampler doc <kernel>` and the registry in
 `laplace-sample/src/lapkernel/builtins.rs` are the full reference. Each

@@ -854,7 +854,10 @@ impl<'r> Checker<'r> {
     fn call(&mut self, name: &str, args: &[Expr], conditional: bool, span: Span) -> Option<Ty> {
         let tys: Vec<Option<Ty>> = args.iter().map(|a| self.expr(a)).collect();
         let consts: Vec<Option<i64>> = args.iter().map(|a| self.const_int(a)).collect();
-        let is_lpdf = name.ends_with("_lpdf");
+        // Densities, mass functions and log CDFs take the outcome before `|`.
+        let is_lpdf = ["_lpdf", "_lpmf", "_lcdf", "_lccdf"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix));
         if conditional && !is_lpdf {
             self.err(
                 span,
@@ -1133,7 +1136,7 @@ mod tests {
         );
         assert_eq!(
             one_error(&kernel("    real s = sum(1.5);\n    move(q);"), None),
-            "6:14: sum: expected sum(vector v), got (real)"
+            "6:14: sum: expected sum(vector v) or sum(matrix m), got (real)"
         );
     }
 
@@ -1215,7 +1218,7 @@ mod tests {
         }
         assert_eq!(
             one_error(&kernel("    real a = mean(1);\n    move(q);"), None),
-            "6:14: mean: expected mean(vector x), got (int)"
+            "6:14: mean: expected mean(vector x) or mean(matrix x), got (int)"
         );
     }
 

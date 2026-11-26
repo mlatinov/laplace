@@ -21,6 +21,8 @@
 
 use super::types::{Size, Ty};
 
+mod stdlib;
+
 /// Type rule: argument types, their values when they are compile-time
 /// integer constants, and `dim` when known.
 pub type SigFn = fn(&[Ty], &[Option<i64>], Option<usize>) -> Result<Ty, String>;
@@ -250,14 +252,24 @@ impl Registry {
         });
         entries.push(Entry {
             name: "uniform_rng",
-            signatures: &["real uniform_rng(real a, real b)"],
-            doc: "a + (b - a) * u with u uniform on [0, 1)",
-            rng: "one uniform (rng.random::<f64>())",
+            signatures: &[
+                "real uniform_rng(real a, real b)",
+                "vector uniform_rng(vector a, vector b)",
+            ],
+            doc: "a + (b - a) * u with u uniform on [0, 1); a vector if a or b is a vector \
+                  (a real broadcasts)",
+            rng: "one uniform (rng.random::<f64>()) per element, in index order",
             needs_chain: true,
             kind: Kind::Function {
                 sig: |a, _, _| {
-                    expect(a, &[Ty::Real, Ty::Real], "uniform_rng(real a, real b)")?;
-                    Ok(Ty::Real)
+                    if a.len() != 2
+                        || !a
+                            .iter()
+                            .all(|t| t.is_scalar() || matches!(t, Ty::Vector(_)))
+                    {
+                        return Err(bad_args("uniform_rng(real|vector a, real|vector b)", a));
+                    }
+                    broadcast_type(a)
                 },
                 terminal: false,
             },
@@ -323,14 +335,14 @@ impl Registry {
         });
         entries.push(Entry {
             name: "sum",
-            signatures: &["real sum(vector v)"],
+            signatures: &["real sum(vector v)", "real sum(matrix m)"],
             doc: "sum of the elements",
             rng: "none",
             needs_chain: false,
             kind: Kind::Function {
                 sig: |a, _, _| match a {
-                    [Ty::Vector(_)] => Ok(Ty::Real),
-                    _ => Err(bad_args("sum(vector v)", a)),
+                    [Ty::Vector(_) | Ty::Matrix(..)] => Ok(Ty::Real),
+                    _ => Err(bad_args("sum(vector v) or sum(matrix m)", a)),
                 },
                 terminal: false,
             },
@@ -356,47 +368,47 @@ impl Registry {
         type Pure = (&'static str, &'static [&'static str], &'static str, SigFn);
         let pure: &[Pure] = &[
             // ---- elementwise, one argument --------------------------------
-            ("exp", &["real exp(real x)", "vector exp(vector x)"],
-                "e^x, elementwise for vectors", unary_math_sig),
-            ("log", &["real log(real x)", "vector log(vector x)"],
-                "natural logarithm, elementwise for vectors. NaN for x < 0, -inf at 0", unary_math_sig),
-            ("sqrt", &["real sqrt(real x)", "vector sqrt(vector x)"],
-                "square root, elementwise for vectors. NaN for x < 0", unary_math_sig),
-            ("square", &["real square(real x)", "vector square(vector x)"],
-                "x * x, elementwise for vectors", unary_math_sig),
-            ("abs", &["real abs(real x)", "vector abs(vector x)"],
-                "absolute value, elementwise for vectors", unary_math_sig),
-            ("inv", &["real inv(real x)", "vector inv(vector x)"],
-                "1 / x, elementwise for vectors", unary_math_sig),
-            ("inv_sqrt", &["real inv_sqrt(real x)", "vector inv_sqrt(vector x)"],
-                "1 / sqrt(x), elementwise for vectors", unary_math_sig),
-            ("inv_square", &["real inv_square(real x)", "vector inv_square(vector x)"],
-                "1 / x^2, elementwise for vectors", unary_math_sig),
-            ("expm1", &["real expm1(real x)", "vector expm1(vector x)"],
-                "exp(x) - 1, accurate for x near 0, elementwise for vectors", unary_math_sig),
-            ("log1p", &["real log1p(real x)", "vector log1p(vector x)"],
-                "log(1 + x), accurate for x near 0, elementwise for vectors. NaN for x < -1", unary_math_sig),
-            ("log1m", &["real log1m(real x)", "vector log1m(vector x)"],
-                "log(1 - x), accurate for x near 0, elementwise for vectors. NaN for x > 1", unary_math_sig),
-            ("log1p_exp", &["real log1p_exp(real x)", "vector log1p_exp(vector x)"],
+            ("exp", &["real exp(real x)", "vector exp(vector x)", "matrix exp(matrix x)"],
+                "e^x, elementwise for vectors and matrices", unary_math_sig),
+            ("log", &["real log(real x)", "vector log(vector x)", "matrix log(matrix x)"],
+                "natural logarithm, elementwise for vectors and matrices. NaN for x < 0, -inf at 0", unary_math_sig),
+            ("sqrt", &["real sqrt(real x)", "vector sqrt(vector x)", "matrix sqrt(matrix x)"],
+                "square root, elementwise for vectors and matrices. NaN for x < 0", unary_math_sig),
+            ("square", &["real square(real x)", "vector square(vector x)", "matrix square(matrix x)"],
+                "x * x, elementwise for vectors and matrices", unary_math_sig),
+            ("abs", &["real abs(real x)", "vector abs(vector x)", "matrix abs(matrix x)"],
+                "absolute value, elementwise for vectors and matrices", unary_math_sig),
+            ("inv", &["real inv(real x)", "vector inv(vector x)", "matrix inv(matrix x)"],
+                "1 / x, elementwise for vectors and matrices", unary_math_sig),
+            ("inv_sqrt", &["real inv_sqrt(real x)", "vector inv_sqrt(vector x)", "matrix inv_sqrt(matrix x)"],
+                "1 / sqrt(x), elementwise for vectors and matrices", unary_math_sig),
+            ("inv_square", &["real inv_square(real x)", "vector inv_square(vector x)", "matrix inv_square(matrix x)"],
+                "1 / x^2, elementwise for vectors and matrices", unary_math_sig),
+            ("expm1", &["real expm1(real x)", "vector expm1(vector x)", "matrix expm1(matrix x)"],
+                "exp(x) - 1, accurate for x near 0, elementwise for vectors and matrices", unary_math_sig),
+            ("log1p", &["real log1p(real x)", "vector log1p(vector x)", "matrix log1p(matrix x)"],
+                "log(1 + x), accurate for x near 0, elementwise for vectors and matrices. NaN for x < -1", unary_math_sig),
+            ("log1m", &["real log1m(real x)", "vector log1m(vector x)", "matrix log1m(matrix x)"],
+                "log(1 - x), accurate for x near 0, elementwise for vectors and matrices. NaN for x > 1", unary_math_sig),
+            ("log1p_exp", &["real log1p_exp(real x)", "vector log1p_exp(vector x)", "matrix log1p_exp(matrix x)"],
                 "log(1 + exp(x)) (softplus) without overflow: x + log1p(exp(-x)) for x > 0, \
-                 elementwise for vectors", unary_math_sig),
-            ("log1m_exp", &["real log1m_exp(real x)", "vector log1m_exp(vector x)"],
+                 elementwise for vectors and matrices", unary_math_sig),
+            ("log1m_exp", &["real log1m_exp(real x)", "vector log1m_exp(vector x)", "matrix log1m_exp(matrix x)"],
                 "log(1 - exp(x)) for x <= 0, accurate at both ends (log(-expm1(x)) near 0, \
-                 log1p(-exp(x)) below -log 2), elementwise for vectors. NaN for x > 0, -inf at 0", unary_math_sig),
-            ("inv_logit", &["real inv_logit(real x)", "vector inv_logit(vector x)"],
-                "1 / (1 + exp(-x)) without overflow for large |x|, elementwise for vectors", unary_math_sig),
-            ("logit", &["real logit(real p)", "vector logit(vector p)"],
-                "log(p / (1 - p)), computed as log(p) - log1m(p), elementwise for vectors. \
+                 log1p(-exp(x)) below -log 2), elementwise for vectors and matrices. NaN for x > 0, -inf at 0", unary_math_sig),
+            ("inv_logit", &["real inv_logit(real x)", "vector inv_logit(vector x)", "matrix inv_logit(matrix x)"],
+                "1 / (1 + exp(-x)) without overflow for large |x|, elementwise for vectors and matrices", unary_math_sig),
+            ("logit", &["real logit(real p)", "vector logit(vector p)", "matrix logit(matrix p)"],
+                "log(p / (1 - p)), computed as log(p) - log1m(p), elementwise for vectors and matrices. \
                  NaN outside [0, 1]", unary_math_sig),
-            ("log_inv_logit", &["real log_inv_logit(real x)", "vector log_inv_logit(vector x)"],
-                "log(inv_logit(x)) = -log1p_exp(-x), finite for very negative x, elementwise for vectors",
+            ("log_inv_logit", &["real log_inv_logit(real x)", "vector log_inv_logit(vector x)", "matrix log_inv_logit(matrix x)"],
+                "log(inv_logit(x)) = -log1p_exp(-x), finite for very negative x, elementwise for vectors and matrices",
                 unary_math_sig),
-            ("log1m_inv_logit", &["real log1m_inv_logit(real x)", "vector log1m_inv_logit(vector x)"],
-                "log(1 - inv_logit(x)) = -log1p_exp(x), finite for very positive x, elementwise for vectors",
+            ("log1m_inv_logit", &["real log1m_inv_logit(real x)", "vector log1m_inv_logit(vector x)", "matrix log1m_inv_logit(matrix x)"],
+                "log(1 - inv_logit(x)) = -log1p_exp(x), finite for very positive x, elementwise for vectors and matrices",
                 unary_math_sig),
-            ("tanh", &["real tanh(real x)", "vector tanh(vector x)"],
-                "hyperbolic tangent, elementwise for vectors", unary_math_sig),
+            ("tanh", &["real tanh(real x)", "vector tanh(vector x)", "matrix tanh(matrix x)"],
+                "hyperbolic tangent, elementwise for vectors and matrices", unary_math_sig),
             // ---- elementwise, two arguments (a real broadcasts) ------------
             ("fmin", &["real fmin(real x, real y)", "vector fmin(real|vector x, vector y)",
                        "vector fmin(vector x, real y)"],
@@ -410,14 +422,14 @@ impl Registry {
                 "log(exp(a) - exp(b)) for a >= b, as a + log1m_exp(b - a), elementwise. \
                  -inf when a == b, NaN when b > a", binary_math_sig),
             // ---- reductions --------------------------------------------------
-            ("log_sum_exp", &["real log_sum_exp(real a, real b)", "real log_sum_exp(vector x)"],
+            ("log_sum_exp", &["real log_sum_exp(real a, real b)", "real log_sum_exp(vector x)", "real log_sum_exp(matrix x)"],
                 "log(exp(a) + exp(b)), or log(sum(exp(x))), shifted by the maximum so it never \
                  overflows; -inf for an empty vector or all -inf", log_sum_exp_sig),
-            ("max", &["real max(real a, real b)", "real max(vector x)"],
+            ("max", &["real max(real a, real b)", "real max(vector x)", "real max(matrix x)"],
                 "the larger of a and b, or the largest element (-inf for an empty vector)", min_max_sig),
-            ("min", &["real min(real a, real b)", "real min(vector x)"],
+            ("min", &["real min(real a, real b)", "real min(vector x)", "real min(matrix x)"],
                 "the smaller of a and b, or the smallest element (inf for an empty vector)", min_max_sig),
-            ("mean", &["real mean(vector x)"],
+            ("mean", &["real mean(vector x)", "real mean(matrix x)"],
                 "sum(x) / size; NaN for an empty vector", reduce_sig),
             ("dot_self", &["real dot_self(vector x)"],
                 "sum of x[i]^2", reduce_sig),
@@ -477,6 +489,8 @@ impl Registry {
             });
         }
 
+        stdlib::push(&mut entries);
+
         Registry { entries }
     }
 }
@@ -515,7 +529,8 @@ fn unary_math_sig(a: &[Ty], _: &[Option<i64>], _: Option<usize>) -> Result<Ty, S
     match a {
         [t] if t.is_scalar() => Ok(Ty::Real),
         [Ty::Vector(n)] => Ok(Ty::Vector(*n)),
-        _ => Err(bad_args("f(real x) or f(vector x)", a)),
+        [Ty::Matrix(r, c)] => Ok(Ty::Matrix(*r, *c)),
+        _ => Err(bad_args("f(real x), f(vector x) or f(matrix x)", a)),
     }
 }
 
@@ -536,17 +551,17 @@ fn binary_math_sig(a: &[Ty], _: &[Option<i64>], _: Option<usize>) -> Result<Ty, 
 /// `f(vector x)` -> real.
 fn reduce_sig(a: &[Ty], _: &[Option<i64>], _: Option<usize>) -> Result<Ty, String> {
     match a {
-        [Ty::Vector(_)] => Ok(Ty::Real),
-        _ => Err(bad_args("f(vector x)", a)),
+        [Ty::Vector(_) | Ty::Matrix(..)] => Ok(Ty::Real),
+        _ => Err(bad_args("f(vector x) or f(matrix x)", a)),
     }
 }
 
 /// `f(real a, real b)` or `f(vector x)` -> real.
 fn pair_or_reduce_sig(a: &[Ty]) -> Result<Ty, String> {
     match a {
-        [Ty::Vector(_)] => Ok(Ty::Real),
+        [Ty::Vector(_) | Ty::Matrix(..)] => Ok(Ty::Real),
         [x, y] if x.is_scalar() && y.is_scalar() => Ok(Ty::Real),
-        _ => Err(bad_args("f(real a, real b) or f(vector x)", a)),
+        _ => Err(bad_args("f(real a, real b), f(vector x) or f(matrix x)", a)),
     }
 }
 

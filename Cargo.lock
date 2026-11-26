@@ -672,6 +672,7 @@ dependencies = [
  "clap",
  "laplace",
  "laplace-sampler-syntax",
+ "libm",
  "nalgebra",
  "nuts-rs",
  "pest",

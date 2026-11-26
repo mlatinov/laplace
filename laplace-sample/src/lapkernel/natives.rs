@@ -18,6 +18,8 @@ use super::types::Value;
 use crate::kernel::ChainRng;
 use crate::state::{ChainState, Evaluator};
 
+mod stdlib;
+
 /// What a built-in may touch when it runs. Outside a running chain (tuning
 /// defaults are evaluated before any chain exists) the chain parts are
 /// `None`, and the checker only lets chain-free entries appear there.
@@ -173,9 +175,17 @@ impl Natives {
         entries.push((
             "uniform_rng",
             Native::Function(|c, a| {
-                let (lo, hi) = (real_arg(&a[0])?, real_arg(&a[1])?);
-                let u: f64 = c.rng()?.random();
-                Ok(Value::Real(lo + (hi - lo) * u))
+                let n = broadcast_len(a)?;
+                let rng = c.rng()?;
+                let mut draw = |i: usize| {
+                    let (lo, hi) = (elem(&a[0], i), elem(&a[1], i));
+                    let u: f64 = rng.random();
+                    lo + (hi - lo) * u
+                };
+                match n {
+                    None => Ok(Value::Real(draw(0))),
+                    Some(n) => Ok(Value::Vector(DVector::from_iterator(n, (0..n).map(draw)))),
+                }
             }),
         ));
 
@@ -188,7 +198,7 @@ impl Natives {
                 for i in 0..n {
                     let sigma = elem(&a[2], i);
                     if sigma.is_nan() || sigma <= 0.0 {
-                        return Err(format!("normal_lpdf: sigma must be positive, got {sigma}"));
+                        return Err(format!("sigma must be positive, got {sigma}"));
                     }
                     let z = (elem(&a[0], i) - elem(&a[1], i)) / sigma;
                     s += -0.5 * z * z - sigma.ln() - HALF_LN_2PI;
@@ -224,7 +234,7 @@ impl Natives {
         ));
         entries.push((
             "sum",
-            Native::Function(|_, a| Ok(Value::Real(vec_arg(&a[0])?.iter().sum()))),
+            Native::Function(|_, a| Ok(Value::Real(elems(&a[0])?.iter().sum()))),
         ));
         entries.push((
             "rep_vector",
@@ -263,14 +273,14 @@ impl Natives {
             ("log_diff_exp", |_, a| binary_math(a, log_diff_exp)),
             // ---- reductions --------------------------------------------------
             ("log_sum_exp", |_, a| match a {
-                [x] => Ok(Value::Real(log_sum_exp(vec_arg(x)?.as_slice()))),
+                [x] => Ok(Value::Real(log_sum_exp(elems(x)?))),
                 [x, y] => Ok(Value::Real(log_sum_exp(&[real_arg(x)?, real_arg(y)?]))),
                 _ => Err("log_sum_exp: expected one vector or two reals".into()),
             }),
             ("max", |_, a| pair_or_fold(a, f64::NEG_INFINITY, f64::max)),
             ("min", |_, a| pair_or_fold(a, f64::INFINITY, f64::min)),
             ("mean", |_, a| {
-                let x = vec_arg(&a[0])?;
+                let x = elems(&a[0])?;
                 Ok(Value::Real(x.iter().sum::<f64>() / x.len() as f64))
             }),
             ("dot_self", |_, a| {
@@ -359,6 +369,7 @@ impl Natives {
         for &(name, call) in pure {
             entries.push((name, Native::Function(call)));
         }
+        stdlib::push(&mut entries);
 
         Natives { entries }
     }
@@ -453,9 +464,9 @@ fn binary_math(a: &[Value], f: fn(f64, f64) -> f64) -> Result<Value, String> {
 /// `fmin`/`fmax`, a NaN anywhere gives NaN.
 fn pair_or_fold(a: &[Value], init: f64, f: fn(f64, f64) -> f64) -> Result<Value, String> {
     let xs: Vec<f64> = match a {
-        [x] => vec_arg(x)?.iter().copied().collect(),
+        [x] => elems(x)?.to_vec(),
         [x, y] => vec![real_arg(x)?, real_arg(y)?],
-        _ => return Err("expected one vector or two reals".into()),
+        _ => return Err("expected one vector, one matrix or two reals".into()),
     };
     if xs.iter().any(|v| v.is_nan()) {
         return Ok(Value::Real(f64::NAN));
@@ -466,6 +477,7 @@ fn pair_or_fold(a: &[Value], init: f64, f: fn(f64, f64) -> f64) -> Result<Value,
 fn unary_math(v: &Value, f: fn(f64) -> f64) -> Result<Value, String> {
     match v {
         Value::Vector(x) => Ok(Value::Vector(x.map(f))),
+        Value::Matrix(m) => Ok(Value::Matrix(m.map(f))),
         other => Ok(Value::Real(f(real_arg(other)?))),
     }
 }
@@ -496,6 +508,18 @@ fn elem(v: &Value, i: usize) -> f64 {
 fn real_arg(v: &Value) -> Result<f64, String> {
     v.as_real()
         .ok_or_else(|| format!("expected a real, got {}", v.type_name()))
+}
+
+/// The elements of a vector, or of a matrix in column-major order.
+fn elems(v: &Value) -> Result<&[f64], String> {
+    match v {
+        Value::Vector(x) => Ok(x.as_slice()),
+        Value::Matrix(m) => Ok(m.as_slice()),
+        other => Err(format!(
+            "expected a vector or matrix, got {}",
+            other.type_name()
+        )),
+    }
 }
 
 fn vec_arg(v: &Value) -> Result<&DVector<f64>, String> {
