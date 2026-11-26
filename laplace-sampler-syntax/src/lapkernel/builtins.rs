@@ -61,6 +61,20 @@ impl Registry {
         &self.entries
     }
 
+    /// A name a kernel may not declare as a function or variable: a context
+    /// value or function, a terminal or an RNG. Library functions (pure, no
+    /// chain needed) are not reserved: a kernel's own function or variable
+    /// of that name wins, so adding to the library never breaks a kernel.
+    pub fn reserved(&self, name: &str) -> bool {
+        self.get(name).is_some_and(|e| {
+            e.needs_chain
+                || matches!(
+                    e.kind,
+                    Kind::Value { .. } | Kind::Function { terminal: true, .. }
+                )
+        })
+    }
+
     /// The v1 registry.
     pub fn standard() -> Registry {
         let mut entries = vec![];
@@ -165,13 +179,16 @@ impl Registry {
         entries.push(Entry {
             name: "propose",
             signatures: &["void propose(vector[dim] q_new, real log_correction)"],
-            doc: "Metropolis-Hastings step to q_new with log_alpha = lp(q_new) - lp + log_correction; ends \
-                  the step",
+            doc: PROPOSE_DOC,
             rng: "one uniform (the MH accept draw), always",
             needs_chain: true,
             kind: Kind::Function {
                 sig: |a, _, d| {
-                    expect(a, &[Ty::Vector(dim_size(d)), Ty::Real], "propose(vector[dim] q_new, real log_correction)")?;
+                    expect(
+                        a,
+                        &[Ty::Vector(dim_size(d)), Ty::Real],
+                        "propose(vector[dim] q_new, real log_correction)",
+                    )?;
                     Ok(Ty::Void)
                 },
                 terminal: true,
@@ -180,7 +197,7 @@ impl Registry {
         entries.push(Entry {
             name: "move",
             signatures: &["void move(vector[dim] q_new)"],
-            doc: "move to q_new unconditionally; ends the step",
+            doc: MOVE_DOC,
             rng: "none",
             needs_chain: true,
             kind: Kind::Function {
@@ -333,29 +350,102 @@ impl Registry {
                 terminal: false,
             },
         });
-        let unary: [(&'static str, &'static [&'static str], &'static str); 4] = [
-            (
-                "exp",
-                &["real exp(real x)", "vector exp(vector x)"],
-                "e^x, elementwise for vectors",
-            ),
-            (
-                "log",
-                &["real log(real x)", "vector log(vector x)"],
-                "natural logarithm, elementwise for vectors",
-            ),
-            (
-                "sqrt",
-                &["real sqrt(real x)", "vector sqrt(vector x)"],
-                "square root, elementwise for vectors",
-            ),
-            (
-                "square",
-                &["real square(real x)", "vector square(vector x)"],
-                "x * x, elementwise for vectors",
-            ),
+        // Pure functions: no chain, no random numbers. Where Stan has a
+        // numerically safe composite (`log1p_exp(x)` for `log(1 + exp(x))`)
+        // that is the one offered; docs/sampler/kernel-functions.md lists
+        // them all with the formulas the implementations use.
+        type Pure = (&'static str, &'static [&'static str], &'static str, SigFn);
+        let pure: &[Pure] = &[
+            // ---- elementwise, one argument --------------------------------
+            ("exp", &["real exp(real x)", "vector exp(vector x)"],
+                "e^x, elementwise for vectors", unary_math_sig),
+            ("log", &["real log(real x)", "vector log(vector x)"],
+                "natural logarithm, elementwise for vectors. NaN for x < 0, -inf at 0", unary_math_sig),
+            ("sqrt", &["real sqrt(real x)", "vector sqrt(vector x)"],
+                "square root, elementwise for vectors. NaN for x < 0", unary_math_sig),
+            ("square", &["real square(real x)", "vector square(vector x)"],
+                "x * x, elementwise for vectors", unary_math_sig),
+            ("abs", &["real abs(real x)", "vector abs(vector x)"],
+                "absolute value, elementwise for vectors", unary_math_sig),
+            ("inv", &["real inv(real x)", "vector inv(vector x)"],
+                "1 / x, elementwise for vectors", unary_math_sig),
+            ("inv_sqrt", &["real inv_sqrt(real x)", "vector inv_sqrt(vector x)"],
+                "1 / sqrt(x), elementwise for vectors", unary_math_sig),
+            ("inv_square", &["real inv_square(real x)", "vector inv_square(vector x)"],
+                "1 / x^2, elementwise for vectors", unary_math_sig),
+            ("expm1", &["real expm1(real x)", "vector expm1(vector x)"],
+                "exp(x) - 1, accurate for x near 0, elementwise for vectors", unary_math_sig),
+            ("log1p", &["real log1p(real x)", "vector log1p(vector x)"],
+                "log(1 + x), accurate for x near 0, elementwise for vectors. NaN for x < -1", unary_math_sig),
+            ("log1m", &["real log1m(real x)", "vector log1m(vector x)"],
+                "log(1 - x), accurate for x near 0, elementwise for vectors. NaN for x > 1", unary_math_sig),
+            ("log1p_exp", &["real log1p_exp(real x)", "vector log1p_exp(vector x)"],
+                "log(1 + exp(x)) (softplus) without overflow: x + log1p(exp(-x)) for x > 0, \
+                 elementwise for vectors", unary_math_sig),
+            ("log1m_exp", &["real log1m_exp(real x)", "vector log1m_exp(vector x)"],
+                "log(1 - exp(x)) for x <= 0, accurate at both ends (log(-expm1(x)) near 0, \
+                 log1p(-exp(x)) below -log 2), elementwise for vectors. NaN for x > 0, -inf at 0", unary_math_sig),
+            ("inv_logit", &["real inv_logit(real x)", "vector inv_logit(vector x)"],
+                "1 / (1 + exp(-x)) without overflow for large |x|, elementwise for vectors", unary_math_sig),
+            ("logit", &["real logit(real p)", "vector logit(vector p)"],
+                "log(p / (1 - p)), computed as log(p) - log1m(p), elementwise for vectors. \
+                 NaN outside [0, 1]", unary_math_sig),
+            ("log_inv_logit", &["real log_inv_logit(real x)", "vector log_inv_logit(vector x)"],
+                "log(inv_logit(x)) = -log1p_exp(-x), finite for very negative x, elementwise for vectors",
+                unary_math_sig),
+            ("log1m_inv_logit", &["real log1m_inv_logit(real x)", "vector log1m_inv_logit(vector x)"],
+                "log(1 - inv_logit(x)) = -log1p_exp(x), finite for very positive x, elementwise for vectors",
+                unary_math_sig),
+            ("tanh", &["real tanh(real x)", "vector tanh(vector x)"],
+                "hyperbolic tangent, elementwise for vectors", unary_math_sig),
+            // ---- elementwise, two arguments (a real broadcasts) ------------
+            ("fmin", &["real fmin(real x, real y)", "vector fmin(real|vector x, vector y)",
+                       "vector fmin(vector x, real y)"],
+                "the smaller of x and y, elementwise; a NaN argument is ignored", binary_math_sig),
+            ("fmax", &["real fmax(real x, real y)", "vector fmax(real|vector x, vector y)",
+                       "vector fmax(vector x, real y)"],
+                "the larger of x and y, elementwise; a NaN argument is ignored", binary_math_sig),
+            ("log_diff_exp", &["real log_diff_exp(real a, real b)",
+                               "vector log_diff_exp(real|vector a, vector b)",
+                               "vector log_diff_exp(vector a, real b)"],
+                "log(exp(a) - exp(b)) for a >= b, as a + log1m_exp(b - a), elementwise. \
+                 -inf when a == b, NaN when b > a", binary_math_sig),
+            // ---- reductions --------------------------------------------------
+            ("log_sum_exp", &["real log_sum_exp(real a, real b)", "real log_sum_exp(vector x)"],
+                "log(exp(a) + exp(b)), or log(sum(exp(x))), shifted by the maximum so it never \
+                 overflows; -inf for an empty vector or all -inf", log_sum_exp_sig),
+            ("max", &["real max(real a, real b)", "real max(vector x)"],
+                "the larger of a and b, or the largest element (-inf for an empty vector)", min_max_sig),
+            ("min", &["real min(real a, real b)", "real min(vector x)"],
+                "the smaller of a and b, or the smallest element (inf for an empty vector)", min_max_sig),
+            ("mean", &["real mean(vector x)"],
+                "sum(x) / size; NaN for an empty vector", reduce_sig),
+            ("dot_self", &["real dot_self(vector x)"],
+                "sum of x[i]^2", reduce_sig),
+            ("norm2", &["real norm2(vector x)"],
+                "Euclidean norm sqrt(dot_self(x)), scaled by max |x[i]| so it neither \
+                 overflows nor underflows", reduce_sig),
+            ("squared_distance", &["real squared_distance(vector a, vector b)"],
+                "sum of (a[i] - b[i])^2", two_vectors_sig),
+            // ---- vector to vector --------------------------------------------
+            ("softmax", &["vector softmax(vector x)"],
+                "exp(x) / sum(exp(x)), shifted by max(x) so it never overflows", vector_map_sig),
+            ("log_softmax", &["vector log_softmax(vector x)"],
+                "x - log_sum_exp(x), finite where softmax would underflow to 0", vector_map_sig),
+            // ---- checks --------------------------------------------------------
+            ("is_inf", &["int is_inf(real x)"],
+                "1 if x is +inf or -inf, else 0", predicate_sig),
+            ("is_nan", &["int is_nan(real x)"],
+                "1 if x is NaN, else 0. A rejected or failed density evaluation can give NaN: \
+                 test before using it", predicate_sig),
+            // ---- constants ---------------------------------------------------
+            ("pi", &["real pi()"], "π", constant_sig),
+            ("e", &["real e()"], "Euler's number, exp(1)", constant_sig),
+            ("negative_infinity", &["real negative_infinity()"],
+                "-inf. As propose()'s log_correction it rejects the proposal", constant_sig),
+            ("positive_infinity", &["real positive_infinity()"], "+inf", constant_sig),
         ];
-        for (name, signatures, doc) in unary {
+        for &(name, signatures, doc, sig) in pure {
             entries.push(Entry {
                 name,
                 signatures,
@@ -363,7 +453,7 @@ impl Registry {
                 rng: "none",
                 needs_chain: false,
                 kind: Kind::Function {
-                    sig: unary_math_sig,
+                    sig,
                     terminal: false,
                 },
             });
@@ -407,9 +497,122 @@ fn unary_math_sig(a: &[Ty], _: &[Option<i64>], _: Option<usize>) -> Result<Ty, S
     match a {
         [t] if t.is_scalar() => Ok(Ty::Real),
         [Ty::Vector(n)] => Ok(Ty::Vector(*n)),
-        _ => Err(bad_args("f(real) or f(vector)", a)),
+        _ => Err(bad_args("f(real x) or f(vector x)", a)),
     }
 }
+
+/// Two real-or-vector arguments, elementwise: a real broadcasts.
+fn binary_math_sig(a: &[Ty], _: &[Option<i64>], _: Option<usize>) -> Result<Ty, String> {
+    match a {
+        [x, y]
+            if [x, y]
+                .iter()
+                .all(|t| t.is_scalar() || matches!(t, Ty::Vector(_))) =>
+        {
+            broadcast_type(a)
+        }
+        _ => Err(bad_args("f(real|vector x, real|vector y)", a)),
+    }
+}
+
+/// `f(vector x)` -> real.
+fn reduce_sig(a: &[Ty], _: &[Option<i64>], _: Option<usize>) -> Result<Ty, String> {
+    match a {
+        [Ty::Vector(_)] => Ok(Ty::Real),
+        _ => Err(bad_args("f(vector x)", a)),
+    }
+}
+
+/// `f(real a, real b)` or `f(vector x)` -> real.
+fn pair_or_reduce_sig(a: &[Ty]) -> Result<Ty, String> {
+    match a {
+        [Ty::Vector(_)] => Ok(Ty::Real),
+        [x, y] if x.is_scalar() && y.is_scalar() => Ok(Ty::Real),
+        _ => Err(bad_args("f(real a, real b) or f(vector x)", a)),
+    }
+}
+
+fn log_sum_exp_sig(a: &[Ty], _: &[Option<i64>], _: Option<usize>) -> Result<Ty, String> {
+    pair_or_reduce_sig(a)
+}
+
+fn min_max_sig(a: &[Ty], _: &[Option<i64>], _: Option<usize>) -> Result<Ty, String> {
+    pair_or_reduce_sig(a)
+}
+
+/// `f(vector a, vector b)` of agreeing sizes -> real.
+fn two_vectors_sig(a: &[Ty], _: &[Option<i64>], _: Option<usize>) -> Result<Ty, String> {
+    match a {
+        [Ty::Vector(x), Ty::Vector(y)] if x.agrees(*y) => Ok(Ty::Real),
+        [Ty::Vector(x), Ty::Vector(y)] => Err(format!("vector sizes {x} and {y} differ")),
+        _ => Err(bad_args("f(vector a, vector b)", a)),
+    }
+}
+
+/// `f(vector[n] x)` -> vector[n].
+fn vector_map_sig(a: &[Ty], _: &[Option<i64>], _: Option<usize>) -> Result<Ty, String> {
+    match a {
+        [Ty::Vector(n)] => Ok(Ty::Vector(*n)),
+        _ => Err(bad_args("f(vector x)", a)),
+    }
+}
+
+/// `f(real x)` -> int (0 or 1).
+fn predicate_sig(a: &[Ty], _: &[Option<i64>], _: Option<usize>) -> Result<Ty, String> {
+    match a {
+        [t] if t.is_scalar() => Ok(Ty::Int),
+        _ => Err(bad_args("f(real x)", a)),
+    }
+}
+
+/// `f()` -> real.
+fn constant_sig(a: &[Ty], _: &[Option<i64>], _: Option<usize>) -> Result<Ty, String> {
+    match a {
+        [] => Ok(Ty::Real),
+        _ => Err(bad_args("f()", a)),
+    }
+}
+
+const PROPOSE_DOC: &str = "\
+Metropolis-Hastings accept/reject of `q_new`. Ends the step.
+
+The chain moves to `q_new` with probability `min(1, exp(log_alpha))`, where
+
+```text
+log_alpha = lp(q_new) - lp + log_correction
+```
+
+`log_correction` is the log proposal ratio `log g(q | q_new) - log g(q_new | q)`: \
+0 for a symmetric proposal (random walk), the reverse minus the forward proposal \
+log density otherwise (MALA, Barker). A wrong correction biases the chain without \
+any error; `laplace sampler test --sbc` is the check that catches it.
+
+- `lp(q_new)` is evaluated by the runtime, density only. If the step already \
+evaluated `q_new` (`log_density`, `log_density_grad`), the cached value is reused \
+at no cost.
+- `lp(q_new) = -inf` (outside the support) or a NaN `log_alpha` is a rejection. \
+`negative_infinity()` as the correction rejects on purpose.
+- On rejection the chain stays at `q`, with its `lp` and `grad`.
+- `min(1, exp(log_alpha))` is the acceptance statistic that `@adapt(step_size)` \
+steers toward `target_accept`.
+- Every path through `step { }` ends in exactly one `propose()` or `move()`, \
+never inside a loop.";
+
+const MOVE_DOC: &str = "\
+Moves the chain to `q_new` unconditionally. Ends the step.
+
+No accept/reject happens here, so the step itself must leave the target \
+invariant: an exact conditional (Gibbs) draw, or a step that does its own \
+accept/reject with `uniform_rng` and moves to the winner.
+
+- The runtime evaluates `lp(q_new)` (free if the step already did) and **stops \
+the run** if it is not finite: a `move()` outside the support is an error, not a \
+rejection. Use `propose()` when `q_new` can leave the support.
+- `move()` reports no acceptance statistic. `@adapt(step_size)` reads that as \
+0 and keeps shrinking the step size, so a kernel that adapts its step size \
+should end in `propose()`.
+- Every path through `step { }` ends in exactly one `propose()` or `move()`, \
+never inside a loop.";
 
 /// Real for all-scalar arguments; vector of the common size otherwise.
 fn broadcast_type(a: &[Ty]) -> Result<Ty, String> {

@@ -64,6 +64,84 @@ pub fn builtins() -> Vec<Builtin> {
         .collect()
 }
 
+// ---- @adapt tags ----------------------------------------------------------------
+
+/// What `@adapt` itself does, shown on the tag.
+pub const ADAPT_DOC: &str = "\
+Marks a tuning value for warmup adaptation.
+
+```lapkernel
+real<lower=0> eps = 0.5 @adapt(step_size, target_accept = 0.574);
+vector<lower=0>[dim] m = rep_vector(1, dim) @adapt(metric);
+```
+
+Adaptation is Stan's windowed warmup, run on the kernel from outside: the \
+kernel only reads the tagged values, and never writes them.
+
+- **When it runs.** `laplace sample --sampler k.lapkernel` adapts by default \
+(`--set adapt=false` turns it off). In a `.lapsampler` it runs only under \
+`adapt(k)`; a bare kernel there keeps its values.
+- **Warmup only.** Everything freezes when warmup ends: saved draws always \
+come from a fixed kernel.
+- **Starting values.** The declared default, or `--set name=...` / \
+`k(name = ...)`, is where adaptation starts.
+- **Rules.** Only in `tuning { }`; at most one `step_size` (on a `real`) and \
+one `metric` (on a `vector[dim]`) per kernel.";
+
+/// One tag that `@adapt(...)` accepts.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdaptTag {
+    pub name: &'static str,
+    /// As written on a declaration.
+    pub signature: &'static str,
+    /// Markdown.
+    pub doc: &'static str,
+}
+
+/// The `@adapt` tags, in the checker's order.
+pub fn adapt_tags() -> &'static [AdaptTag] {
+    &[
+        AdaptTag {
+            name: "step_size",
+            signature: "real<lower=0> eps = 0.5 @adapt(step_size, target_accept = 0.574);",
+            doc: "\
+Adapts a `real` step size by **dual averaging** (Hoffman & Gelman 2014, Stan's \
+constants: gamma 0.05, kappa 0.75, t0 10) so that the mean acceptance \
+statistic of `propose()` approaches `target_accept`.
+
+- `target_accept` (required, strictly between 0 and 1) is the kernel's \
+default. Good targets depend on the kernel: about 0.234 for random-walk \
+Metropolis, 0.574 for MALA, about 0.4 for Barker. `--set target_accept=...` \
+or `adapt(k, target_accept = ...)` overrides it.
+- Updated after every warmup step; the step size used after warmup is the \
+running average, not the last iterate.
+- Restarted around the current value each time the metric is updated.
+- The statistic is `min(1, exp(log_alpha))` from `propose()`. A step that ends \
+in `move()` reports none, which counts as 0 and drives the step size down.",
+        },
+        AdaptTag {
+            name: "metric",
+            signature: "vector<lower=0>[dim] m = rep_vector(1, dim) @adapt(metric);",
+            doc: "\
+Adapts a `vector[dim]` **diagonal inverse metric**: the per-coordinate \
+variance of the chain, estimated in Stan's warmup windows.
+
+- Schedule: an initial buffer (75 iterations by default) adapts the step size \
+only; then slow windows of 25, 50, 100, ... iterations each collect draws of \
+`q` and end by setting the metric; a final buffer (50) adapts the step size \
+only. Short warmups shrink these to 15% / 75% / 10% of warmup, and a warmup \
+under 20 iterations adapts no metric.
+- Each window sets `n/(n+5) * var + 1e-3 * 5/(n+5)` (Stan's regularisation \
+toward 1e-3), so a variance is never 0.
+- The value is a variance (a scale squared): scale proposals by `sqrt(m)`, as \
+in `eps * sqrt(m) .* std_normal_rng(dim)`.
+- Inside the kernel the same value is also readable as the built-in `metric`. \
+With no default it starts at all ones.
+- Takes no arguments.",
+        },
+    ]
+}
+
 // ---- .lapsampler combinators ---------------------------------------------------
 
 /// A combinator of `.lapsampler` kernel expressions.

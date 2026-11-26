@@ -410,3 +410,19 @@ fn a_built_ins_source_is_its_implementation() {
         assert_eq!(source, on_disk);
     }
 }
+
+/// Every `@adapt` tag the editor documents is one the checker accepts, and
+/// the other way round.
+#[test]
+fn adapt_tags_are_the_checkers() {
+    let names: Vec<_> = adapt_tags().iter().map(|t| t.name).collect();
+    assert_eq!(names, ["step_size", "metric"]);
+    for t in adapt_tags() {
+        let src = format!(
+            "kernel k {{\n  tuning {{\n    {}\n  }}\n  step {{\n    propose(q, 0);\n  }}\n}}\n",
+            t.signature
+        );
+        let ds = crate::editor::check_lapkernel("k.lapkernel", &src, None);
+        assert!(ds.is_empty(), "{}: {ds:?}", t.name);
+    }
+}
