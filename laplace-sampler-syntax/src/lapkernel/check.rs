@@ -14,7 +14,11 @@
 //!   `vector[dim]`); at most one of each.
 //! - **Scopes.** Tuning values are read-only to the kernel (adaptation and
 //!   `--set` change them); context values (`q`, `lp`, ...) are read-only;
-//!   names may not shadow a variable, a function or a built-in. Tuning
+//!   names may not shadow a variable, a function or a reserved built-in
+//!   (a context value or function, a terminal, an RNG). A library function
+//!   (one allowed in tuning defaults, such as `log1p_exp`) may be reused as
+//!   a kernel function or variable name, which then wins inside that kernel:
+//!   the library can grow without breaking published kernels. Tuning
 //!   defaults may use only literals, `dim`, earlier tuning values and
 //!   built-ins that need no running chain.
 
@@ -146,7 +150,7 @@ impl<'r> Checker<'r> {
 
         // Function signatures first, so any block can call any function.
         for f in &k.functions {
-            if self.reg.get(&f.name).is_some() {
+            if self.reg.reserved(&f.name) {
                 self.err(
                     f.span,
                     format!("function `{}` has the name of a built-in", f.name),
@@ -362,7 +366,7 @@ impl<'r> Checker<'r> {
             );
             return;
         }
-        if self.reg.get(name).is_some() {
+        if self.reg.reserved(name) {
             self.err(
                 span,
                 format!("`{name}` is a built-in and cannot be redeclared"),
@@ -903,6 +907,10 @@ impl<'r> Checker<'r> {
         match sig(&tys, &consts, self.dim) {
             Ok(t) => Some(t),
             Err(m) => {
+                // Rules shared by many functions write the name as `f`.
+                let m = m
+                    .replace("expected f(", &format!("expected {name}("))
+                    .replace(" or f(", &format!(" or {name}("));
                 self.err(span, format!("{name}: {m}"));
                 None
             }
@@ -1168,6 +1176,46 @@ mod tests {
         assert_eq!(
             one_error(&kernel("    real lp = 1;\n    move(q);"), None),
             "6:5: `lp` is a built-in and cannot be redeclared"
+        );
+        assert_eq!(
+            one_error(&kernel("    real normal_rng = 1;\n    move(q);"), None),
+            "6:5: `normal_rng` is a built-in and cannot be redeclared"
+        );
+    }
+
+    /// A library function's name is free for a kernel's own function or
+    /// variable (which then wins), so growing the library never breaks a
+    /// published kernel: laplace-langevin's barker defines log1p_exp.
+    #[test]
+    fn library_function_names_may_be_reused() {
+        let src = "kernel k {\n  functions {\n    real log1p_exp(real x) {\n      return x;\n    }\n  }\n  step {\n    real e = log1p_exp(1);\n    real max = e + pi();\n    propose(q, max);\n  }\n}\n";
+        assert!(run(src, None).is_ok(), "{:?}", run(src, None).err());
+        let src = "kernel k {\n  functions {\n    real propose(real x) {\n      return x;\n    }\n  }\n  step {\n    move(q);\n  }\n}\n";
+        assert!(run(src, None).is_err());
+    }
+
+    #[test]
+    fn the_math_library_type_checks() {
+        let ok = [
+            "real a = inv_logit(1) + log1p_exp(q[1]) - log1m_exp(-1) + log_diff_exp(2, 1);",
+            "vector[dim] v = log1p_exp(q) .* inv_logit(grad) + fmax(q, 0) - fmin(0, q);",
+            "real b = log_sum_exp(q) + log_sum_exp(1, 2.5) + max(q) + min(1, 2) + mean(q);",
+            "real c = norm2(q) + dot_self(grad) + squared_distance(q, grad) + sum(softmax(q));",
+            "vector[dim] w = log_softmax(q) + abs(q) + inv(q) + inv_sqrt(q) + inv_square(q) + tanh(q);",
+            "real d = expm1(1) + log1p(1) + log1m(0.5) + logit(0.5) + log_inv_logit(1) + log1m_inv_logit(1);",
+            "real f = is_inf(lp) + is_nan(lp) + e() + negative_infinity() + positive_infinity();",
+        ];
+        for stmt in ok {
+            let src = kernel(&format!("    {stmt}\n    move(q);"));
+            assert!(
+                run(&src, Some(3)).is_ok(),
+                "{stmt}: {:?}",
+                run(&src, Some(3)).err()
+            );
+        }
+        assert_eq!(
+            one_error(&kernel("    real a = mean(1);\n    move(q);"), None),
+            "6:14: mean: expected mean(vector x), got (int)"
         );
     }
 

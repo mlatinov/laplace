@@ -232,13 +232,90 @@ impl Natives {
                 Ok(Value::Vector(DVector::from_element(size_arg(&a[1])?, x)))
             }),
         ));
-        let unary: [(&'static str, CallFn); 4] = [
+        let pure: &[(&'static str, CallFn)] = &[
+            // ---- elementwise, one argument --------------------------------
             ("exp", |_, a| unary_math(&a[0], f64::exp)),
             ("log", |_, a| unary_math(&a[0], f64::ln)),
             ("sqrt", |_, a| unary_math(&a[0], f64::sqrt)),
             ("square", |_, a| unary_math(&a[0], |x| x * x)),
+            ("abs", |_, a| unary_math(&a[0], f64::abs)),
+            ("inv", |_, a| unary_math(&a[0], |x| 1.0 / x)),
+            ("inv_sqrt", |_, a| unary_math(&a[0], |x| 1.0 / x.sqrt())),
+            ("inv_square", |_, a| unary_math(&a[0], |x| 1.0 / (x * x))),
+            ("expm1", |_, a| unary_math(&a[0], f64::exp_m1)),
+            ("log1p", |_, a| unary_math(&a[0], f64::ln_1p)),
+            ("log1m", |_, a| unary_math(&a[0], log1m)),
+            ("log1p_exp", |_, a| unary_math(&a[0], log1p_exp)),
+            ("log1m_exp", |_, a| unary_math(&a[0], log1m_exp)),
+            ("inv_logit", |_, a| unary_math(&a[0], inv_logit)),
+            ("logit", |_, a| unary_math(&a[0], |p| p.ln() - log1m(p))),
+            ("log_inv_logit", |_, a| {
+                unary_math(&a[0], |x| -log1p_exp(-x))
+            }),
+            ("log1m_inv_logit", |_, a| {
+                unary_math(&a[0], |x| -log1p_exp(x))
+            }),
+            ("tanh", |_, a| unary_math(&a[0], f64::tanh)),
+            // ---- elementwise, two arguments --------------------------------
+            ("fmin", |_, a| binary_math(a, f64::min)),
+            ("fmax", |_, a| binary_math(a, f64::max)),
+            ("log_diff_exp", |_, a| binary_math(a, log_diff_exp)),
+            // ---- reductions --------------------------------------------------
+            ("log_sum_exp", |_, a| match a {
+                [x] => Ok(Value::Real(log_sum_exp(vec_arg(x)?.as_slice()))),
+                [x, y] => Ok(Value::Real(log_sum_exp(&[real_arg(x)?, real_arg(y)?]))),
+                _ => Err("log_sum_exp: expected one vector or two reals".into()),
+            }),
+            ("max", |_, a| pair_or_fold(a, f64::NEG_INFINITY, f64::max)),
+            ("min", |_, a| pair_or_fold(a, f64::INFINITY, f64::min)),
+            ("mean", |_, a| {
+                let x = vec_arg(&a[0])?;
+                Ok(Value::Real(x.iter().sum::<f64>() / x.len() as f64))
+            }),
+            ("dot_self", |_, a| {
+                Ok(Value::Real(vec_arg(&a[0])?.iter().map(|x| x * x).sum()))
+            }),
+            ("norm2", |_, a| {
+                Ok(Value::Real(norm2(vec_arg(&a[0])?.as_slice())))
+            }),
+            ("squared_distance", |_, a| {
+                let (x, y) = (vec_arg(&a[0])?, vec_arg(&a[1])?);
+                same_len("squared_distance", x, y)?;
+                Ok(Value::Real(
+                    x.iter().zip(y.iter()).map(|(a, b)| (a - b) * (a - b)).sum(),
+                ))
+            }),
+            // ---- vector to vector --------------------------------------------
+            ("softmax", |_, a| {
+                // exp(x - max) / sum, not exp(x - log_sum_exp(x)): the
+                // rounding of a large log_sum_exp would land in the exponent.
+                let x = vec_arg(&a[0])?;
+                let m = x.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                let w = x.map(|v| (v - m).exp());
+                let total: f64 = w.iter().sum();
+                Ok(Value::Vector(w / total))
+            }),
+            ("log_softmax", |_, a| {
+                let x = vec_arg(&a[0])?;
+                let lse = log_sum_exp(x.as_slice());
+                Ok(Value::Vector(x.map(|v| v - lse)))
+            }),
+            // ---- checks --------------------------------------------------------
+            ("is_inf", |_, a| {
+                Ok(Value::Int(real_arg(&a[0])?.is_infinite() as i64))
+            }),
+            ("is_nan", |_, a| {
+                Ok(Value::Int(real_arg(&a[0])?.is_nan() as i64))
+            }),
+            // ---- constants -----------------------------------------------------
+            ("pi", |_, _| Ok(Value::Real(std::f64::consts::PI))),
+            ("e", |_, _| Ok(Value::Real(std::f64::consts::E))),
+            ("negative_infinity", |_, _| {
+                Ok(Value::Real(f64::NEG_INFINITY))
+            }),
+            ("positive_infinity", |_, _| Ok(Value::Real(f64::INFINITY))),
         ];
-        for (name, call) in unary {
+        for &(name, call) in pure {
             entries.push((name, Native::Function(call)));
         }
 
@@ -247,6 +324,103 @@ impl Natives {
 }
 
 const HALF_LN_2PI: f64 = 0.918_938_533_204_672_8;
+
+// ---- numerically safe scalar functions (formulas as in Stan's math library) --
+
+/// log(1 - x).
+fn log1m(x: f64) -> f64 {
+    (-x).ln_1p()
+}
+
+/// log(1 + exp(x)): never overflows, exact to rounding for large |x|.
+fn log1p_exp(x: f64) -> f64 {
+    if x > 0.0 {
+        x + (-x).exp().ln_1p()
+    } else {
+        x.exp().ln_1p()
+    }
+}
+
+/// log(1 - exp(x)) for x <= 0 (Mächler 2012: switch at -log 2).
+fn log1m_exp(x: f64) -> f64 {
+    if x > 0.0 {
+        f64::NAN
+    } else if x > -std::f64::consts::LN_2 {
+        (-x.exp_m1()).ln()
+    } else {
+        (-x.exp()).ln_1p()
+    }
+}
+
+/// 1 / (1 + exp(-x)), with exp() only ever of a non-positive number.
+fn inv_logit(x: f64) -> f64 {
+    if x >= 0.0 {
+        1.0 / (1.0 + (-x).exp())
+    } else {
+        let e = x.exp();
+        e / (1.0 + e)
+    }
+}
+
+/// log(exp(a) - exp(b)) for a >= b.
+fn log_diff_exp(a: f64, b: f64) -> f64 {
+    if b > a {
+        f64::NAN
+    } else if a == b {
+        f64::NEG_INFINITY
+    } else {
+        a + log1m_exp(b - a)
+    }
+}
+
+/// log(sum(exp(x))), shifted by the maximum.
+fn log_sum_exp(x: &[f64]) -> f64 {
+    if x.iter().any(|v| v.is_nan()) {
+        return f64::NAN;
+    }
+    let m = x.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if m.is_infinite() {
+        // empty or all -inf: -inf; some +inf: +inf
+        return m;
+    }
+    m + x.iter().map(|v| (v - m).exp()).sum::<f64>().ln()
+}
+
+/// sqrt(sum(x^2)), scaled by max |x| to avoid overflow and underflow.
+fn norm2(x: &[f64]) -> f64 {
+    if x.iter().any(|v| v.is_nan()) {
+        return f64::NAN;
+    }
+    let s = x.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    if s == 0.0 || s.is_infinite() {
+        return s;
+    }
+    s * x.iter().map(|v| (v / s) * (v / s)).sum::<f64>().sqrt()
+}
+
+/// `f(real|vector, real|vector)` elementwise; a real broadcasts.
+fn binary_math(a: &[Value], f: fn(f64, f64) -> f64) -> Result<Value, String> {
+    match broadcast_len(a)? {
+        None => Ok(Value::Real(f(real_arg(&a[0])?, real_arg(&a[1])?))),
+        Some(n) => Ok(Value::Vector(DVector::from_fn(n, |i, _| {
+            f(elem(&a[0], i), elem(&a[1], i))
+        }))),
+    }
+}
+
+/// `f(real, real)`, or `f` folded over a vector from `init`. Unlike
+/// `fmin`/`fmax`, a NaN anywhere gives NaN.
+fn pair_or_fold(a: &[Value], init: f64, f: fn(f64, f64) -> f64) -> Result<Value, String> {
+    let xs: Vec<f64> = match a {
+        [x] => vec_arg(x)?.iter().copied().collect(),
+        [x, y] => vec![real_arg(x)?, real_arg(y)?],
+        _ => return Err("expected one vector or two reals".into()),
+    };
+    if xs.iter().any(|v| v.is_nan()) {
+        return Ok(Value::Real(f64::NAN));
+    }
+    Ok(Value::Real(xs.into_iter().fold(init, f)))
+}
 
 fn unary_math(v: &Value, f: fn(f64) -> f64) -> Result<Value, String> {
     match v {
@@ -343,6 +517,105 @@ fn leapfrog(c: &mut Ctx<'_, '_>, a: &[Value]) -> Result<Value, String> {
 mod tests {
     use super::super::builtins::{Kind, Registry};
     use super::*;
+
+    fn call(name: &str, args: &[Value]) -> Value {
+        let mut c = Ctx {
+            dim: 0,
+            state: None,
+            ev: None,
+            rng: None,
+            metric: None,
+        };
+        match Natives::standard().get(name) {
+            Some(Native::Function(f)) => f(&mut c, args).unwrap(),
+            _ => panic!("`{name}` is not a function"),
+        }
+    }
+
+    fn real(name: &str, args: &[f64]) -> f64 {
+        let args: Vec<Value> = args.iter().map(|&x| Value::Real(x)).collect();
+        call(name, &args).as_real().unwrap()
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        a == b || (a - b).abs() <= 1e-14 * a.abs().max(b.abs())
+    }
+
+    /// The safe composites stay finite and accurate where the naive
+    /// formula overflows, underflows or cancels.
+    #[test]
+    fn safe_composites_at_the_extremes() {
+        assert_eq!(real("log1p_exp", &[800.0]), 800.0);
+        assert!(close(real("log1p_exp", &[-800.0]), (-800.0_f64).exp()));
+        assert!(close(real("log1p_exp", &[0.0]), std::f64::consts::LN_2));
+        assert_eq!(real("inv_logit", &[800.0]), 1.0);
+        assert!(close(real("inv_logit", &[-700.0]), (-700.0_f64).exp()));
+        assert_eq!(real("inv_logit", &[0.0]), 0.5);
+        assert!(close(real("log_inv_logit", &[-800.0]), -800.0));
+        assert!(close(real("log1m_inv_logit", &[800.0]), -800.0));
+        assert!(close(real("logit", &[0.75]), 3.0_f64.ln()));
+        // log(1 - exp(-1e-20)) = log(1e-20) to rounding; the naive form is -inf.
+        assert!(close(real("log1m_exp", &[-1e-20]), (1e-20_f64).ln()));
+        assert!(close(real("log1m_exp", &[-50.0]), -(-50.0_f64).exp()));
+        assert_eq!(real("log1m_exp", &[0.0]), f64::NEG_INFINITY);
+        assert!(real("log1m_exp", &[1.0]).is_nan());
+        assert!(close(real("log1m", &[1e-20]), -1e-20));
+        assert!(close(
+            real("log_sum_exp", &[1000.0, 1000.0]),
+            1000.0 + std::f64::consts::LN_2
+        ));
+        assert_eq!(
+            real("log_sum_exp", &[f64::NEG_INFINITY, f64::NEG_INFINITY]),
+            f64::NEG_INFINITY
+        );
+        assert!(close(
+            real("log_diff_exp", &[1000.0, 1000.0 - std::f64::consts::LN_2]),
+            1000.0 - std::f64::consts::LN_2
+        ));
+        assert_eq!(real("log_diff_exp", &[3.0, 3.0]), f64::NEG_INFINITY);
+        assert!(real("log_diff_exp", &[1.0, 2.0]).is_nan());
+        assert_eq!(real("fmin", &[f64::NAN, 2.0]), 2.0);
+        assert!(real("max", &[f64::NAN, 2.0]).is_nan());
+    }
+
+    #[test]
+    fn vector_functions() {
+        let v = |xs: &[f64]| Value::Vector(DVector::from_column_slice(xs));
+        let r = |x: Value| x.as_real().unwrap();
+        assert!(close(r(call("norm2", &[v(&[3e200, 4e200])])), 5e200));
+        assert!(close(r(call("norm2", &[v(&[3e-200, 4e-200])])), 5e-200));
+        assert!(close(
+            r(call("log_sum_exp", &[v(&[1000.0, 1000.0, 1000.0])])),
+            1000.0 + 3.0_f64.ln()
+        ));
+        assert_eq!(r(call("log_sum_exp", &[v(&[])])), f64::NEG_INFINITY);
+        let Value::Vector(s) = call("softmax", &[v(&[1000.0, 1000.0])]) else {
+            panic!()
+        };
+        assert_eq!(s.as_slice(), &[0.5, 0.5]);
+        let Value::Vector(l) = call("log_softmax", &[v(&[0.0, -2000.0])]) else {
+            panic!()
+        };
+        assert!(l[1].is_finite() && close(l[1], -2000.0));
+        assert_eq!(r(call("max", &[v(&[1.0, 5.0, 3.0])])), 5.0);
+        assert_eq!(r(call("min", &[v(&[])])), f64::INFINITY);
+        assert_eq!(r(call("mean", &[v(&[1.0, 2.0, 6.0])])), 3.0);
+        assert_eq!(
+            r(call("squared_distance", &[v(&[1.0, 2.0]), v(&[4.0, 6.0])])),
+            25.0
+        );
+        // a real broadcasts against a vector
+        let Value::Vector(m) = call("fmax", &[v(&[-1.0, 2.0]), Value::Real(0.0)]) else {
+            panic!()
+        };
+        assert_eq!(m.as_slice(), &[0.0, 2.0]);
+        let Value::Vector(e) = call("inv_logit", &[v(&[-800.0, 800.0])]) else {
+            panic!()
+        };
+        assert_eq!(e.as_slice(), &[0.0, 1.0]);
+        assert_eq!(call("is_nan", &[Value::Real(f64::NAN)]).as_int(), Some(1));
+        assert_eq!(call("is_inf", &[Value::Int(3)]).as_int(), Some(0));
+    }
 
     #[test]
     fn every_registry_entry_has_its_implementation_and_nothing_else() {

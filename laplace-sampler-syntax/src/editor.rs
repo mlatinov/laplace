@@ -26,8 +26,8 @@ use crate::lapkernel::{check, parse, LapError};
 use crate::lapsampler::SamplerFile;
 pub use crate::libraries::Project;
 pub use crate::symbols::{
-    builtins, combinators, kernel_index, Builtin, BuiltinKind, Combinator, KernelEntry,
-    KernelOrigin, KernelSetting,
+    adapt_tags, builtins, combinators, kernel_index, AdaptTag, Builtin, BuiltinKind, Combinator,
+    KernelEntry, KernelOrigin, KernelSetting, ADAPT_DOC,
 };
 
 /// How bad a diagnostic is. Every diagnostic the checkers produce today is
