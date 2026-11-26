@@ -113,8 +113,9 @@ impl Natives {
         entries.push((
             "log_density",
             Native::Function(|c, a| {
+                // Density only, as documented: no gradient is computed.
                 let x = vec_arg(&a[0])?;
-                let (lp, _) = c.ev()?.eval(x.as_slice()).map_err(|e| e.to_string())?;
+                let lp = c.ev()?.eval_lp(x.as_slice()).map_err(|e| e.to_string())?;
                 Ok(Value::Real(lp))
             }),
         ));
