@@ -83,7 +83,7 @@ impl Registry {
         entries.push(Entry {
             name: "q",
             signatures: &["vector[dim] q"],
-            doc: "current position (unconstrained), vector[dim]",
+            doc: Q_DOC,
             rng: "none",
             needs_chain: true,
             kind: Kind::Value { ty: dim_vector },
@@ -91,7 +91,7 @@ impl Registry {
         entries.push(Entry {
             name: "lp",
             signatures: &["real lp"],
-            doc: "log density at q (propto, jacobian)",
+            doc: LP_DOC,
             rng: "none",
             needs_chain: true,
             kind: Kind::Value { ty: |_| Ty::Real },
@@ -99,7 +99,7 @@ impl Registry {
         entries.push(Entry {
             name: "grad",
             signatures: &["vector[dim] grad"],
-            doc: "gradient of the log density at q, vector[dim]",
+            doc: GRAD_DOC,
             rng: "none",
             needs_chain: true,
             kind: Kind::Value { ty: dim_vector },
@@ -107,7 +107,7 @@ impl Registry {
         entries.push(Entry {
             name: "dim",
             signatures: &["int dim"],
-            doc: "number of unconstrained coordinates the kernel updates",
+            doc: DIM_DOC,
             rng: "none",
             needs_chain: false,
             kind: Kind::Value { ty: |_| Ty::Int },
@@ -115,7 +115,7 @@ impl Registry {
         entries.push(Entry {
             name: "metric",
             signatures: &["vector[dim] metric"],
-            doc: "diagonal inverse metric, vector[dim]: the kernel's @adapt(metric) tuning value if it has one, else all ones",
+            doc: METRIC_DOC,
             rng: "none",
             needs_chain: true,
             kind: Kind::Value { ty: dim_vector },
@@ -125,7 +125,7 @@ impl Registry {
         entries.push(Entry {
             name: "log_density",
             signatures: &["real log_density(vector[dim] x)"],
-            doc: "log density at x (through the chain's cached evaluator)",
+            doc: LOG_DENSITY_DOC,
             rng: "none",
             needs_chain: true,
             kind: Kind::Function {
@@ -139,7 +139,7 @@ impl Registry {
         entries.push(Entry {
             name: "log_density_grad",
             signatures: &["tuple(real, vector[dim]) log_density_grad(vector[dim] x)"],
-            doc: "(log density, gradient) at x",
+            doc: LOG_DENSITY_GRAD_DOC,
             rng: "none",
             needs_chain: true,
             kind: Kind::Function {
@@ -157,8 +157,7 @@ impl Registry {
         entries.push(Entry {
             name: "leapfrog",
             signatures: &["tuple(vector, vector, real, vector) leapfrog(vector q, vector p, real eps, int steps, vector metric)"],
-            doc: "`steps` leapfrog steps with diagonal inverse metric; returns (q, p, lp, grad). Stops early \
-                  (returning lp = -inf) if the density stops being finite",
+            doc: LEAPFROG_DOC,
             rng: "none",
             needs_chain: true,
             kind: Kind::Function {
@@ -572,6 +571,91 @@ fn constant_sig(a: &[Ty], _: &[Option<i64>], _: Option<usize>) -> Result<Ty, Str
         _ => Err(bad_args("f()", a)),
     }
 }
+
+const Q_DOC: &str = "\
+The chain's current position: **read-only**, on the **unconstrained** scale \
+(a `<lower=0>` parameter appears as its log, and so on, exactly as Stan's \
+unconstraining transforms map it).
+
+- Under a block (`block(a, b) : k` in a `.lapsampler`), `q` holds only that \
+block's coordinates; the other parameters stay where they are and are part of \
+the density.
+- Build the proposal in a new variable (`vector[dim] q_new = q;`) and hand it \
+to `propose()` or `move()`.
+- Changes only between steps: after an accepted `propose()` or a `move()`.";
+
+const LP_DOC: &str = "\
+The log density at `q`: **read-only**, already computed, free to read.
+
+- Stan's convention: up to an additive constant (`propto`), on the \
+unconstrained scale with the Jacobian of the constraining transforms included. \
+Only differences such as `lp_new - lp` mean anything.
+- Under a block, the full model's density, with the other blocks at their \
+current values.
+- `propose()` reads it for the acceptance ratio, so a kernel rarely needs it \
+directly.";
+
+const GRAD_DOC: &str = "\
+The gradient of `lp` with respect to `q`: **read-only**, `vector[dim]`.
+
+- **Costs a gradient evaluation**, made only if the kernel mentions `grad` at \
+all. A kernel that never reads it runs density-only (counted in the CSV's \
+`n_logp__`, not `n_grad__`).
+- Under a block, the partial derivatives for that block's coordinates only.
+- The gradient at a proposal comes from `log_density_grad(q_new)`.";
+
+const DIM_DOC: &str = "\
+The number of coordinates this kernel updates: the size of `q`, `grad` and \
+`metric`.
+
+- The whole model's unconstrained dimension, or the block's under \
+`block(...) : k`.
+- Fixed for a run, so it can size declarations (`vector[dim] z`) and loops \
+(`for (i in 1:dim)`), and it is **allowed in tuning defaults** \
+(`rep_vector(1, dim)`).";
+
+const METRIC_DOC: &str = "\
+The diagonal **inverse metric** (a per-coordinate variance), `vector[dim]`: \
+**read-only**.
+
+- The kernel's `@adapt(metric)` tuning value if it tags one (same value under \
+either name), else all ones.
+- Adapted during warmup to the chain's variance (see `@adapt(metric)`), then \
+frozen.
+- Scale a proposal by `sqrt(metric)`, as in \
+`eps * sqrt(metric) .* std_normal_rng(dim)`; `leapfrog()` takes it as is.";
+
+const LOG_DENSITY_DOC: &str = "\
+The log density at `x`, same convention as `lp` (`propto`, Jacobian, \
+unconstrained, other blocks fixed). Density only: no gradient is computed.
+
+- Evaluations are cached by position, so evaluating the point you then \
+`propose()` costs nothing extra.
+- Returns `-inf` outside the support, for a Stan `reject()` and for a NaN \
+density, rather than failing.";
+
+const LOG_DENSITY_GRAD_DOC: &str = "\
+The log density and its gradient at `x`, as a tuple:
+
+```lapkernel
+(real lp_new, vector[dim] g_new) = log_density_grad(q_new);
+```
+
+- Same convention as `lp` and `grad`; one gradient evaluation, cached by \
+position (a following `propose(q_new, ...)` reuses it).
+- For a correction that needs the gradient at the proposal: MALA, Barker.";
+
+const LEAPFROG_DOC: &str = "\
+`steps` leapfrog (velocity Verlet) steps of Hamiltonian dynamics with a \
+diagonal inverse metric `metric`; returns `(q, p, lp, grad)` at the end.
+
+Each step: `p += eps/2 * grad`, `q += eps * metric .* p`, then a new gradient \
+and `p += eps/2 * grad`.
+
+- Draw the momentum to match: `p = std_normal_rng(dim) ./ sqrt(metric)`.
+- One gradient evaluation per step (plus one at the start, usually cached).
+- Stops early, returning `lp = -inf`, if the density stops being finite; \
+`propose()` then rejects.";
 
 const PROPOSE_DOC: &str = "\
 Metropolis-Hastings accept/reject of `q_new`. Ends the step.
