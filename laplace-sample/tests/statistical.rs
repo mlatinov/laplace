@@ -24,7 +24,7 @@ use bridgestan::{Model, StanLibrary};
 use laplace_sample::diagnostics::{moment, verdict, Moment, Verdict};
 use laplace_sample::kernel::StepInfo;
 use laplace_sample::model;
-use laplace_sample::runner::{chain_rng, run_chain, BuiltIn, Init, SamplerSpec};
+use laplace_sample::runner::{chain_rng, run_chain, BuildKernel, BuiltIn, Init, SamplerSpec};
 use laplace_sample::target::{BridgeStanTarget, Target};
 
 const SEED: u64 = 20261123;

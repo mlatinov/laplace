@@ -3,7 +3,8 @@
 //! Values are [`Value`]s (nalgebra vectors and matrices). Scopes, outermost
 //! first: tuning values (read-only), state variables (kept across
 //! iterations), then the locals of the block being run. Built-ins come from
-//! the [`Registry`]. Runtime errors point at the expression that failed.
+//! the [`Registry`] (which are terminal) and [`Natives`] (what the others
+//! do). Runtime errors point at the expression that failed.
 //!
 //! Arithmetic is written to match the Rust kernels operation for operation
 //! (Phase 2.5 equivalence): vector arithmetic is elementwise in index order,
@@ -16,8 +17,9 @@ use std::sync::Arc;
 use nalgebra::{DMatrix, DVector};
 
 use super::ast::*;
-use super::builtins::{Ctx, Kind, Registry};
+use super::builtins::{Kind, Registry};
 use super::check::{AdaptKind, Checked};
+use super::natives::{Ctx, Native, Natives};
 use super::types::Value;
 use super::LapError;
 
@@ -44,6 +46,7 @@ type Scope = HashMap<String, Value>;
 pub struct Interp {
     pub checked: Arc<Checked>,
     reg: Registry,
+    natives: Natives,
     /// Function name -> index in `checked.kernel.functions`.
     funs: HashMap<String, usize>,
 }
@@ -60,6 +63,7 @@ impl Interp {
         Self {
             checked,
             reg: Registry::standard(),
+            natives: Natives::standard(),
             funs,
         }
     }
@@ -574,8 +578,8 @@ impl Interp {
         if let Some(v) = scopes.iter().rev().find_map(|s| s.get(name)) {
             return Ok(v.clone());
         }
-        match self.reg.get(name).map(|e| &e.kind) {
-            Some(Kind::Value { get, .. }) => {
+        match self.natives.get(name) {
+            Some(Native::Value(get)) => {
                 get(ctx).map_err(|m| self.err(span, format!("`{name}`: {m}")))
             }
             _ => Err(self.err(span, format!("unknown name `{name}`"))),
@@ -710,10 +714,10 @@ impl Interp {
                 if let Some(&i) = self.funs.get(name.as_str()) {
                     return self.call_user(&self.checked.kernel.functions[i], vals, ctx, e.span);
                 }
-                match self.reg.get(name).map(|en| &en.kind) {
-                    Some(Kind::Function {
-                        call: Some(call), ..
-                    }) => call(ctx, &vals).map_err(|m| self.err(e.span, format!("{name}: {m}"))),
+                match self.natives.get(name) {
+                    Some(Native::Function(call)) => {
+                        call(ctx, &vals).map_err(|m| self.err(e.span, format!("{name}: {m}")))
+                    }
                     _ => Err(self.err(e.span, format!("`{name}` cannot be called here"))),
                 }
             }

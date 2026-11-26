@@ -1,0 +1,24 @@
+[package]
+name = "laplace-sampler-syntax"
+# The compiler's version, in lockstep with laplace-sample (Q20).
+version.workspace = true
+edition = "2021"
+description = "Parsers and model-free checks for laplace's .lapkernel and .lapsampler files, without a sampler runtime (for editors)"
+license = "MIT"
+publish = false
+
+# Deliberately small: no BridgeStan, no nuts-rs, no C/C++ toolchain at
+# build time. laplace-lsp depends on this crate; laplace-sample builds on
+# it. Keep it that way: CI builds it with no libclang (sampler.yml).
+[dependencies]
+anyhow = "1"
+# The compiler's library: laplace.lock, manifests and installed-package
+# lookup, so `import` resolves exactly as the package manager installed it.
+laplace = { path = ".." }
+# types::Value (the interpreter's values) uses nalgebra; pure Rust.
+nalgebra = "0.35"
+pest = "2.9"
+pest_derive = "2.9"
+
+[dev-dependencies]
+tempfile = "3"

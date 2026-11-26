@@ -17,6 +17,10 @@ anyhow = "1"
 # lookup, so kernel packages (Phase 4) resolve exactly as the package manager
 # installed them. One-way: the compiler never links the sampler (D1).
 laplace = { path = ".." }
+# Parsers, model-free checks, the built-in registry and kernel-package
+# lookup: shared with the editor (laplace-lsp), which cannot build this
+# crate's runtime dependencies. Re-exported under the usual paths.
+laplace-sampler-syntax = { path = "../laplace-sampler-syntax" }
 nalgebra = "0.35"
 pest = "2.9"
 pest_derive = "2.9"

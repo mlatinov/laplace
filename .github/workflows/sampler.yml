@@ -1,6 +1,8 @@
-# laplace-sample (the optional custom-sampler runtime): clippy and the fast
-# tests on every push. They need no BridgeStan and no C++ toolchain; the
-# statistical tests that do run in sampler-statistical.yml.
+# laplace-sample (the optional custom-sampler runtime) and
+# laplace-sampler-syntax (its parsers and model-free checks, shared with the
+# editor): clippy and the fast tests on every push. They need no BridgeStan
+# and no C++ toolchain; the statistical tests that do run in
+# sampler-statistical.yml.
 # `cargo fmt --check` for the whole workspace already runs in ci.yml.
 name: sampler
 
@@ -23,7 +25,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - run: cargo clippy -p laplace-sample --all-targets --locked -- -D warnings
+      - run: cargo clippy -p laplace-sample -p laplace-sampler-syntax --all-targets --locked -- -D warnings
       # Unit tests plus the fast tests in tests/; the statistical ones are
       # #[ignore] and skipped here.
-      - run: cargo test -p laplace-sample --locked
+      - run: cargo test -p laplace-sample -p laplace-sampler-syntax --locked
+
+  # laplace-lsp builds on laplace-sampler-syntax, and editor support must
+  # build without libclang (laplace-sample needs it: bridgestan runs bindgen).
+  # The runner images ship clang, so this builds in a bare Rust container;
+  # the first step fails if libclang ever appears there. A C compiler is
+  # needed (pest -> psm assembles one file), as for linking any Rust binary.
+  syntax-without-libclang:
+    runs-on: ubuntu-latest
+    container: rust:1-slim
+    steps:
+      - uses: actions/checkout@v4
+      - name: No libclang and no clang here
+        run: |
+          if ldconfig -p | grep -q libclang || command -v clang; then
+            echo "this job must run without libclang"; exit 1
+          fi
+      - run: cargo build -p laplace-sampler-syntax --locked
+      - run: cargo test -p laplace-sampler-syntax --locked

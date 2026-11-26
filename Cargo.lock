@@ -671,6 +671,7 @@ dependencies = [
  "bridgestan",
  "clap",
  "laplace",
+ "laplace-sampler-syntax",
  "nalgebra",
  "nuts-rs",
  "pest",
@@ -682,6 +683,18 @@ dependencies = [
  "sha2",
  "tempfile",
  "toml",
+]
+
+[[package]]
+name = "laplace-sampler-syntax"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "laplace",
+ "nalgebra",
+ "pest",
+ "pest_derive",
+ "tempfile",
 ]
 
 [[package]]

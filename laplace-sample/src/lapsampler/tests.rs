@@ -4,6 +4,7 @@ use std::path::Path;
 
 use super::*;
 use crate::blocks::parameters;
+use crate::libraries::Project;
 
 fn kernels_dir() -> String {
     format!("{}/kernels", env!("CARGO_MANIFEST_DIR"))

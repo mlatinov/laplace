@@ -6,7 +6,7 @@
 //! tuning declaration), so the doc never disagrees with the file.
 
 use super::ast::{Expr, ExprKind, Span, Stmt};
-use super::kernel::LapKernelFile;
+use super::file::LapKernelFile;
 
 /// One tuning value: its declaration (without the tag), its `@adapt` tag,
 /// and its `//@param` text.
@@ -180,7 +180,7 @@ mod tests {
 
     fn shipped(name: &str) -> LapKernelFile {
         LapKernelFile::load(std::path::Path::new(&format!(
-            "{}/kernels/{name}.lapkernel",
+            "{}/../laplace-sample/kernels/{name}.lapkernel",
             env!("CARGO_MANIFEST_DIR")
         )))
         .unwrap()

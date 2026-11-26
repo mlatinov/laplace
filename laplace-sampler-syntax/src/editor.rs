@@ -10,7 +10,7 @@
 //! `docs/sampler/lsp-integration.md`.
 //!
 //! ```
-//! use laplace_sample::editor::{check_lapkernel, Severity};
+//! use laplace_sampler_syntax::editor::{check_lapkernel, Severity};
 //! let ds = check_lapkernel("k.lapkernel", "kernel k {\n  step {\n    move(nope);\n  }\n}\n", None);
 //! assert_eq!(ds.len(), 1);
 //! assert_eq!((ds[0].line, ds[0].column, ds[0].severity), (3, 10, Severity::Error));
@@ -107,7 +107,7 @@ mod tests {
     fn a_kernel_that_checks_has_no_diagnostics() {
         let src = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/kernels/mala.lapkernel"
+            "/../laplace-sample/kernels/mala.lapkernel"
         ))
         .unwrap();
         assert_eq!(check_lapkernel("mala.lapkernel", &src, None), vec![]);
@@ -148,7 +148,8 @@ mod tests {
 
     #[test]
     fn sampler_diagnostics_need_no_model() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        // The shipped kernels are in laplace-sample/kernels.
+        let dir = &Path::new(env!("CARGO_MANIFEST_DIR")).join("../laplace-sample");
         let project = Project {
             dir: dir.to_path_buf(),
             cache_root: dir.join("no-cache"),

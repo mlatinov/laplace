@@ -12,6 +12,7 @@ use crate::csv::{
     adaptation_lines, block_columns, block_values, composite_values, sampler_values,
     single_block_values, Header, Writer,
 };
+use crate::lapsampler::SamplerRuntime;
 use crate::model;
 use crate::runner::{chain_rng, gq_seed, run_chain, Init, Sampler};
 use crate::target::{BridgeStanTarget, Target};
