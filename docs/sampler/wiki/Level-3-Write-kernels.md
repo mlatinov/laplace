@@ -55,7 +55,11 @@ kernel mala {
   `for (i in 1:n)`, `while`, `return`, and tuple destructuring
   `(real a, vector[dim] b) = f(...);`.
 - **Operators:** `+ - * / % ^`, the elementwise `.*` and `./`,
-  comparisons, `&&`, `||` and `!`. Indexing is 1-based, as in Stan.
+  comparisons, `&&`, `||` and `!`. Indexing is 1-based, as in Stan:
+  `v[i]` and `m[i, j]`, one element at a time. There are no arrays and no
+  slices. Keep K vectors as the columns of a `matrix[dim, K]` and move
+  them with `col(m, j)` and `m = set_col(m, j, v)` (also `row`, `set_row`,
+  `rows`, `cols`, `rep_matrix`).
 
 ### Ending a step
 
@@ -81,7 +85,7 @@ kernel mala {
 | `leapfrog(q, p, eps, steps, m)` | `steps` leapfrog steps with diagonal inverse metric `m`: `(q, p, lp, grad)` |
 | `std_normal_rng()`, `std_normal_rng(n)`, `normal_rng(mu, sigma)`, `uniform_rng(a, b)` | random numbers from the chain's stream |
 | `normal_lpdf(y \| mu, sigma)`, `std_normal_lpdf(y)` | log densities, with constants |
-| `exp`, `log`, `sqrt`, `log1p_exp`, `inv_logit`, `log_sum_exp`, `fmax`, `norm2`, `softmax`, ... | math: about 35 functions, elementwise on vectors where that makes sense, numerically safe forms only. Full list: [`docs/sampler/kernel-functions.md`](../kernel-functions.md) |
+| `exp`, `log`, `sqrt`, `log1p_exp`, `inv_logit`, `log_sum_exp`, `fmax`, `norm2`, `softmax`, ... | math and matrices: about 40 functions, elementwise on vectors where that makes sense, numerically safe forms only. Full list: [`docs/sampler/kernel-functions.md`](../kernel-functions.md) |
 
 `laplace sampler doc <kernel>` and the registry in
 `laplace-sample/src/lapkernel/builtins.rs` are the full reference. Each

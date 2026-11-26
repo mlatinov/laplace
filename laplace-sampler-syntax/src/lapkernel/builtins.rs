@@ -437,6 +437,25 @@ impl Registry {
             ("is_nan", &["int is_nan(real x)"],
                 "1 if x is NaN, else 0. A rejected or failed density evaluation can give NaN: \
                  test before using it", predicate_sig),
+            // ---- matrices ----------------------------------------------------
+            // A function cannot change its argument, so the `set_` forms
+            // return a new matrix: `m = set_col(m, j, v);`.
+            ("rep_matrix", &["matrix[r, c] rep_matrix(real x, int r, int c)"],
+                "matrix[r, c] with every element x", rep_matrix_sig),
+            ("rows", &["int rows(matrix m)", "int rows(vector v)"],
+                "number of rows of m; the size of a vector", rows_sig),
+            ("cols", &["int cols(matrix m)", "int cols(vector v)"],
+                "number of columns of m; 1 for a vector", cols_sig),
+            ("col", &["vector col(matrix m, int j)"],
+                "column j of m, as a vector of rows(m) elements", col_sig),
+            ("row", &["vector row(matrix m, int i)"],
+                "row i of m, as a vector of cols(m) elements (there is no row_vector type)", row_sig),
+            ("set_col", &["matrix set_col(matrix m, int j, vector v)"],
+                "a copy of m with column j replaced by v, which has rows(m) elements. \
+                 Assign it back: `m = set_col(m, j, v);`", set_col_sig),
+            ("set_row", &["matrix set_row(matrix m, int i, vector v)"],
+                "a copy of m with row i replaced by v, which has cols(m) elements. \
+                 Assign it back: `m = set_row(m, i, v);`", set_row_sig),
             // ---- constants ---------------------------------------------------
             ("pi", &["real pi()"], "π", constant_sig),
             ("e", &["real e()"], "Euler's number, exp(1)", constant_sig),
@@ -562,6 +581,110 @@ fn predicate_sig(a: &[Ty], _: &[Option<i64>], _: Option<usize>) -> Result<Ty, St
         [t] if t.is_scalar() => Ok(Ty::Int),
         _ => Err(bad_args("f(real x)", a)),
     }
+}
+
+fn rep_matrix_sig(a: &[Ty], k: &[Option<i64>], _: Option<usize>) -> Result<Ty, String> {
+    match a {
+        [x, Ty::Int, Ty::Int] if x.is_scalar() => {
+            Ok(Ty::Matrix(const_size(k[1])?, const_size(k[2])?))
+        }
+        _ => Err(bad_args("rep_matrix(real x, int r, int c)", a)),
+    }
+}
+
+fn rows_sig(a: &[Ty], _: &[Option<i64>], _: Option<usize>) -> Result<Ty, String> {
+    match a {
+        [Ty::Matrix(..)] | [Ty::Vector(_)] => Ok(Ty::Int),
+        _ => Err(bad_args("rows(matrix m) or rows(vector v)", a)),
+    }
+}
+
+fn cols_sig(a: &[Ty], _: &[Option<i64>], _: Option<usize>) -> Result<Ty, String> {
+    match a {
+        [Ty::Matrix(..)] | [Ty::Vector(_)] => Ok(Ty::Int),
+        _ => Err(bad_args("cols(matrix m) or cols(vector v)", a)),
+    }
+}
+
+/// Which line of a matrix `col`/`row`/`set_col`/`set_row` work on.
+#[derive(Clone, Copy)]
+enum Axis {
+    Row,
+    Col,
+}
+
+impl Axis {
+    fn word(self) -> &'static str {
+        match self {
+            Axis::Row => "row",
+            Axis::Col => "column",
+        }
+    }
+
+    /// For a `matrix[r, c]`: (elements in one line, number of lines).
+    fn sizes(self, r: Size, c: Size) -> (Size, Size) {
+        match self {
+            Axis::Col => (r, c),
+            Axis::Row => (c, r),
+        }
+    }
+
+    /// An index known when checking must be in range; any other is checked
+    /// when the kernel runs.
+    fn check_index(self, k: Option<i64>, count: Size) -> Result<(), String> {
+        match (k, count) {
+            (Some(i), Size::Known(n)) if i < 1 || i as usize > n => {
+                Err(format!("{} {i} is out of range 1..{n}", self.word()))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// `col(matrix[r, c] m, int j)` -> vector[r]; `row` -> vector[c].
+    fn get_sig(self, sig: &str, a: &[Ty], k: &[Option<i64>]) -> Result<Ty, String> {
+        match a {
+            [Ty::Matrix(r, c), Ty::Int] => {
+                let (len, count) = self.sizes(*r, *c);
+                self.check_index(k[1], count)?;
+                Ok(Ty::Vector(len))
+            }
+            _ => Err(bad_args(sig, a)),
+        }
+    }
+
+    /// `set_col(matrix[r, c] m, int j, vector[r] v)` -> matrix[r, c].
+    fn set_sig(self, sig: &str, a: &[Ty], k: &[Option<i64>]) -> Result<Ty, String> {
+        match a {
+            [Ty::Matrix(r, c), Ty::Int, Ty::Vector(n)] => {
+                let (len, count) = self.sizes(*r, *c);
+                self.check_index(k[1], count)?;
+                if !len.agrees(*n) {
+                    return Err(format!(
+                        "a {} of this matrix has {len} elements, the vector has {n}",
+                        self.word()
+                    ));
+                }
+                Ok(Ty::Matrix(*r, *c))
+            }
+            _ => Err(bad_args(sig, a)),
+        }
+    }
+}
+
+fn col_sig(a: &[Ty], k: &[Option<i64>], _: Option<usize>) -> Result<Ty, String> {
+    Axis::Col.get_sig("col(matrix m, int j)", a, k)
+}
+
+fn row_sig(a: &[Ty], k: &[Option<i64>], _: Option<usize>) -> Result<Ty, String> {
+    Axis::Row.get_sig("row(matrix m, int i)", a, k)
+}
+
+fn set_col_sig(a: &[Ty], k: &[Option<i64>], _: Option<usize>) -> Result<Ty, String> {
+    Axis::Col.set_sig("set_col(matrix m, int j, vector v)", a, k)
+}
+
+fn set_row_sig(a: &[Ty], k: &[Option<i64>], _: Option<usize>) -> Result<Ty, String> {
+    Axis::Row.set_sig("set_row(matrix m, int i, vector v)", a, k)
 }
 
 /// `f()` -> real.
@@ -726,6 +849,7 @@ mod tests {
                 "int" => Ty::Int,
                 "real" => Ty::Real,
                 "vector" => Ty::Vector(Size::Unknown),
+                "matrix" => Ty::Matrix(Size::Unknown, Size::Unknown),
                 other => panic!("unknown type `{other}` in a signature"),
             })
             .collect()
@@ -811,5 +935,71 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn rule(name: &str) -> SigFn {
+        match Registry::standard().get(name).map(|e| &e.kind) {
+            Some(Kind::Function { sig, .. }) => *sig,
+            _ => panic!("`{name}` is not a function"),
+        }
+    }
+
+    /// Matrix functions carry sizes through, and catch a wrong-length
+    /// vector or an out-of-range constant index when checking.
+    #[test]
+    fn matrix_type_rules() {
+        let m = Ty::Matrix(Size::Known(3), Size::Known(4));
+        let k = |xs: &[Option<i64>]| xs.to_vec();
+        assert_eq!(
+            rule("col")(&[m.clone(), Ty::Int], &k(&[None, None]), None),
+            Ok(Ty::Vector(Size::Known(3)))
+        );
+        assert_eq!(
+            rule("row")(&[m.clone(), Ty::Int], &k(&[None, Some(3)]), None),
+            Ok(Ty::Vector(Size::Known(4)))
+        );
+        assert!(
+            rule("col")(&[m.clone(), Ty::Int], &k(&[None, Some(5)]), None)
+                .unwrap_err()
+                .contains("column 5 is out of range 1..4")
+        );
+        assert!(rule("row")(&[m.clone(), Ty::Int], &k(&[None, Some(0)]), None).is_err());
+        assert!(rule("col")(&[m.clone(), Ty::Real], &k(&[None, None]), None).is_err());
+        assert_eq!(
+            rule("set_col")(
+                &[m.clone(), Ty::Int, Ty::Vector(Size::Known(3))],
+                &k(&[None, None, None]),
+                None
+            ),
+            Ok(m.clone())
+        );
+        assert!(rule("set_col")(
+            &[m.clone(), Ty::Int, Ty::Vector(Size::Known(4))],
+            &k(&[None, None, None]),
+            None
+        )
+        .unwrap_err()
+        .contains("a column of this matrix has 3 elements, the vector has 4"));
+        assert_eq!(
+            rule("set_row")(
+                &[m.clone(), Ty::Int, Ty::Vector(Size::Unknown)],
+                &k(&[None, None, None]),
+                None
+            ),
+            Ok(m.clone())
+        );
+        assert_eq!(
+            rule("rep_matrix")(
+                &[Ty::Int, Ty::Int, Ty::Int],
+                &k(&[Some(0), Some(2), None]),
+                None
+            ),
+            Ok(Ty::Matrix(Size::Known(2), Size::Unknown))
+        );
+        assert_eq!(
+            rule("rows")(std::slice::from_ref(&m), &k(&[None]), None),
+            Ok(Ty::Int)
+        );
+        assert!(rule("cols")(&[Ty::Real], &k(&[None]), None).is_err());
     }
 }
