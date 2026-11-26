@@ -523,3 +523,53 @@ fn runtime_errors_point_at_the_expression() {
         "t.lapkernel:2:12: normal_lpdf: normal_lpdf: sigma must be positive, got -1"
     );
 }
+
+#[test]
+fn matrix_columns_without_an_inner_loop() {
+    let (vars, _) = run(
+        "kernel k {
+           state { matrix[dim, 2] y; vector[dim] c2; vector[2] r1; int n; }
+           step {
+             for (j in 1:cols(y)) {
+               y = set_col(y, j, q + j);
+             }
+             c2 = col(y, 2);
+             r1 = row(y, 1);
+             n = rows(y) * 10 + cols(rep_matrix(0, 1, 4));
+             move(q);
+           } }",
+        1,
+        1,
+    );
+    let q = [0.2, 0.3, -0.4];
+    let col = |j: f64| q.iter().map(|x| x + j).collect::<Vec<_>>();
+    let Value::Matrix(y) = &vars[0] else { panic!() };
+    assert_eq!(y.column(0).iter().copied().collect::<Vec<_>>(), col(1.0));
+    assert_eq!(y.column(1).iter().copied().collect::<Vec<_>>(), col(2.0));
+    assert_eq!(vec_of(&vars[1]), col(2.0));
+    assert_eq!(vec_of(&vars[2]), vec![q[0] + 1.0, q[0] + 2.0]);
+    assert_eq!(vars[3], Value::Int(34));
+}
+
+#[test]
+fn matrix_function_mistakes() {
+    // a size known when checking is checked then
+    let k = parse(
+        "t.lapkernel",
+        "kernel k { step {\n  matrix[dim, 2] y;\n  y = set_col(y, 1, rep_vector(0, 2));\n  move(q);\n} }",
+    )
+    .unwrap();
+    let e = format!(
+        "{:?}",
+        check("t.lapkernel", &k, Some(3), &Registry::standard()).unwrap_err()
+    );
+    assert!(
+        e.contains("a column of this matrix has 3 elements, the vector has 2"),
+        "{e}"
+    );
+    // an index known only at run time is checked then
+    let e = run_err(
+        "kernel k { step {\n  matrix[dim, 2] y;\n  int j = 3;\n  vector[dim] c = col(y, j);\n  move(q);\n} }",
+    );
+    assert_eq!(e, "t.lapkernel:4:19: col: column 3 is out of range 1..2");
+}

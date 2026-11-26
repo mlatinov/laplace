@@ -10,7 +10,7 @@
 //! Terminal statements (`propose`, `move`) have none: the interpreter
 //! implements them.
 
-use nalgebra::DVector;
+use nalgebra::{DMatrix, DVector};
 use rand::RngExt;
 use rand_distr::StandardNormal;
 
@@ -307,6 +307,46 @@ impl Natives {
             ("is_nan", |_, a| {
                 Ok(Value::Int(real_arg(&a[0])?.is_nan() as i64))
             }),
+            // ---- matrices --------------------------------------------------------
+            ("rep_matrix", |_, a| {
+                let x = real_arg(&a[0])?;
+                let (r, c) = (size_arg(&a[1])?, size_arg(&a[2])?);
+                Ok(Value::Matrix(DMatrix::from_element(r, c, x)))
+            }),
+            ("rows", |_, a| match &a[0] {
+                Value::Matrix(m) => Ok(Value::Int(m.nrows() as i64)),
+                other => Ok(Value::Int(vec_arg(other)?.len() as i64)),
+            }),
+            ("cols", |_, a| match &a[0] {
+                Value::Matrix(m) => Ok(Value::Int(m.ncols() as i64)),
+                other => vec_arg(other).map(|_| Value::Int(1)),
+            }),
+            ("col", |_, a| {
+                let m = mat_arg(&a[0])?;
+                let j = line_index("column", &a[1], m.ncols())?;
+                Ok(Value::Vector(m.column(j).into_owned()))
+            }),
+            ("row", |_, a| {
+                let m = mat_arg(&a[0])?;
+                let i = line_index("row", &a[1], m.nrows())?;
+                Ok(Value::Vector(m.row(i).transpose()))
+            }),
+            ("set_col", |_, a| {
+                let mut m = mat_arg(&a[0])?.clone();
+                let j = line_index("column", &a[1], m.ncols())?;
+                let v = vec_arg(&a[2])?;
+                line_len("column", m.nrows(), v)?;
+                m.set_column(j, v);
+                Ok(Value::Matrix(m))
+            }),
+            ("set_row", |_, a| {
+                let mut m = mat_arg(&a[0])?.clone();
+                let i = line_index("row", &a[1], m.nrows())?;
+                let v = vec_arg(&a[2])?;
+                line_len("row", m.ncols(), v)?;
+                m.set_row(i, &v.transpose());
+                Ok(Value::Matrix(m))
+            }),
             // ---- constants -----------------------------------------------------
             ("pi", |_, _| Ok(Value::Real(std::f64::consts::PI))),
             ("e", |_, _| Ok(Value::Real(std::f64::consts::E))),
@@ -462,6 +502,37 @@ fn vec_arg(v: &Value) -> Result<&DVector<f64>, String> {
         .ok_or_else(|| format!("expected a vector, got {}", v.type_name()))
 }
 
+fn mat_arg(v: &Value) -> Result<&DMatrix<f64>, String> {
+    match v {
+        Value::Matrix(m) => Ok(m),
+        other => Err(format!("expected a matrix, got {}", other.type_name())),
+    }
+}
+
+/// 1-based row/column index -> 0-based, bounds-checked.
+fn line_index(what: &str, v: &Value, count: usize) -> Result<usize, String> {
+    let i = v
+        .as_int()
+        .ok_or_else(|| format!("the {what} index must be an int"))?;
+    if i >= 1 && (i as usize) <= count {
+        Ok(i as usize - 1)
+    } else {
+        Err(format!("{what} {i} is out of range 1..{count}"))
+    }
+}
+
+/// The vector written into a row/column must fill it exactly.
+fn line_len(what: &str, want: usize, v: &DVector<f64>) -> Result<(), String> {
+    if v.len() == want {
+        Ok(())
+    } else {
+        Err(format!(
+            "a {what} of this matrix has {want} elements, the vector has {}",
+            v.len()
+        ))
+    }
+}
+
 fn size_arg(v: &Value) -> Result<usize, String> {
     match v.as_int() {
         Some(n) if n >= 0 => Ok(n as usize),
@@ -615,6 +686,78 @@ mod tests {
         assert_eq!(e.as_slice(), &[0.0, 1.0]);
         assert_eq!(call("is_nan", &[Value::Real(f64::NAN)]).as_int(), Some(1));
         assert_eq!(call("is_inf", &[Value::Int(3)]).as_int(), Some(0));
+    }
+
+    #[test]
+    fn matrix_functions() {
+        let v = |xs: &[f64]| Value::Vector(DVector::from_column_slice(xs));
+        // 2 x 3, column-major: [1 3 5; 2 4 6]
+        let m = Value::Matrix(DMatrix::from_column_slice(
+            2,
+            3,
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        ));
+        let int = |x: Value| x.as_int().unwrap();
+        assert_eq!(int(call("rows", std::slice::from_ref(&m))), 2);
+        assert_eq!(int(call("cols", std::slice::from_ref(&m))), 3);
+        assert_eq!(int(call("rows", &[v(&[1.0, 2.0, 3.0])])), 3);
+        assert_eq!(int(call("cols", &[v(&[1.0, 2.0, 3.0])])), 1);
+        assert_eq!(call("col", &[m.clone(), Value::Int(2)]), v(&[3.0, 4.0]));
+        assert_eq!(
+            call("row", &[m.clone(), Value::Int(2)]),
+            v(&[2.0, 4.0, 6.0])
+        );
+        assert_eq!(
+            call("set_col", &[m.clone(), Value::Int(3), v(&[-1.0, -2.0])]),
+            Value::Matrix(DMatrix::from_column_slice(
+                2,
+                3,
+                &[1.0, 2.0, 3.0, 4.0, -1.0, -2.0]
+            ))
+        );
+        assert_eq!(
+            call("set_row", &[m.clone(), Value::Int(1), v(&[7.0, 8.0, 9.0])]),
+            Value::Matrix(DMatrix::from_column_slice(
+                2,
+                3,
+                &[7.0, 2.0, 8.0, 4.0, 9.0, 6.0]
+            ))
+        );
+        assert_eq!(
+            call("rep_matrix", &[Value::Int(0), Value::Int(2), Value::Int(1)]),
+            Value::Matrix(DMatrix::zeros(2, 1))
+        );
+    }
+
+    #[test]
+    fn matrix_functions_check_indices_and_lengths() {
+        let fail = |name: &str, args: &[Value]| {
+            let mut c = Ctx {
+                dim: 0,
+                state: None,
+                ev: None,
+                rng: None,
+                metric: None,
+            };
+            let Some(Native::Function(f)) = Natives::standard().get(name) else {
+                panic!()
+            };
+            f(&mut c, args).unwrap_err()
+        };
+        let m = Value::Matrix(DMatrix::zeros(2, 3));
+        let v2 = Value::Vector(DVector::zeros(2));
+        assert_eq!(
+            fail("col", &[m.clone(), Value::Int(4)]),
+            "column 4 is out of range 1..3"
+        );
+        assert_eq!(
+            fail("row", &[m.clone(), Value::Int(0)]),
+            "row 0 is out of range 1..2"
+        );
+        assert_eq!(
+            fail("set_row", &[m.clone(), Value::Int(1), v2]),
+            "a row of this matrix has 3 elements, the vector has 2"
+        );
     }
 
     #[test]

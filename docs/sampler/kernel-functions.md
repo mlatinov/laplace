@@ -86,6 +86,39 @@ These are unchanged. See `docs/sampler/wiki/Level-3-Write-kernels.md`.
 | `softmax(x)` | eˣ / Σ eˣ | `exp(x - max(x)) / sum`: never overflows |
 | `log_softmax(x)` | x − log_sum_exp(x) | finite where `softmax` underflows to 0 |
 
+## Matrices
+
+There are no arrays and no slices (`m[:, j]`) in a kernel. A set of K
+vectors is a `matrix[dim, K]`, one vector per column, and these functions
+move whole rows and columns in and out. Indexing is 1-based, and `m[i, j]`
+still reads or writes one element.
+
+A function cannot change its argument, so `set_col` and `set_row` return a
+new matrix. Assign it back:
+
+```lapkernel
+matrix[dim, K] y;
+for (j in 1:K) {
+  y = set_col(y, j, q + s .* std_normal_rng(dim));
+}
+vector[dim] y2 = col(y, 2);
+```
+
+| Function | Value | Notes |
+| --- | --- | --- |
+| `rep_matrix(x, r, c)` | `matrix[r, c]`, every element x | |
+| `rows(m)`, `cols(m)` | `int` | on a vector: its size, and 1 |
+| `col(m, j)` | column j, a `vector` of `rows(m)` elements | |
+| `row(m, i)` | row i, a `vector` of `cols(m)` elements | there is no `row_vector` type |
+| `set_col(m, j, v)` | m with column j replaced by v | v has `rows(m)` elements |
+| `set_row(m, i, v)` | m with row i replaced by v | v has `cols(m)` elements |
+
+A wrong-length `v`, or an index that is a constant and out of range, is an
+error when the kernel is checked. Any other index is checked when it runs.
+Each `set_` call copies the matrix: filling all K columns of a
+`matrix[dim, K]` costs O(dim·K²), which is negligible at the sizes a kernel
+works with.
+
 ## Checks and constants
 
 | Function | Value |
